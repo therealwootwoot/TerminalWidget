@@ -1198,3 +1198,106 @@ Describe "Phone push (v4.3)" {
         (New-PushRequest -Service "ntfy" -Title "x" -Message "y" -Topic $t) | Should -Not -BeNullOrEmpty
     }
 }
+
+# ==============================================================================
+# v4.4
+# ==============================================================================
+Describe "Terminal commands (v4.4)" {
+    It "parses <Text>" -TestCases @(
+        @{ Text = "nvda gp 1y"; Kind = "Ticker"; Ticker = "NVDA"; Func = "GP"; Rest = "1Y" },
+        @{ Text = "CAL"; Kind = "Global"; Ticker = ""; Func = "CAL"; Rest = "" },
+        @{ Text = "  SAP.DE  "; Kind = "Ticker"; Ticker = "SAP.DE"; Func = ""; Rest = "" },
+        @{ Text = "N"; Kind = "Global"; Ticker = ""; Func = "N"; Rest = "" },
+        @{ Text = "AAPL N"; Kind = "Ticker"; Ticker = "AAPL"; Func = "N"; Rest = "" },
+        @{ Text = "tf 3m"; Kind = "Global"; Ticker = ""; Func = "TF"; Rest = "3m" },
+        @{ Text = "^GSPC GP"; Kind = "Ticker"; Ticker = "^GSPC"; Func = "GP"; Rest = "" },
+        @{ Text = "NVDA ALRT >= 150"; Kind = "Ticker"; Ticker = "NVDA"; Func = "ALRT"; Rest = ">=,150" }
+    ) {
+        param($Text, $Kind, $Ticker, $Func, $Rest)
+        $r = ConvertFrom-TerminalCommand $Text
+        $r.Kind | Should -Be $Kind
+        $r.Ticker | Should -Be $Ticker
+        $r.Func | Should -Be $Func
+        (@($r.Args) -join ",") | Should -Be $Rest
+    }
+    It "reports errors" {
+        (ConvertFrom-TerminalCommand "GP").Kind | Should -Be "Error"
+        (ConvertFrom-TerminalCommand "NVDA XYZ").Kind | Should -Be "Error"
+        (ConvertFrom-TerminalCommand "NVDA PORT").Kind | Should -Be "Error"
+        (ConvertFrom-TerminalCommand "hallo welt!").Kind | Should -Be "Error"
+        (ConvertFrom-TerminalCommand "").Kind | Should -Be "Empty"
+    }
+    It "reads alert shorthand <A>" -TestCases @(
+        @{ A = ">=,150"; C = ">="; V = 150 }, @{ A = ">=150,5"; C = ">="; V = 150.5 }, @{ A = "TRAIL,8%"; C = "Trailing %"; V = 8 },
+        @{ A = "TAG-,3"; C = "Tag% <="; V = -3 }, @{ A = "EK+,20"; C = "EK% >="; V = 20 }, @{ A = "52H"; C = "52W Hoch"; V = 0 },
+        @{ A = "VOL,2x"; C = "Volumen x"; V = 2 }, @{ A = "SMA+"; C = "> SMA"; V = 0 }, @{ A = "DTAG-,2"; C = "Depot Tag% <="; V = -2 }
+    ) {
+        param($A, $C, $V)
+        $r = ConvertFrom-AlertShorthand -ArgList ($A -split ',', 2 | ForEach-Object { $_ } | Where-Object { $_ })
+        if ($A -eq ">=150,5") { $r = ConvertFrom-AlertShorthand -ArgList @(">=150,5") }
+        $r.Condition | Should -Be $C
+        [double]$r.Value | Should -Be $V
+    }
+    It "refuses unknown or incomplete alerts" {
+        ConvertFrom-AlertShorthand -ArgList @("FOO", "1") | Should -BeNullOrEmpty
+        ConvertFrom-AlertShorthand -ArgList @(">=") | Should -BeNullOrEmpty
+        ConvertFrom-AlertShorthand -ArgList @(">=", "abc") | Should -BeNullOrEmpty
+        ConvertFrom-AlertShorthand -ArgList @() | Should -BeNullOrEmpty
+    }
+    It "suggests globals, tickers and functions" {
+        $s = @(Get-CommandSuggestions -Text "" -Recent @("NVDA GP"))
+        $s[0].Text | Should -Be "NVDA GP"
+        @($s.Text) | Should -Contain "PORT"
+        @(Get-CommandSuggestions -Text "NV" -Tickers @("NVDA", "MSFT")).Text | Should -Contain "NVDA"
+        @(Get-CommandSuggestions -Text "NV" -Tickers @("NVDA", "MSFT")).Text | Should -Not -Contain "MSFT"
+        $f = @(Get-CommandSuggestions -Text "NVDA " -Max 30).Text
+        $f | Should -Contain "NVDA GP"
+        $f | Should -Contain "NVDA DES"
+        $f | Should -Not -Contain "NVDA PORT"
+        @(Get-CommandSuggestions -Text "NVDA D").Text -join "," | Should -Be "NVDA DES,NVDA DVD"
+        @(Get-CommandSuggestions -Text "TF 1").Text -join "," | Should -Be "TF 1D,TF 1M,TF 1Y"
+        @(Get-CommandSuggestions -Text "NVDA ALRT ").Text | Should -Contain "NVDA ALRT TRAIL 8"
+    }
+    It "keeps a recent list without duplicates" {
+        $r = Add-RecentCommand -Recent @("A GP", "CAL") -Command "cal"
+        ($r -join ",") | Should -Be "CAL,A GP"
+        @(Add-RecentCommand -Recent @(1..30 | ForEach-Object { "X$_" }) -Command "NEW").Count | Should -Be 20
+    }
+}
+
+Describe "News, calendar, polling, versions (v4.4)" {
+    It "reads Yahoo news, newest first" {
+        $j = '{"news":[{"title":"Alt","publisher":"P1","link":"https://a.example/1","providerPublishTime":1700000000,"relatedTickers":["NVDA"]},{"title":"Neu","publisher":"P2","link":"javascript:x","providerPublishTime":1700003600},{"publisher":"no title"}]}' | ConvertFrom-Json
+        $n = @(ConvertFrom-YahooNews $j)
+        $n.Count | Should -Be 2
+        $n[0].Title | Should -Be "Neu"
+        $n[0].Link | Should -Be ""
+        $n[1].Tickers[0] | Should -Be "NVDA"
+        @(ConvertFrom-YahooNews $null).Count | Should -Be 0
+    }
+    It "lists upcoming events in order" {
+        $ev = @{
+            "NVDA" = [PSCustomObject]@{ EarningsDate = "2026-12-01"; ExDividendDate = "2026-11-20"; DividendDate = "2026-12-05" }
+            "MSFT" = [PSCustomObject]@{ EarningsDate = "2026-11-25"; ExDividendDate = ""; DividendDate = "" }
+            "FAR"  = [PSCustomObject]@{ EarningsDate = "2027-06-01"; ExDividendDate = ""; DividendDate = "" }
+        }
+        $c = @(Get-EventCalendar -Events $ev -Symbols @("nvda", "MSFT", "FAR", "NONE") -AsOf "2026-11-23" -Days 60)
+        ($c | ForEach-Object { "{0} {1} {2}" -f $_.Date, $_.Ticker, $_.Kind }) -join "|" | Should -Be "2026-11-25 MSFT Quartalszahlen|2026-12-01 NVDA Quartalszahlen|2026-12-05 NVDA Zahltag"
+        $c[0].Days | Should -Be 2
+    }
+    It "skips polls only while every market is closed" {
+        $now = Get-Date
+        Test-ClosedPollSkip -States @("CLOSED", "CLOSED") -LastData $now.AddMinutes(-3) -ClosedMinutes 10 -Now $now | Should -BeTrue
+        Test-ClosedPollSkip -States @("CLOSED", "CLOSED") -LastData $now.AddMinutes(-11) -ClosedMinutes 10 -Now $now | Should -BeFalse
+        Test-ClosedPollSkip -States @("CLOSED", "OPEN24") -LastData $now -ClosedMinutes 10 -Now $now | Should -BeFalse
+        Test-ClosedPollSkip -States @("CLOSED") -LastData $now -ClosedMinutes 0 -Now $now | Should -BeFalse
+        Test-ClosedPollSkip -States @() -LastData $now -ClosedMinutes 10 -Now $now | Should -BeFalse
+    }
+    It "compares versions" {
+        Compare-AppVersion "4.3" "4.10" | Should -Be -1
+        Compare-AppVersion "v4.4" "4.4.0" | Should -Be 0
+        Compare-AppVersion "5.0" "4.9.9" | Should -Be 1
+        Get-LatestTagVersion ('[{"name":"v4.3"},{"name":"v4.10"},{"name":"test"},{"name":"v4.4.1"}]' | ConvertFrom-Json) | Should -Be "4.10"
+        Get-LatestTagVersion @() | Should -Be ""
+    }
+}
