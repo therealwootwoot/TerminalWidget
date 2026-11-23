@@ -1,0 +1,6 @@
+# Windows scripts are checked out with CRLF (Windows PowerShell 5.1 + cmd.exe).
+# The .ps1 files are UTF-8 WITH BOM - git keeps the BOM, editors must too.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.md   text eol=lf
+*.yml  text eol=lf

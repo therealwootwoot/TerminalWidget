@@ -1,0 +1,80 @@
+# Terminal Widget - tests on real Windows (PowerShell 5.1 and 7)
+# Put this file at .github/workflows/tests.yml in the repository; the widget
+# files are expected in the repository root.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pester:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]   # powershell = Windows PowerShell 5.1 (the launcher's host)
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse check (catches syntax the host does not know, e.g. ?? in 5.1)
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem -Filter *.ps1) {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($e in $errors) {
+              Write-Host "::error file=$($f.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $bad++
+            }
+          }
+          Write-Host "PowerShell $($PSVersionTable.PSVersion): $bad parse error(s)"
+          if ($bad -gt 0) { exit 1 }
+
+      - name: Encoding check (UTF-8 with BOM, needed by Windows PowerShell 5.1)
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem -Filter *.ps1) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) {
+              Write-Host "::error file=$($f.Name)::missing UTF-8 BOM"
+              $bad++
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: Install Pester 5
+        run: |
+          if ($PSVersionTable.PSVersion.Major -lt 6) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          }
+          Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run Pester
+        run: |
+          Import-Module Pester -MinimumVersion 5.5
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = '.\TerminalWidget.Core.Tests.ps1'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          $cfg.TestResult.Enabled = $true
+          $cfg.TestResult.OutputPath = 'testResults-${{ matrix.shell }}.xml'
+          Invoke-Pester -Configuration $cfg
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shell }}
+          path: testResults-${{ matrix.shell }}.xml
+
+      - name: PSScriptAnalyzer (errors only, informational)
+        if: matrix.shell == 'pwsh'
+        continue-on-error: true
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error | Format-Table -AutoSize | Out-String -Width 220

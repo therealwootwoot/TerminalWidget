@@ -1,0 +1,14 @@
+# Pester output (CI and local runs)
+testResults-*.xml
+testResults.xml
+
+# Never commit personal data: the widget keeps it in %LOCALAPPDATA%\TerminalWidget,
+# but in case someone copies it into the repo folder:
+config.json
+portfolio.json
+alerts.json
+transactions.json
+intraday_cache.json
+quote_cache.json
+widget.log*
+backups/
