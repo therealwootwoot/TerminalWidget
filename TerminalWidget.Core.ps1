@@ -2505,3 +2505,231 @@ function New-RandomTopic {
     $rng = New-Object System.Random
     return ("tw-" + (-join (1..12 | ForEach-Object { $chars[$rng.Next($chars.Length)] })))
 }
+
+# ==============================================================================
+# v4.4: terminal command line, news, event calendar, update check
+# ==============================================================================
+function Get-TerminalFunctions {
+    # Function words: Scope "G" = without ticker, "T" = after a ticker, "GT" = both
+    return [ordered]@{
+        "GP"     = @{ Scope = "T";  Desc = "Chart (optional Zeitraum: GP 1Y)" }
+        "DES"    = @{ Scope = "T";  Desc = "Beschreibung: Profil, Kennzahlen, Termine, Position" }
+        "N"      = @{ Scope = "GT"; Desc = "Nachrichten" }
+        "DVD"    = @{ Scope = "GT"; Desc = "Dividenden (ohne Ticker: Depot-Dividenden)" }
+        "EE"     = @{ Scope = "GT"; Desc = "Termine: Quartalszahlen, Ex-Tag, Zahltag" }
+        "ALRT"   = @{ Scope = "GT"; Desc = "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" }
+        "WL"     = @{ Scope = "T";  Desc = "Zur Watchlist hinzufügen" }
+        "CMP"    = @{ Scope = "GT"; Desc = "Vergleich im Chart (CMP ohne Ticker = aus)" }
+        "TX"     = @{ Scope = "GT"; Desc = "Transaktion erfassen / Historie" }
+        "PORT"   = @{ Scope = "G";  Desc = "Portfolio" }
+        "ANA"    = @{ Scope = "G";  Desc = "Portfolio-Analyse" }
+        "CAL"    = @{ Scope = "G";  Desc = "Terminkalender (Portfolio + Watchlist)" }
+        "TOP"    = @{ Scope = "G";  Desc = "Gewinner / Verlierer heute" }
+        "FX"     = @{ Scope = "G";  Desc = "Wechselkurse" }
+        "LOG"    = @{ Scope = "G";  Desc = "Alarm-Verlauf" }
+        "REP"    = @{ Scope = "G";  Desc = "Jahresreport" }
+        "TF"     = @{ Scope = "G";  Desc = "Zeitraum: TF 1D / 5D / 1M / 3M / 6M / 1Y" }
+        "LAYOUT" = @{ Scope = "G";  Desc = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER" }
+        "THEME"  = @{ Scope = "G";  Desc = "Theme wechseln (THEME <Name>)" }
+        "SET"    = @{ Scope = "G";  Desc = "Einstellungen" }
+        "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
+        "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
+        "HELP"   = @{ Scope = "G";  Desc = "Tastenkürzel und Befehle" }
+        "ABOUT"  = @{ Scope = "G";  Desc = "Version, Pfade, Update-Prüfung" }
+    }
+}
+
+function ConvertFrom-TerminalCommand {
+    # "NVDA GP 1Y" -> @{ Kind = "Ticker"; Ticker = "NVDA"; Func = "GP"; Args = @("1Y") }
+    # "CAL"        -> @{ Kind = "Global"; Func = "CAL" }
+    # "NVDA"       -> @{ Kind = "Ticker"; Ticker = "NVDA"; Func = "" }
+    param([string]$Text)
+    $r = @{ Kind = "Empty"; Ticker = ""; Func = ""; Args = @(); Error = "" }
+    $tok = @(([string]$Text).Trim() -split '\s+' | Where-Object { $_ })
+    if ($tok.Count -eq 0) { return $r }
+    $fn = Get-TerminalFunctions
+    $t0 = $tok[0].ToUpperInvariant()
+    if ($fn.Contains($t0) -and $fn[$t0].Scope -like "*G*") {
+        $r.Kind = "Global"; $r.Func = $t0
+        $r.Args = @($tok | Select-Object -Skip 1)
+        return $r
+    }
+    if ($fn.Contains($t0)) { $r.Kind = "Error"; $r.Error = "$t0 braucht einen Ticker davor, z. B. NVDA $t0"; return $r }
+    if ($t0 -notmatch '^[A-Z0-9\^][A-Z0-9\.\-=\^]{0,19}$') { $r.Kind = "Error"; $r.Error = "Unbekannter Befehl oder Ticker: $($tok[0])"; return $r }
+    $r.Kind = "Ticker"; $r.Ticker = $t0
+    if ($tok.Count -ge 2) {
+        $t1 = $tok[1].ToUpperInvariant()
+        if (-not $fn.Contains($t1) -or $fn[$t1].Scope -notlike "*T*") { $r.Kind = "Error"; $r.Error = "Unbekannte Funktion '$($tok[1])' - nach dem Ticker z. B. GP, DES, N, DVD, EE, ALRT, WL"; return $r }
+        $r.Func = $t1
+        $r.Args = @($tok | Select-Object -Skip 2)
+    }
+    return $r
+}
+
+function ConvertFrom-AlertShorthand {
+    # "ALRT" arguments -> @{ Condition; Value } or $null
+    #   >= 150 | <= 150 | TAG+ 3 | TAG- 3 | RSI+ 70 | RSI- 30 | SMA+ | SMA- | TRAIL 8
+    #   EK+ 20 | EK- 10 | 52H [1] | 52L [1] | VOL 2 | DEPOT>= 50000 | DEPOT<= | DTAG+ 2 | DTAG- 2
+    param([string[]]$ArgList)
+    $a = @($ArgList | Where-Object { $_ })
+    if ($a.Count -eq 0) { return $null }
+    $k = $a[0].ToUpperInvariant()
+    $vRaw = if ($a.Count -ge 2) { $a[1] } else { "" }
+    if ($k -match '^(>=|<=)(.+)$') { $k = $Matches[1]; $vRaw = $Matches[2] }
+    $map = @{
+        ">=" = ">="; "<=" = "<="; "TAG+" = "Tag% >="; "TAG-" = "Tag% <="; "RSI+" = "RSI >="; "RSI-" = "RSI <="
+        "SMA+" = "> SMA"; "SMA-" = "< SMA"; "TRAIL" = "Trailing %"; "EK+" = "EK% >="; "EK-" = "EK% <="
+        "52H" = "52W Hoch"; "52L" = "52W Tief"; "VOL" = "Volumen x"
+        "DEPOT>=" = "Depot >="; "DEPOT<=" = "Depot <="; "DTAG+" = "Depot Tag% >="; "DTAG-" = "Depot Tag% <="
+    }
+    if (-not $map.ContainsKey($k)) { return $null }
+    $cond = $map[$k]
+    $kind = Get-AlertKind $cond
+    $v = 0.0
+    if ($kind -eq "SMA") { return @{ Condition = $cond; Value = 0.0 } }
+    if (-not $vRaw) {
+        if ($kind -in @("HIGH52", "LOW52")) { return @{ Condition = $cond; Value = 0.0 } }
+        return $null
+    }
+    $norm = ([string]$vRaw).Trim().Replace(",", ".").TrimEnd('%', 'x', 'X')
+    if (-not [double]::TryParse($norm, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $null }
+    if ($kind -in @("PCT", "PFPCT", "EKPCT") -and $k -match '-$') { $v = -[math]::Abs($v) }
+    return @{ Condition = $cond; Value = $v }
+}
+
+function Get-CommandSuggestions {
+    # Autocomplete: @(@{ Text; Desc }) for what has been typed so far
+    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12)
+    $out = New-Object System.Collections.Generic.List[PSObject]
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $add = {
+        param([string]$T, [string]$D)
+        if ($out.Count -lt $Max -and $seen.Add($T)) { $out.Add([PSCustomObject]@{ Text = $T; Desc = $D }) }
+    }
+    $fn = Get-TerminalFunctions
+    $raw = [string]$Text
+    $tx = $raw.TrimStart().ToUpperInvariant()
+    $tok = @($tx -split '\s+' | Where-Object { $_ })
+    $endsSpace = $raw.EndsWith(" ")
+    if ($tok.Count -eq 0) {
+        foreach ($r in @($Recent)) { & $add ([string]$r) "zuletzt" }
+        foreach ($k in $fn.Keys) { if ($fn[$k].Scope -like "*G*") { & $add $k $fn[$k].Desc } }
+        return $out.ToArray()
+    }
+    if ($tok.Count -eq 1 -and -not $endsSpace) {
+        foreach ($r in @($Recent)) { if (([string]$r).ToUpperInvariant().StartsWith($tx)) { & $add ([string]$r) "zuletzt" } }
+        foreach ($k in $fn.Keys) { if ($k.StartsWith($tx) -and $fn[$k].Scope -like "*G*") { & $add $k $fn[$k].Desc } }
+        foreach ($t in @($Tickers)) { if (([string]$t).ToUpperInvariant().StartsWith($tx)) { & $add ([string]$t).ToUpperInvariant() "Ticker öffnen" } }
+        return $out.ToArray()
+    }
+    $first = $tok[0]
+    if ($fn.Contains($first) -and $fn[$first].Scope -like "*G*") {
+        $opts = switch ($first) {
+            "TF"     { @("1D", "5D", "1M", "3M", "6M", "1Y") }
+            "LAYOUT" { @("TERMINAL", "STANDARD", "COMPACT", "TICKER") }
+            "ALRT"   { @() }
+            default  { @() }
+        }
+        $part = if ($tok.Count -ge 2 -and -not $endsSpace) { $tok[1] } else { "" }
+        foreach ($o in $opts) { if ($o.StartsWith($part)) { & $add ("{0} {1}" -f $first, $o) $fn[$first].Desc } }
+        return $out.ToArray()
+    }
+    # ticker + function
+    $part = if ($tok.Count -ge 2 -and -not $endsSpace) { $tok[1] } else { "" }
+    if ($tok.Count -eq 1 -or ($tok.Count -eq 2 -and -not $endsSpace)) {
+        foreach ($k in $fn.Keys) { if ($fn[$k].Scope -like "*T*" -and $k.StartsWith($part)) { & $add ("{0} {1}" -f $first, $k) $fn[$k].Desc } }
+    }
+    if ($tok.Count -ge 2 -and $tok[1] -eq "ALRT") {
+        foreach ($ex in @(">= ", "<= ", "TRAIL 8", "TAG- 3", "TAG+ 3", "EK+ 20", "EK- 10", "52H", "52L", "VOL 2", "RSI+ 70", "RSI- 30", "SMA+", "SMA-")) {
+            & $add ("{0} ALRT {1}" -f $first, $ex).TrimEnd() "Alarm"
+        }
+    }
+    if ($tok.Count -ge 2 -and $tok[1] -eq "GP") {
+        foreach ($o in @("1D", "5D", "1M", "3M", "6M", "1Y")) { & $add ("{0} GP {1}" -f $first, $o) "Chart" }
+    }
+    return $out.ToArray()
+}
+
+function Add-RecentCommand {
+    param([string[]]$Recent, [string]$Command, [int]$Max = 20)
+    $c = ([string]$Command).Trim().ToUpperInvariant()
+    if (-not $c) { return @($Recent) }
+    $list = @($c) + @(@($Recent) | Where-Object { $_ -and ([string]$_).ToUpperInvariant() -ne $c })
+    return @($list | Select-Object -First $Max)
+}
+
+function ConvertFrom-YahooNews {
+    # v1/finance/search news -> @(@{ Title; Publisher; Link; Time (DateTime local); Tickers })
+    param($Json)
+    $out = @()
+    if ($null -eq $Json -or $null -eq $Json.news) { return $out }
+    foreach ($n in @($Json.news)) {
+        if ($null -eq $n -or -not $n.title) { continue }
+        $link = [string]$n.link
+        if ($link -notmatch '^https?://') { $link = "" }
+        $t = [DateTime]::MinValue
+        if ($null -ne $n.providerPublishTime) { try { $t = [DateTimeOffset]::FromUnixTimeSeconds([long]$n.providerPublishTime).LocalDateTime } catch { } }
+        $out += [PSCustomObject]@{
+            Title = [string]$n.title; Publisher = [string]$n.publisher; Link = $link; Time = $t
+            Tickers = @(@($n.relatedTickers) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        }
+    }
+    return @($out | Sort-Object -Property Time -Descending)
+}
+
+function Get-EventCalendar {
+    # Upcoming dates from the event store: @(@{ Date; Ticker; Kind; Days })
+    param([hashtable]$Events, [string[]]$Symbols, [string]$AsOf = "", [int]$Days = 60)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $end = $now.AddDays($Days)
+    $out = @()
+    foreach ($s in @($Symbols | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpperInvariant() } | Sort-Object -Unique)) {
+        $e = $Events[$s]
+        if ($null -eq $e) { continue }
+        foreach ($pair in @(@("EarningsDate", "Quartalszahlen"), @("ExDividendDate", "Ex-Tag"), @("DividendDate", "Zahltag"))) {
+            $v = [string]$e.($pair[0])
+            if (-not $v) { continue }
+            $d = [DateTime]::MinValue
+            if (-not [DateTime]::TryParseExact($v, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { continue }
+            if ($d -lt $now -or $d -gt $end) { continue }
+            $out += [PSCustomObject]@{ Date = $v; Ticker = $s; Kind = $pair[1]; Days = [int]($d - $now).TotalDays }
+        }
+    }
+    return @($out | Sort-Object -Property @{ Expression = { $_.Date } }, @{ Expression = { $_.Ticker } })
+}
+
+function Test-ClosedPollSkip {
+    # Poll less while every market of interest is closed: $true = skip this poll
+    param([string[]]$States, [DateTime]$LastData, [int]$ClosedMinutes, [DateTime]$Now = (Get-Date))
+    if ($ClosedMinutes -le 0 -or @($States).Count -eq 0) { return $false }
+    foreach ($s in @($States)) { if ($s -ne "CLOSED") { return $false } }
+    return (($Now - $LastData).TotalMinutes -lt $ClosedMinutes)
+}
+
+function Compare-AppVersion {
+    # -1 / 0 / 1 for "4.3" vs "4.10", "v4.4.1" ...
+    param([string]$A, [string]$B)
+    $pa = @(([string]$A).TrimStart('v', 'V') -split '\.' | ForEach-Object { $n = 0; [void][int]::TryParse($_, [ref]$n); $n })
+    $pb = @(([string]$B).TrimStart('v', 'V') -split '\.' | ForEach-Object { $n = 0; [void][int]::TryParse($_, [ref]$n); $n })
+    for ($i = 0; $i -lt [math]::Max($pa.Count, $pb.Count); $i++) {
+        $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+        $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    return 0
+}
+
+function Get-LatestTagVersion {
+    # GitHub /tags response -> highest "vX.Y[.Z]" (without the v), "" if none
+    param($Json)
+    $best = ""
+    foreach ($t in @($Json)) {
+        $n = [string]$t.name
+        if ($n -notmatch '^v?\d+(\.\d+){1,2}$') { continue }
+        $v = $n.TrimStart('v', 'V')
+        if (-not $best -or (Compare-AppVersion $v $best) -gt 0) { $best = $v }
+    }
+    return $best
+}
