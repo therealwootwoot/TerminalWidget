@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.2"
+$script:AppVersion    = "4.3"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -431,7 +431,7 @@ function Backup-DataFiles {
     # Returns the backup folder, or "" when there was nothing to copy / it failed.
     param([string]$Reason = "manuell")
     try {
-        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json") |
+        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json", "alert-log.json") |
             ForEach-Object { Join-Path $script:DataDir $_ } | Where-Object { Test-Path $_ })
         if ($files.Count -eq 0) { return "" }
         $safe = ($Reason -replace '[^A-Za-z0-9_.-]', '_')
@@ -467,6 +467,16 @@ $defaultConfig = [PSCustomObject]@{
     ShowExtended          = $true
     NotifyMarketOpen      = $true
     NotifyEarnings        = $true
+    # v4.3: phone push + quiet hours
+    PushService           = "Aus"
+    PushServer            = "https://ntfy.sh"
+    PushTopic             = ""
+    PushTokenEnc          = ""
+    PushChatId            = ""
+    PushAlerts            = $true
+    PushEarnings          = $false
+    QuietFrom             = ""
+    QuietTo               = ""
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -609,6 +619,22 @@ foreach ($a in $rawAlerts) {
             Note        = if ($a.Note) { [string]$a.Note } else { "" }
             RearmMin    = [int]$a.RearmMin
             TriggeredAt = if ($a.TriggeredAt) { [string]$a.TriggeredAt } else { "" }
+            # v4.3: expiry date, trailing high (0 = not yet known), push per alert
+            ExpiresAt   = if ($a.ExpiresAt) { [string]$a.ExpiresAt } else { "" }
+            Peak        = $(if ($null -ne $a.Peak) { [double]$a.Peak } else { 0.0 })
+            Push        = if ($null -ne $a.Push) { [bool]$a.Push } else { $true }
+        })
+    }
+}
+
+# Alert history (v4.3): every hit with value and push status, last 500
+$script:AlertLogPath = Join-Path $script:DataDir "alert-log.json"
+$script:AlertLog = New-Object System.Collections.Generic.List[PSObject]
+foreach ($e in @(Load-JsonState -Path $script:AlertLogPath -DefaultValue @())) {
+    if ($null -ne $e -and $e.At) {
+        $script:AlertLog.Add([PSCustomObject]@{
+            At = [string]$e.At; Ticker = [string]$e.Ticker; Condition = [string]$e.Condition
+            Text = [string]$e.Text; Note = [string]$e.Note; Push = [string]$e.Push
         })
     }
 }
@@ -1541,13 +1567,20 @@ function Get-QuoteTiers {
     [void]$prio.Add($active)
     foreach ($p in $script:Portfolio.Keys) { [void]$prio.Add($p.ToUpper()) }
     # (re-arming alerts need fresh data too, even while triggered)
-    foreach ($a in $script:Alerts) { if (-not $a.Triggered -or [int]$a.RearmMin -gt 0) { [void]$prio.Add($a.Ticker.ToUpper()) } }
+    foreach ($a in $script:Alerts) {
+        # v4.3: portfolio alerts ("DEPOT") have no symbol of their own; expired ones rest
+        if ((Test-PortfolioAlertKind (Get-AlertKind $a.Condition)) -or (Test-AlertExpired -Alert $a)) { continue }
+        if (-not $a.Triggered -or [int]$a.RearmMin -gt 0) { [void]$prio.Add($a.Ticker.ToUpper()) }
+    }
     $slow = New-Object System.Collections.Generic.HashSet[string]
     foreach ($w in $script:Config.Watchlist) {
         $u = $w.ToUpper()
         if (-not $prio.Contains($u)) { [void]$slow.Add($u) }
     }
-    foreach ($a in $script:Alerts) { $u = $a.Ticker.ToUpper(); if (-not $prio.Contains($u)) { [void]$slow.Add($u) } }
+    foreach ($a in $script:Alerts) {
+        if (Test-PortfolioAlertKind (Get-AlertKind $a.Condition)) { continue }
+        $u = $a.Ticker.ToUpper(); if (-not $prio.Contains($u)) { [void]$slow.Add($u) }
+    }
     return @{ Prio = $prio; Slow = $slow }
 }
 
@@ -1642,7 +1675,7 @@ function New-RefreshPlan {
     foreach ($p in $script:Portfolio.Values) { [void]$fxNeeded.Add([string]$p.Currency) }
     # (percent alerts store "%" as currency - not an FX symbol)
     # (only price alerts carry a real currency; "%", "RSI", "SMA" are markers)
-    foreach ($a in $script:Alerts) { if ((Get-AlertKind $a.Condition) -eq "PRICE" -and [string]$a.Currency -match '^[A-Z]{3}$') { [void]$fxNeeded.Add([string]$a.Currency) } }
+    foreach ($a in $script:Alerts) { if ((Get-AlertKind $a.Condition) -in @("PRICE", "TRAIL", "EKPCT", "PFVAL") -and [string]$a.Currency -match '^[A-Z]{3}$') { [void]$fxNeeded.Add([string]$a.Currency) } }
     foreach ($c in $script:FxMissing) { [void]$fxNeeded.Add($c) }
     [void]$fxNeeded.Remove("EUR")
 
@@ -1765,6 +1798,24 @@ function Update-QuoteFromResult {
         }
     }
     $extPct = if ($extPrice -gt 0 -and $price -gt 0) { (($extPrice - $price) / $price) * 100.0 } else { 0.0 }
+
+    # v4.3: relative volume (today vs. previous days at the same time, regular session)
+    $relVol = [double]::NaN
+    try {
+        $q0 = if ($null -ne $R.indicators -and $null -ne $R.indicators.quote -and @($R.indicators.quote).Count -gt 0) { $R.indicators.quote[0] } else { $null }
+        if ($null -ne $q0 -and $null -ne $q0.volume -and $null -ne $R.timestamp) {
+            $vTs = New-Object System.Collections.Generic.List[long]
+            $vVo = New-Object System.Collections.Generic.List[double]
+            $tsA = @($R.timestamp); $voA = @($q0.volume)
+            for ($k = 0; $k -lt [math]::Min($tsA.Count, $voA.Count); $k++) {
+                if ($null -ne $voA[$k] -and [double]$voA[$k] -gt 0 -and (Get-BarSession -TsSec ([long]$tsA[$k]) -Tp $tp) -eq "R") {
+                    $vTs.Add([long]$tsA[$k]); $vVo.Add([double]$voA[$k])
+                }
+            }
+            $off = if ($null -ne $tp) { [int]$tp.GmtOffset } else { 0 }
+            if ($vTs.Count -gt 1) { $relVol = Get-RelativeVolume -Ts $vTs.ToArray() -Vol $vVo.ToArray() -GmtOffset $off }
+        }
+    } catch { $relVol = [double]::NaN }
     if ($price -gt 0 -and ($sparkList.Count -eq 0 -or [math]::Abs($sparkList[$sparkList.Count - 1] - $price) -gt 0.00001)) {
         $sparkList.Add($price)
     }
@@ -1797,6 +1848,7 @@ function Update-QuoteFromResult {
         ExtPct     = $extPct
         ExtSession = $extSess
         ExtTs      = $extTs
+        RelVol     = $relVol
         Tp         = $tp
         Meta       = (New-MetaLite $meta)
         UpdatedAt  = (Get-Date)
@@ -3021,6 +3073,12 @@ function Get-ChartLevels {
         }
     }
     foreach ($a in $script:Alerts) {
+        # v4.3: trailing stop = current stop price as a line
+        if ($a.Ticker -eq $sym -and (Get-AlertKind $a.Condition) -eq "TRAIL" -and [double]$a.Peak -gt 0 -and [string]$a.Currency -match '^[A-Z]{3}$') {
+            $lv = Convert-CurrencyValue -Amount ([double]$a.Peak * (1.0 - [double]$a.TargetPrice / 100.0)) -FromCurrency $a.Currency -ToCurrency $curr
+            $out += [PSCustomObject]@{ Price = $lv; Label = ("Trailing-Stopp {0:N2}" -f $lv); Kind = "AL"; Hit = [bool]$a.Triggered }
+            continue
+        }
         if ($a.Ticker -ne $sym -or (Get-AlertKind $a.Condition) -ne "PRICE") { continue }
         $lv = Convert-CurrencyValue -Amount $a.TargetPrice -FromCurrency $a.Currency -ToCurrency $curr
         $out += [PSCustomObject]@{ Price = $lv; Label = ("Alarm {0} {1:N2}" -f $a.Condition, $lv); Kind = "AL"; Hit = [bool]$a.Triggered }
@@ -4586,11 +4644,20 @@ $dgvWatchlist.Add_CellPainting($script:SparkCellPainter)
 
 $lblAlTitle = New-Object System.Windows.Forms.Label
 $lblAlTitle.Location = New-Object System.Drawing.Point((S 496), (S 8))
-$lblAlTitle.Size = New-Object System.Drawing.Size((S 252), (S 20))
+$lblAlTitle.Size = New-Object System.Drawing.Size((S 168), (S 20))
 $lblAlTitle.Font = $fontUiBold
 $lblAlTitle.ForeColor = $script:Pal.Accent
 $lblAlTitle.Text = "Alarme (Doppelklick = Reset)"
 $viewWatch.Controls.Add($lblAlTitle)
+
+# v4.3: history of fired alerts
+$btnAlertLog = New-Object System.Windows.Forms.Button
+$btnAlertLog.Location = New-Object System.Drawing.Point((S 668), (S 5))
+$btnAlertLog.Size = New-Object System.Drawing.Size((S 80), (S 24))
+Style-FlatButton -Btn $btnAlertLog -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnAlertLog.Text = "Verlauf"
+$viewWatch.Controls.Add($btnAlertLog)
+Set-Tip $btnAlertLog "Ausgelöste Alarme mit Zeit, Wert und Push-Status" "ALERTLOG"
 
 $txtAlertTicker = New-Object System.Windows.Forms.TextBox
 $txtAlertTicker.Location = New-Object System.Drawing.Point((S 496), (S 36))
@@ -4615,7 +4682,8 @@ $cmbAlertCond.Font = $fontMono
 $script:AlertConditions = @(Get-AlertConditions)
 foreach ($ac in $script:AlertConditions) { [void]$cmbAlertCond.Items.Add($ac) }
 $cmbAlertCond.SelectedIndex = 0
-$cmbAlertCond.DropDownWidth = S 90
+$cmbAlertCond.DropDownWidth = S 130
+$cmbAlertCond.MaxDropDownItems = 18
 $viewWatch.Controls.Add($cmbAlertCond)
 Set-Tip $cmbAlertCond "Wann soll der Alarm auslösen?" "ALERTCOND"
 
@@ -4649,7 +4717,7 @@ Set-Tip $btnDelAlert "Markierten Alarm löschen (Entf in der Liste)"
 # Row 2: note + automatic re-arm
 $txtAlertNote = New-Object System.Windows.Forms.TextBox
 $txtAlertNote.Location = New-Object System.Drawing.Point((S 496), (S 66))
-$txtAlertNote.Size = New-Object System.Drawing.Size((S 168), (S 24))
+$txtAlertNote.Size = New-Object System.Drawing.Size((S 96), (S 24))
 $txtAlertNote.BackColor = $script:Pal.Input
 $txtAlertNote.ForeColor = $script:Pal.Text
 $txtAlertNote.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
@@ -4657,6 +4725,22 @@ $txtAlertNote.Font = $fontMono
 $txtAlertNote.MaxLength = 60
 $viewWatch.Controls.Add($txtAlertNote)
 Set-Tip $txtAlertNote "Notiz zum Alarm (optional, erscheint im Hinweis)"
+
+# v4.3: expiry
+$cmbAlertExp = New-Object System.Windows.Forms.ComboBox
+$cmbAlertExp.Location = New-Object System.Drawing.Point((S 596), (S 66))
+$cmbAlertExp.Size = New-Object System.Drawing.Size((S 68), (S 24))
+$cmbAlertExp.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cmbAlertExp.BackColor = $script:Pal.Input
+$cmbAlertExp.ForeColor = $script:Pal.Text
+$cmbAlertExp.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbAlertExp.Font = $fontMono
+$cmbAlertExp.DropDownWidth = S 100
+$script:AlertExpiryChoices = Get-AlertExpiryChoices
+foreach ($ek in $script:AlertExpiryChoices.Keys) { [void]$cmbAlertExp.Items.Add($ek) }
+$cmbAlertExp.SelectedIndex = 0
+$viewWatch.Controls.Add($cmbAlertExp)
+Set-Tip $cmbAlertExp "Gültig bis: danach wird der Alarm nicht mehr geprüft" "EXPIRY"
 
 $cmbAlertRearm = New-Object System.Windows.Forms.ComboBox
 $cmbAlertRearm.Location = New-Object System.Drawing.Point((S 668), (S 66))
@@ -4707,7 +4791,7 @@ $btnPortAna.Anchor  = $aT -bor $aR
 
 # Watchlist view: list grows, alarm column keeps its width on the right
 $dgvWatchlist.Anchor = $anchorAll
-foreach ($ctl in @($lblAlTitle, $txtAlertTicker, $cmbAlertCond, $txtAlertPrice, $btnAddAlert, $btnDelAlert, $txtAlertNote, $cmbAlertRearm)) { $ctl.Anchor = $aT -bor $aR }
+foreach ($ctl in @($lblAlTitle, $btnAlertLog, $txtAlertTicker, $cmbAlertCond, $txtAlertPrice, $btnAddAlert, $btnDelAlert, $txtAlertNote, $cmbAlertExp, $cmbAlertRearm)) { $ctl.Anchor = $aT -bor $aR }
 $lstAlerts.Anchor = $aT -bor $aB -bor $aR
 
 # Columns stretch with the grid; design widths are the minimum (no more "55.772,28...")
@@ -5527,68 +5611,92 @@ function Refresh-WatchlistAndAlerts {
 
 
 
+function Get-PortfolioDayTotals {
+    # Value and day change of the whole portfolio in $Currency from live
+    # quotes; Ok = $false while a position has no live quote yet
+    param([string]$Currency)
+    $res = @{ Ok = $false; Value = 0.0; Prev = 0.0; DayPct = [double]::NaN }
+    foreach ($k in @($script:Portfolio.Keys)) {
+        $pf = $script:Portfolio[$k]
+        $sh = [double]$pf.Shares
+        if ($sh -le 0) { continue }
+        $q = $script:QuoteStore[([string]$k).ToUpper()]
+        if ($null -eq $q -or [bool]$q.FromCache -or [double]$q.Price -le 0) { return $res }
+        $res.Value += $sh * (Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $Currency)
+        $pc = if ([double]$q.PrevClose -gt 0) { [double]$q.PrevClose } else { [double]$q.Price }
+        $res.Prev += $sh * (Convert-CurrencyValue -Amount $pc -FromCurrency ([string]$q.Currency) -ToCurrency $Currency)
+    }
+    if ($res.Prev -gt 0) { $res.DayPct = ($res.Value / $res.Prev - 1.0) * 100.0 }
+    $res.Ok = ($res.Value -gt 0)
+    return $res
+}
+
 function Get-AlertState {
-    # Current value of what an alert watches + whether its condition is met.
-    # Ok = $false when there is no data (yet) for the ticker.
+    # Current value of what an alert watches + whether its condition is met
+    # (v4.3: the check itself is Get-AlertEvaluation in Core). Ok = $false
+    # when there is no live data (yet).
     param($Alert)
-    $res = @{ Ok = $false; Value = [double]::NaN; Met = $false; Text = "" }
-    if (-not $script:QuoteStore.ContainsKey($Alert.Ticker)) { return $res }
+    $none = @{ Ok = $false; Value = [double]::NaN; Met = $false; Text = ""; Peak = [double]::NaN }
+    $kind = Get-AlertKind ([string]$Alert.Condition)
+    $ctx = @{ RsiPeriod = [double]$script:Config.RsiPeriod; SmaPeriod = [double]$script:Config.SmaFastPeriod }
+    if (Test-PortfolioAlertKind $kind) {
+        $pt = Get-PortfolioDayTotals -Currency ([string]$Alert.Currency)
+        if (-not $pt.Ok) { return $none }
+        $ctx.PfValue = $pt.Value
+        $ctx.PfDayPct = $pt.DayPct
+        return (Get-AlertEvaluation -Alert $Alert -Ctx $ctx)
+    }
+    if (-not $script:QuoteStore.ContainsKey($Alert.Ticker)) { return $none }
     $q = $script:QuoteStore[$Alert.Ticker]
     # v4.0: never fire on a cached quote from the last session
-    if ([bool]$q.FromCache) { return $res }
-    $cond = [string]$Alert.Condition
-    switch (Get-AlertKind $cond) {
-        "PCT" {
-            $v = [double]$q.ChangePct
-            $op = $cond.Substring(4).Trim()
-            $res.Ok = $true; $res.Value = $v
-            $res.Met = ($op -eq ">=" -and $v -ge $Alert.TargetPrice) -or ($op -eq "<=" -and $v -le $Alert.TargetPrice)
-            $res.Text = "Tagesänderung {0:+0.00;-0.00}% (Ziel {1} {2:N2}%)" -f $v, $op, $Alert.TargetPrice
-        }
-        "RSI" {
-            $v = [double]$q.Rsi14
-            if ([double]::IsNaN($v)) { return $res }
-            $op = $cond.Substring(3).Trim()
-            $res.Ok = $true; $res.Value = $v
-            $res.Met = ($op -eq ">=" -and $v -ge $Alert.TargetPrice) -or ($op -eq "<=" -and $v -le $Alert.TargetPrice)
-            $res.Text = "RSI-{0} (1h) {1:N1} (Ziel {2} {3:N1})" -f $script:Config.RsiPeriod, $v, $op, $Alert.TargetPrice
-        }
-        "SMA" {
-            $sma = [double]$q.SmaFastH
-            if ([double]::IsNaN($sma) -or $sma -le 0) { return $res }
-            $dist = (([double]$q.Price / $sma) - 1.0) * 100.0
-            $res.Ok = $true; $res.Value = $dist
-            $res.Met = if ($cond -like ">*") { [double]$q.Price -gt $sma } else { [double]$q.Price -lt $sma }
-            $res.Text = "Kurs {0:N2} vs. SMA{1} (1h) {2:N2} ({3:+0.00;-0.00}%)" -f $q.Price, $script:Config.SmaFastPeriod, $sma, $dist
-        }
-        default {
-            $v = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $Alert.Currency
-            $res.Ok = $true; $res.Value = $v
-            $res.Met = ($cond -eq ">=" -and $v -ge $Alert.TargetPrice) -or ($cond -eq "<=" -and $v -le $Alert.TargetPrice)
-            $res.Text = "Kurs {0:N2} {1} (Ziel {2} {3:N2})" -f $v, $Alert.Currency, $cond, $Alert.TargetPrice
-        }
+    if ([bool]$q.FromCache) { return $none }
+    $ctx.QuotePrice = [double]$q.Price
+    $ctx.ChangePct = [double]$q.ChangePct
+    $ctx.Rsi = [double]$q.Rsi14
+    $ctx.Sma = [double]$q.SmaFastH
+    $ctx.High52 = [double]$q.High52
+    $ctx.Low52 = [double]$q.Low52
+    $ctx.RelVol = if ($null -ne $q.RelVol) { [double]$q.RelVol } else { [double]::NaN }
+    $cur = [string]$Alert.Currency
+    $ctx.Price = if ($cur -match '^[A-Z]{3}$') { Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $cur } else { [double]$q.Price }
+    if ($kind -eq "EKPCT" -and $script:Portfolio.ContainsKey($Alert.Ticker)) {
+        $pf = $script:Portfolio[$Alert.Ticker]
+        $ctx.AvgCost = Convert-CurrencyValue -Amount ([double]$pf.AvgPrice) -FromCurrency ([string]$pf.Currency) -ToCurrency $cur
     }
-    return $res
+    return (Get-AlertEvaluation -Alert $Alert -Ctx $ctx)
 }
 
 
 function Format-AlertLine {
     param($Alert)
-    $flag = if ($Alert.Triggered) { "[HIT]" } else { "[ACT]" }
-    $body = switch (Get-AlertKind $Alert.Condition) {
-        "PCT"   { "{0} {1:N2}%" -f $Alert.Condition, $Alert.TargetPrice }
-        "RSI"   { "{0} {1:N0}" -f $Alert.Condition, $Alert.TargetPrice }
-        "SMA"   { "{0}{1}" -f $Alert.Condition, $script:Config.SmaFastPeriod }
-        default { "{0} {1:N2} {2}" -f $Alert.Condition, $Alert.TargetPrice, $Alert.Currency }
+    $kind = Get-AlertKind $Alert.Condition
+    $flag = if (Test-AlertExpired -Alert $Alert) { "[EXP]" } elseif ($Alert.Triggered) { "[HIT]" } else { "[ACT]" }
+    $t = [double]$Alert.TargetPrice
+    $body = switch ($kind) {
+        "PCT"    { "{0} {1:N2}%" -f $Alert.Condition, $t }
+        "RSI"    { "{0} {1:N0}" -f $Alert.Condition, $t }
+        "SMA"    { "{0}{1}" -f $Alert.Condition, $script:Config.SmaFastPeriod }
+        "TRAIL"  { $pk = [double]$Alert.Peak; if ($pk -gt 0) { "Trail {0:N1}% (Stopp {1:N2})" -f $t, ($pk * (1.0 - $t / 100.0)) } else { "Trail {0:N1}%" -f $t } }
+        "EKPCT"  { "{0} {1:N1}%" -f $Alert.Condition, $t }
+        "HIGH52" { if ($t -gt 0) { "52W-Hoch -{0:N1}%" -f $t } else { "52W-Hoch" } }
+        "LOW52"  { if ($t -gt 0) { "52W-Tief +{0:N1}%" -f $t } else { "52W-Tief" } }
+        "VOL"    { "Vol >= {0:N1}x" -f $t }
+        "PFVAL"  { "{0} {1:N0} {2}" -f $Alert.Condition, $t, $Alert.Currency }
+        "PFPCT"  { "{0} {1:N2}%" -f $Alert.Condition, $t }
+        default  { "{0} {1:N2} {2}" -f $Alert.Condition, $t, $Alert.Currency }
     }
     $re = if ([int]$Alert.RearmMin -gt 0) { " (R{0})" -f (Format-RearmLabel ([int]$Alert.RearmMin)) } else { "" }
+    $ex = [string]$Alert.ExpiresAt
+    $exp = if ($ex.Length -ge 10) { " bis {0}.{1}." -f $ex.Substring(8, 2), $ex.Substring(5, 2) } else { "" }
+    $np = if (-not [bool]$Alert.Push -and [string]$script:Config.PushService -ne "Aus") { " (ohne Push)" } else { "" }
     $note = if ($Alert.Note) { " - " + $Alert.Note } else { "" }
-    return ("{0} {1,-8} {2}{3}{4}" -f $flag, $Alert.Ticker, $body, $re, $note)
+    return ("{0} {1,-8} {2}{3}{4}{5}{6}" -f $flag, $Alert.Ticker, $body, $re, $exp, $np, $note)
 }
 
 function Add-WidgetAlert {
     # Central place to create an alert (alert panel + chart context menu)
-    param([string]$Ticker, [string]$Condition, [double]$Target, [string]$Currency, [string]$Note = "", [int]$RearmMin = 0, [switch]$NoConfirm)
+    param([string]$Ticker, [string]$Condition, [double]$Target, [string]$Currency, [string]$Note = "", [int]$RearmMin = 0,
+          [string]$ExpiresAt = "", [bool]$Push = $true, [switch]$NoConfirm)
     $a = [PSCustomObject]@{
         Id          = [Guid]::NewGuid().ToString("N")
         Ticker      = $Ticker.ToUpper()
@@ -5599,56 +5707,79 @@ function Add-WidgetAlert {
         Note        = $Note
         RearmMin    = $RearmMin
         TriggeredAt = ""
+        ExpiresAt   = $ExpiresAt
+        Peak        = 0.0
+        Push        = $Push
     }
+    $st = Get-AlertState -Alert $a
+    # trailing stop: the high starts at today's price
+    if (-not [double]::IsNaN([double]$st.Peak)) { $a.Peak = [double]$st.Peak }
     if (-not $NoConfirm) {
-        $st = Get-AlertState -Alert $a
         if ($st.Ok -and $st.Met -and -not (Confirm-Action -Text ("Bedingung ist bereits erfüllt:`r`n{0}`r`nAlarm würde sofort auslösen. Trotzdem anlegen?" -f $st.Text) -Title "Alarm")) {
             return $false
         }
     }
     $script:Alerts.Add($a)
-    Save-JsonState -Path $script:AlertsPath -Data $script:Alerts.ToArray()
+    Save-Alerts
     return $true
+}
+
+function Save-Alerts {
+    Save-JsonState -Path $script:AlertsPath -Data $script:Alerts.ToArray()
+}
+
+function Add-AlertLogEntry {
+    param($Alert, [string]$Text, [string]$Push)
+    $script:AlertLog.Add([PSCustomObject]@{
+        At = (Get-Date).ToString("o"); Ticker = [string]$Alert.Ticker; Condition = [string]$Alert.Condition
+        Text = $Text; Note = [string]$Alert.Note; Push = $Push
+    })
+    while ($script:AlertLog.Count -gt 500) { $script:AlertLog.RemoveAt(0) }
+    Save-JsonState -Path $script:AlertLogPath -Data $script:AlertLog.ToArray()
 }
 
 function Evaluate-GlobalAlerts {
     $changed = $false
     $now = Get-Date
     foreach ($a in $script:Alerts) {
+        if (Test-AlertExpired -Alert $a -Now $now) { continue }
         $st = Get-AlertState -Alert $a
         if (-not $st.Ok) { continue }
+        $isTrail = ((Get-AlertKind $a.Condition) -eq "TRAIL")
         if ($a.Triggered) {
             # Re-arm: after the wait time AND once the condition is no longer met
-            # (hysteresis - otherwise it would fire again on every poll)
-            if ([int]$a.RearmMin -gt 0 -and -not $st.Met) {
+            # (hysteresis - otherwise it would fire again on every poll). A
+            # trailing stop starts over from today's price instead.
+            if ([int]$a.RearmMin -gt 0 -and ($isTrail -or -not $st.Met)) {
                 $at = [DateTime]::MinValue
                 $okAt = [DateTime]::TryParse([string]$a.TriggeredAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$at)
                 if (-not $okAt -or ($now - $at).TotalMinutes -ge [int]$a.RearmMin) {
                     $a.Triggered = $false
+                    if ($isTrail) { $a.Peak = 0.0 }
                     $changed = $true
                     Write-WidgetLog "Alert re-armed: $($a.Ticker) $($a.Condition)"
                 }
             }
             continue
         }
+        if ($isTrail -and -not [double]::IsNaN([double]$st.Peak) -and [math]::Abs([double]$st.Peak - [double]$a.Peak) -gt 1e-9) {
+            $a.Peak = [double]$st.Peak
+            $changed = $true
+        }
         if ($st.Met) {
             $a.Triggered = $true
             $a.TriggeredAt = $now.ToString("o")
             $changed = $true
             Write-WidgetLog "Alert hit: $($a.Ticker) $($st.Text)"
-            if ($script:Config.ShowTrayNotifications) {
-                # v3.0: async system sound (Console.Beep blocked the UI thread
-                # and throws on machines without a beep device)
-                try { [System.Media.SystemSounds]::Exclamation.Play() } catch { }
-                $msg = "{0}: {1}" -f $a.Ticker, $st.Text
-                if ($a.Note) { $msg += "`r`n" + $a.Note }
-                $trayIcon.ShowBalloonTip(6000, "Alarm: $($a.Ticker)", $msg, [System.Windows.Forms.ToolTipIcon]::Info)
-            }
+            $isPf = Test-PortfolioAlertKind (Get-AlertKind $a.Condition)
+            $title = if ($isPf) { "Alarm: Depot" } else { "Alarm: $($a.Ticker)" }
+            $msg = if ($isPf) { $st.Text } else { "{0}: {1}" -f $a.Ticker, $st.Text }
+            if ($a.Note) { $msg += "`r`n" + $a.Note }
+            $pushed = Send-WidgetNotification -Title $title -Message $msg -Kind "Alert" -AllowPush ([bool]$a.Push)
+            Add-AlertLogEntry -Alert $a -Text $st.Text -Push $pushed
         }
     }
-    if ($changed) {
-        Save-JsonState -Path $script:AlertsPath -Data $script:Alerts.ToArray()
-    }
+    if ($changed) { Save-Alerts }
 }
 
 # ------------------------------------------------------------------------------
@@ -5706,6 +5837,325 @@ function Update-MarketStatusUi {
 }
 
 # ------------------------------------------------------------------------------
+# Notifications (v4.3): tray balloon + sound, phone push (ntfy / Telegram),
+# quiet hours. Push requests run asynchronously on their own HttpClient (no
+# Yahoo cookies); $uiTimer collects the results via Pump-PushTasks.
+# ------------------------------------------------------------------------------
+$script:PushClient  = $null
+$script:PushPending = New-Object System.Collections.Generic.List[PSObject]
+$script:PushSent    = New-Object System.Collections.Generic.List[DateTime]
+
+function Protect-Secret {
+    # Windows DPAPI (current user) via SecureString, works in 5.1 and 7. The
+    # plain text is the token the user just typed; only the encrypted form is stored.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingConvertToSecureStringWithPlainText", "")]
+    param([string]$Plain)
+    if (-not $Plain) { return "" }
+    try { return (ConvertFrom-SecureString -SecureString (ConvertTo-SecureString -String $Plain -AsPlainText -Force)) }
+    catch { Write-WidgetLog "Protect-Secret failed: $($_.Exception.Message)" "WARN"; return "" }
+}
+
+function Unprotect-Secret {
+    param([string]$Enc)
+    if (-not $Enc) { return "" }
+    try { return (New-Object System.Net.NetworkCredential("", (ConvertTo-SecureString -String $Enc))).Password }
+    catch { Write-WidgetLog "Stored push token cannot be decrypted (other Windows user or PC?)" "WARN"; return "" }
+}
+
+function Get-PushRequest {
+    param([string]$Title, [string]$Message, [int]$Priority = 3, [string[]]$Tags = @(), $Cfg = $null)
+    if ($null -eq $Cfg) { $Cfg = $script:Config }
+    $tok = if ($Cfg.PushTokenPlain) { [string]$Cfg.PushTokenPlain } else { Unprotect-Secret ([string]$Cfg.PushTokenEnc) }
+    return (New-PushRequest -Service ([string]$Cfg.PushService) -Title $Title -Message $Message -Server ([string]$Cfg.PushServer) `
+        -Topic ([string]$Cfg.PushTopic) -Token $tok -ChatId ([string]$Cfg.PushChatId) -Priority $Priority -Tags $Tags)
+}
+
+function Send-PushRequest {
+    # Starts the POST and returns $true; $OnDone runs later on the UI thread
+    # with ($Ok, $Info)
+    param($Req, [string]$Desc, [scriptblock]$OnDone = $null)
+    if ($null -eq $Req) { return $false }
+    if (-not (Test-PushAllowed -Sent $script:PushSent.ToArray() -Max 10)) {
+        Write-WidgetLog "Push skipped (more than 10 per minute): $Desc" "WARN"
+        return $false
+    }
+    try {
+        if ($null -eq $script:PushClient) {
+            $script:PushClient = New-Object System.Net.Http.HttpClient
+            $script:PushClient.Timeout = [TimeSpan]::FromSeconds(15)
+        }
+        $content = New-Object System.Net.Http.StringContent([string]$Req.Json, [System.Text.Encoding]::UTF8, "application/json")
+        $task = $script:PushClient.PostAsync([string]$Req.Url, $content)
+        $script:PushPending.Add([PSCustomObject]@{ Task = $task; Content = $content; Desc = $Desc; OnDone = $OnDone })
+        $script:PushSent.Add((Get-Date))
+        while ($script:PushSent.Count -gt 20) { $script:PushSent.RemoveAt(0) }
+        return $true
+    } catch {
+        Write-WidgetLog "Push could not be started: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+function Pump-PushTasks {
+    for ($i = $script:PushPending.Count - 1; $i -ge 0; $i--) {
+        $pp = $script:PushPending[$i]
+        if (-not $pp.Task.IsCompleted) { continue }
+        $script:PushPending.RemoveAt($i)
+        $ok = $false; $info = ""
+        if ($pp.Task.IsFaulted -or $pp.Task.IsCanceled) {
+            $info = if ($null -ne $pp.Task.Exception) { "keine Verbindung: " + $pp.Task.Exception.GetBaseException().Message } else { "Zeitüberschreitung" }
+        } else {
+            $resp = $pp.Task.Result
+            try {
+                $ok = [bool]$resp.IsSuccessStatusCode
+                $info = if ($ok) { "gesendet" } else { "abgelehnt (HTTP {0}): {1}" -f [int]$resp.StatusCode, [string]$resp.Content.ReadAsStringAsync().Result }
+            } catch { $info = $_.Exception.Message } finally { $resp.Dispose() }
+        }
+        try { $pp.Content.Dispose() } catch { }
+        if ($info.Length -gt 300) { $info = $info.Substring(0, 300) }
+        Write-WidgetLog ("Push '{0}': {1}" -f $pp.Desc, $info) $(if ($ok) { "INFO" } else { "WARN" })
+        if ($null -ne $pp.OnDone) { try { & $pp.OnDone $ok $info } catch { } }
+    }
+}
+
+function Send-WidgetNotification {
+    # Balloon (+ sound for alerts) and phone push, respecting quiet hours.
+    # Returns the push status for the alert log: ja / aus / Ruhezeit / Fehler
+    param([string]$Title, [string]$Message, [string]$Kind = "Alert", [bool]$AllowPush = $true)
+    $quiet = Test-QuietHours -From ([string]$script:Config.QuietFrom) -To ([string]$script:Config.QuietTo)
+    if ($script:Config.ShowTrayNotifications) {
+        if (-not $quiet -and $Kind -eq "Alert") { try { [System.Media.SystemSounds]::Exclamation.Play() } catch { } }
+        try { $trayIcon.ShowBalloonTip(6000, $Title, $Message, [System.Windows.Forms.ToolTipIcon]::Info) } catch { }
+    }
+    $want = if ($Kind -eq "Earnings") { [bool]$script:Config.PushEarnings } else { [bool]$script:Config.PushAlerts }
+    if ([string]$script:Config.PushService -eq "Aus" -or -not $want -or -not $AllowPush) { return "aus" }
+    if ($quiet) { return "Ruhezeit" }
+    $prio = if ($Kind -eq "Alert") { 4 } else { 3 }
+    $tags = if ($Kind -eq "Alert") { @("bell") } else { @("date") }
+    if (Send-PushRequest -Req (Get-PushRequest -Title $Title -Message $Message -Priority $prio -Tags $tags) -Desc $Title) { return "ja" }
+    return "Fehler"
+}
+
+function Show-AlertLogDialog {
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title "Alarm-Verlauf - $($script:AppTitle)" -W (S 760) -H (S 440)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 560), (S 280))
+    $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $g = New-Object System.Windows.Forms.DataGridView
+    $g.SetBounds((S 12), (S 12), (S 736), (S 372))
+    $g.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    Style-DataGrid -Grid $g
+    foreach ($cd in @(@("At", "Zeit", 100), @("Ticker", "Ticker", 70), @("Cond", "Bedingung", 90), @("Text", "Wert", 280), @("Note", "Notiz", 110), @("Push", "Push", 60))) {
+        $ci = $g.Columns.Add($cd[0], $cd[1])
+        $g.Columns[$ci].FillWeight = [float](S $cd[2])
+    }
+    $g.Columns["Push"].ToolTipText = "ja = aufs Handy geschickt, Ruhezeit / aus = nicht geschickt, Fehler = siehe Log"
+    $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    for ($i = $script:AlertLog.Count - 1; $i -ge 0; $i--) {
+        $e = $script:AlertLog[$i]
+        $at = [DateTime]::MinValue
+        $atTxt = if ([DateTime]::TryParse([string]$e.At, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$at)) { $at.ToString("dd.MM.yy HH:mm") } else { [string]$e.At }
+        [void]$g.Rows.Add($atTxt, $e.Ticker, $e.Condition, $e.Text, $e.Note, $e.Push)
+    }
+    $dlg.Controls.Add($g)
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.SetBounds((S 12), (S 398), (S 400), (S 20))
+    $lbl.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    $lbl.ForeColor = $p.Muted
+    $lbl.Text = "{0} Einträge (die letzten 500 werden behalten)" -f $script:AlertLog.Count
+    $dlg.Controls.Add($lbl)
+    Set-DynTip $lbl "" "ALERTLOG"
+    $btnClr = New-Object System.Windows.Forms.Button
+    $btnClr.SetBounds((S 554), (S 394), (S 94), (S 28)); $btnClr.Anchor = $aBR
+    Style-FlatButton -Btn $btnClr -BgColor $p.Input -FgColor $colRed -BorderColor $p.Border
+    $btnClr.Text = "Leeren"
+    $btnClr.Add_Click({
+        param($sender, $e)
+        if (-not (Confirm-Action -Text "Alarm-Verlauf wirklich leeren?" -Title "Alarm-Verlauf")) { return }
+        $script:AlertLog.Clear()
+        Save-JsonState -Path $script:AlertLogPath -Data @()
+        $sender.FindForm().Close()
+    })
+    $dlg.Controls.Add($btnClr)
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.SetBounds((S 654), (S 394), (S 94), (S 28)); $btnClose.Anchor = $aBR
+    Style-FlatButton -Btn $btnClose -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $btnClose.Text = "Schließen"
+    $btnClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnClose)
+    $dlg.CancelButton = $btnClose
+    [void]$dlg.ShowDialog($form)
+    $dlg.Dispose()
+}
+
+function Show-PushDialog {
+    # Phone push setup; changes go straight into $script:Config (saved by the caller)
+    param($Owner)
+    $p = $script:Pal
+    $cfg = $script:Config
+    $dlg = New-DialogForm -Title "Handy-Push - $($script:AppTitle)" -W (S 520) -H (S 410)
+    $y = S 12
+    $mkLbl = {
+        param([string]$T, [int]$Y)
+        $l = New-Object System.Windows.Forms.Label
+        $l.SetBounds((S 14), ($Y + (S 3)), (S 130), (S 18)); $l.Text = $T
+        $dlg.Controls.Add($l)
+        return $l
+    }
+    $mkTxt = {
+        param([string]$V, [int]$Y, [int]$Wd)
+        $t = New-Object System.Windows.Forms.TextBox
+        $t.SetBounds((S 150), $Y, $Wd, (S 24))
+        $t.BackColor = $p.Input; $t.ForeColor = $p.Text; $t.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $t.Font = $fontMono; $t.Text = $V
+        $dlg.Controls.Add($t)
+        return $t
+    }
+    $mkBtn = {
+        param([string]$T, [int]$X, [int]$Y, [int]$Wd)
+        $b = New-Object System.Windows.Forms.Button
+        $b.SetBounds($X, $Y, $Wd, (S 25))
+        Style-FlatButton -Btn $b -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+        $b.Text = $T
+        $dlg.Controls.Add($b)
+        return $b
+    }
+    $info = New-Object System.Windows.Forms.Label
+    $info.SetBounds((S 14), $y, (S 492), (S 34)); $info.ForeColor = $p.Muted
+    $info.Text = "Alarme (und auf Wunsch Quartalszahlen) zusätzlich aufs Handy. ntfy: App installieren und das Thema abonnieren. Telegram: Bot bei @BotFather anlegen."
+    $dlg.Controls.Add($info)
+    $y += S 40
+    [void](& $mkLbl "Dienst" $y)
+    $cbSvc = New-Object System.Windows.Forms.ComboBox
+    $cbSvc.SetBounds((S 150), $y, (S 120), (S 24))
+    $cbSvc.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbSvc.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbSvc.BackColor = $p.Input; $cbSvc.ForeColor = $p.Text
+    foreach ($s in @("Aus", "ntfy", "Telegram")) { [void]$cbSvc.Items.Add($s) }
+    $cbSvc.SelectedIndex = [math]::Max(0, $cbSvc.Items.IndexOf([string]$cfg.PushService))
+    $dlg.Controls.Add($cbSvc)
+    Set-DynTip $cbSvc "" "PUSH"
+    $y += S 34
+    $lSrv = & $mkLbl "ntfy-Server" $y
+    $tSrv = & $mkTxt ([string]$cfg.PushServer) $y (S 250)
+    Set-DynTip $tSrv "Standard: https://ntfy.sh - oder ein eigener ntfy-Server"
+    $y += S 30
+    $lTop = & $mkLbl "ntfy-Thema" $y
+    $tTop = & $mkTxt ([string]$cfg.PushTopic) $y (S 250)
+    $bRnd = & $mkBtn "Zufällig" (S 406) $y (S 100)
+    Set-DynTip $tTop "Wie ein Passwort: wer das Thema kennt, liest mit. Erlaubt: Buchstaben, Ziffern, - und _" "PUSH"
+    $y += S 34
+    $lTok = & $mkLbl "Telegram-Token" $y
+    $tTok = & $mkTxt "" $y (S 250)
+    $tTok.UseSystemPasswordChar = $true
+    $hasTok = [bool]([string]$cfg.PushTokenEnc)
+    if ($hasTok) { $tTok.Text = "********" }
+    Set-DynTip $tTok "Token von @BotFather (123456:ABC...). Wird verschlüsselt gespeichert (nur dein Windows-Konto kann ihn lesen)." "PUSH"
+    $y += S 30
+    $lChat = & $mkLbl "Telegram-Chat-ID" $y
+    $tChat = & $mkTxt ([string]$cfg.PushChatId) $y (S 140)
+    $bChat = & $mkBtn "Chat-ID holen" (S 296) $y (S 120)
+    Set-DynTip $bChat "Erst dem Bot in Telegram eine Nachricht schreiben (z. B. /start), dann hier klicken"
+    $y += S 36
+    $chkA = New-Object System.Windows.Forms.CheckBox
+    $chkA.SetBounds((S 14), $y, (S 240), (S 22)); $chkA.Text = "Bei Alarmen"; $chkA.Checked = [bool]$cfg.PushAlerts
+    $chkA.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $dlg.Controls.Add($chkA)
+    $chkE = New-Object System.Windows.Forms.CheckBox
+    $chkE.SetBounds((S 260), $y, (S 246), (S 22)); $chkE.Text = "Quartalszahlen (Vortag)"; $chkE.Checked = [bool]$cfg.PushEarnings
+    $chkE.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $dlg.Controls.Add($chkE)
+    Set-DynTip $chkE "" "EARNINGS"
+    $y += S 34
+    $bTest = & $mkBtn "Test senden" (S 14) $y (S 120)
+    $lRes = New-Object System.Windows.Forms.Label
+    $lRes.SetBounds((S 142), ($y + (S 4)), (S 364), (S 40)); $lRes.ForeColor = $p.Muted
+    $dlg.Controls.Add($lRes)
+    $y += S 52
+    $ok = & $mkBtn "OK" (S 312) $y (S 94)
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $cancel = & $mkBtn "Abbrechen" (S 412) $y (S 94)
+    Style-FlatButton -Btn $cancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.CancelButton = $cancel
+    $dlg.ClientSize = New-Object System.Drawing.Size((S 520), ($y + (S 40)))
+
+    $script:PushCtl = @{
+        Dlg = $dlg; Svc = $cbSvc; Srv = $tSrv; Top = $tTop; Tok = $tTok; Chat = $tChat; Res = $lRes; A = $chkA; E = $chkE
+        HasTok = $hasTok; Rows = @(@($lSrv, $tSrv), @($lTop, $tTop, $bRnd), @($lTok, $tTok), @($lChat, $tChat, $bChat))
+    }
+    $getToken = {
+        $pc = $script:PushCtl
+        $t = ([string]$pc.Tok.Text).Trim()
+        if ($pc.HasTok -and $t -eq "********") { return (Unprotect-Secret ([string]$script:Config.PushTokenEnc)) }
+        return $t
+    }
+    $script:PushCtl.GetToken = $getToken
+    $script:PushCtl.Show = {
+        $pc = $script:PushCtl
+        $svc = [string]$pc.Svc.SelectedItem
+        for ($i = 0; $i -lt $pc.Rows.Count; $i++) {
+            $on = if ($i -lt 2) { $svc -eq "ntfy" } else { $svc -eq "Telegram" }
+            foreach ($c in $pc.Rows[$i]) { $c.Enabled = $on }
+        }
+    }
+    & $script:PushCtl.Show
+    $cbSvc.Add_SelectedIndexChanged({ & $script:PushCtl.Show })
+    $bRnd.Add_Click({ $script:PushCtl.Top.Text = New-RandomTopic })
+    $tTok.Add_Enter({ param($sender, $e) if ($script:PushCtl.HasTok -and $sender.Text -eq "********") { $sender.SelectAll() } })
+    $bChat.Add_Click({
+        $pc = $script:PushCtl
+        $tok = & $pc.GetToken
+        if ($tok -notmatch '^\d+:[A-Za-z0-9_-]+$') { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Bitte zuerst einen gültigen Bot-Token eintragen."; return }
+        $u = "https://api.telegram.org/bot{0}/getUpdates" -f $tok
+        $r = Invoke-ParallelFetch -Urls @($u) -TimeoutSec 8
+        $id = Get-TelegramChatId $r[$u]
+        if ($id) { $pc.Chat.Text = $id; $pc.Res.ForeColor = $colGreen; $pc.Res.Text = "Chat-ID gefunden: $id" }
+        else { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Keine Nachricht gefunden. Schreib dem Bot in Telegram etwas (z. B. /start) und versuch es nochmal." }
+    })
+    $bTest.Add_Click({
+        $pc = $script:PushCtl
+        $tmp = [PSCustomObject]@{
+            PushService = [string]$pc.Svc.SelectedItem; PushServer = $pc.Srv.Text.Trim(); PushTopic = $pc.Top.Text.Trim()
+            PushTokenEnc = ""; PushTokenPlain = (& $pc.GetToken); PushChatId = $pc.Chat.Text.Trim()
+        }
+        $req = Get-PushRequest -Title "TerminalWidget" -Message ("Test vom PC ({0}) - Push funktioniert." -f (Get-Date).ToString("HH:mm")) -Cfg $tmp
+        if ($null -eq $req) { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Einstellungen unvollständig (Dienst, Thema bzw. Token und Chat-ID)."; return }
+        $pc.Res.ForeColor = $script:Pal.Muted; $pc.Res.Text = "Sende ..."
+        $started = Send-PushRequest -Req $req -Desc "Test" -OnDone {
+            param($Ok, $Info)
+            if ($null -eq $script:PushCtl) { return }
+            $script:PushCtl.Res.ForeColor = if ($Ok) { $colGreen } else { $colRed }
+            $script:PushCtl.Res.Text = if ($Ok) { "Gesendet - kommt die Nachricht am Handy an?" } else { "Fehler: $Info" }
+        }
+        if (-not $started) { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Konnte nicht senden (Limit 10 pro Minute oder Fehler, siehe Log)." }
+    })
+    $ok.Add_Click({
+        $pc = $script:PushCtl
+        $svc = [string]$pc.Svc.SelectedItem
+        $tok = & $pc.GetToken
+        if ($svc -eq "ntfy" -and $pc.Top.Text.Trim() -notmatch '^[A-Za-z0-9_-]{1,64}$') { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Bitte ein Thema eintragen (Buchstaben, Ziffern, - und _), z. B. über 'Zufällig'."; return }
+        if ($svc -eq "Telegram" -and ($tok -notmatch '^\d+:[A-Za-z0-9_-]+$' -or $pc.Chat.Text.Trim() -notmatch '^-?\d+$')) { $pc.Res.ForeColor = $colRed; $pc.Res.Text = "Bitte Bot-Token und Chat-ID eintragen."; return }
+        $c = $script:Config
+        $c.PushService = $svc
+        $c.PushServer = if ($pc.Srv.Text.Trim()) { $pc.Srv.Text.Trim() } else { "https://ntfy.sh" }
+        $c.PushTopic = $pc.Top.Text.Trim()
+        $c.PushTokenEnc = if ($tok) { Protect-Secret $tok } else { "" }
+        $c.PushChatId = $pc.Chat.Text.Trim()
+        $c.PushAlerts = [bool]$pc.A.Checked
+        $c.PushEarnings = [bool]$pc.E.Checked
+        Save-JsonState -Path $script:ConfigPath -Data $c
+        Write-WidgetLog "Push settings saved: $svc"
+        $pc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $pc.Dlg.Close()
+    })
+    $res = $dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form }))
+    $script:PushCtl = $null
+    $dlg.Dispose()
+    return ($res -eq [System.Windows.Forms.DialogResult]::OK)
+}
+
+# ------------------------------------------------------------------------------
 # Earnings / dividend dates (v4.2): refreshed in the background for portfolio,
 # watchlist and the active ticker; tray hint the day before quarterly figures
 # ------------------------------------------------------------------------------
@@ -5732,7 +6182,7 @@ function Update-EventsIfStale {
 
 function Check-EarningsNotifications {
     # One balloon per company and earnings date, the day before (or on the day)
-    if (-not $script:Config.ShowTrayNotifications -or -not $script:Config.NotifyEarnings) { return }
+    if (-not $script:Config.NotifyEarnings) { return }
     $changed = $false
     foreach ($k in @($script:Portfolio.Keys)) {
         $u = ([string]$k).ToUpper()
@@ -5740,7 +6190,7 @@ function Check-EarningsNotifications {
         if ($null -eq $ev -or -not $ev.EarningsDate -or [string]$ev.NotifiedEarnings -eq [string]$ev.EarningsDate) { continue }
         $b = Get-EarningsBadge -EarningsDate ([string]$ev.EarningsDate) -WindowDays 1
         if ($null -eq $b) { continue }
-        $trayIcon.ShowBalloonTip(6000, "Quartalszahlen: $u", ("{0} ({1}) - Kurs kann stark schwanken" -f $(if ($b.Days -eq 0) { "Heute" } else { "Morgen" }), (Format-IsoDateDe $b.Date)), [System.Windows.Forms.ToolTipIcon]::Info)
+        [void](Send-WidgetNotification -Title "Quartalszahlen: $u" -Message ("{0} ({1}) - Kurs kann stark schwanken" -f $(if ($b.Days -eq 0) { "Heute" } else { "Morgen" }), (Format-IsoDateDe $b.Date)) -Kind "Earnings")
         $ev.NotifiedEarnings = [string]$ev.EarningsDate
         $changed = $true
         Write-WidgetLog "Earnings notice: $u $($ev.EarningsDate)"
@@ -8211,6 +8661,44 @@ function Show-SettingsDialog {
     $chkTray  = & $addCheck "Tray-Hinweis + Ton bei Alarmen" ([bool]$cfg.ShowTrayNotifications)
     $chkOpen  = & $addCheck "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" ([bool]$cfg.NotifyMarketOpen)
     $chkEarn  = & $addCheck "Hinweis am Vortag von Quartalszahlen (Portfolio)" ([bool]$cfg.NotifyEarnings) "" "EARNINGS"
+    # v4.3: quiet hours + phone push
+    $lQuiet = New-Object System.Windows.Forms.Label
+    $lQuiet.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
+    $lQuiet.Size = New-Object System.Drawing.Size((S 200), (S 18))
+    $lQuiet.Text = "Ruhezeit (kein Ton / Push) von - bis"
+    $dlg.Controls.Add($lQuiet)
+    $tQFrom = New-Object System.Windows.Forms.TextBox
+    $tQFrom.SetBounds(($lay.X + (S 292)), $lay.Y, (S 50), (S 22))
+    $tQTo = New-Object System.Windows.Forms.TextBox
+    $tQTo.SetBounds(($lay.X + (S 354)), $lay.Y, (S 50), (S 22))
+    foreach ($tq in @($tQFrom, $tQTo)) {
+        $tq.BackColor = $p.Input; $tq.ForeColor = $p.Text; $tq.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $tq.Font = $fontMono; $tq.MaxLength = 5
+        $dlg.Controls.Add($tq)
+        Set-DynTip $tq "HH:MM, z. B. 22:00 bis 07:00. Beide leer = keine Ruhezeit." "QUIET"
+    }
+    Set-DynTip $lQuiet "" "QUIET"
+    $tQFrom.Text = [string]$cfg.QuietFrom
+    $tQTo.Text = [string]$cfg.QuietTo
+    $lay.Y += S 29
+    $btnPush = New-Object System.Windows.Forms.Button
+    $btnPush.SetBounds(($lay.X + (S 26)), $lay.Y, (S 190), (S 26))
+    Style-FlatButton -Btn $btnPush -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnPush.Text = "Handy-Push einrichten ..."
+    $dlg.Controls.Add($btnPush)
+    $lPushState = New-Object System.Windows.Forms.Label
+    $lPushState.SetBounds(($lay.X + (S 224)), ($lay.Y + (S 5)), (S 180), (S 18))
+    $lPushState.ForeColor = $p.Muted
+    $lPushState.Text = if ([string]$cfg.PushService -eq "Aus") { "aus" } else { "aktiv: " + [string]$cfg.PushService }
+    $dlg.Controls.Add($lPushState)
+    Set-DynTip $btnPush "" "PUSH"
+    $btnPush.Add_Click({
+        $sc = $script:SettingsCtl
+        if (Show-PushDialog -Owner $sc.Dlg) {
+            $sc.PushState.Text = if ([string]$script:Config.PushService -eq "Aus") { "aus" } else { "aktiv: " + [string]$script:Config.PushService }
+        }
+    })
+    $lay.Y += S 32
 
     & $addSection "System"
     $autoNow  = Test-Autostart
@@ -8284,7 +8772,7 @@ function Show-SettingsDialog {
     $btnOk.Font = $fontUiBold
     $btnOk.Text = "OK"
     # (handlers reach the controls through script scope, not via the caller's locals)
-    $script:SettingsCtl = @{ Dlg = $dlg; SmaF = $nSmaF; SmaS = $nSmaS; Slow = $nSlow; Refresh = $nRefresh }
+    $script:SettingsCtl = @{ Dlg = $dlg; SmaF = $nSmaF; SmaS = $nSmaS; Slow = $nSlow; Refresh = $nRefresh; PushState = $lPushState; QFrom = $tQFrom; QTo = $tQTo }
     $btnOk.Add_Click({
         $sc = $script:SettingsCtl
         if ($sc.SmaF.Value -ge $sc.SmaS.Value) {
@@ -8293,6 +8781,15 @@ function Show-SettingsDialog {
             return
         }
         if ($sc.Slow.Value -lt $sc.Refresh.Value) { $sc.Slow.Value = $sc.Refresh.Value }
+        foreach ($tq in @($sc.QFrom, $sc.QTo)) {
+            $tv = $tq.Text.Trim()
+            if ($tv -and $tv -notmatch '^([01]?\d|2[0-3]):[0-5]\d$') {
+                [System.Windows.Forms.MessageBox]::Show($sc.Dlg, "Ruhezeit bitte als HH:MM eingeben (z. B. 22:00), oder leer lassen.", "Einstellungen",
+                    [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                $tq.Focus() | Out-Null
+                return
+            }
+        }
         $sc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $sc.Dlg.Close()
     })
@@ -8321,6 +8818,8 @@ function Show-SettingsDialog {
     $cfg.ShowTrayNotifications = [bool]$chkTray.Checked
     $cfg.NotifyMarketOpen      = [bool]$chkOpen.Checked
     $cfg.NotifyEarnings        = [bool]$chkEarn.Checked
+    $cfg.QuietFrom             = $tQFrom.Text.Trim()
+    $cfg.QuietTo               = $tQTo.Text.Trim()
     # v4.0
     $newLayout                 = [string]$cbLayout.SelectedItem
     $cfg.Opacity               = [int]$nOpacity.Value
@@ -8467,6 +8966,10 @@ Marktstatus: Maus über die Statuszeile = Handelszeiten
 Chart: Fadenkreuz zeigt Kurs (rechts) und Zeit (unten) an der Maus
 Compact-Laufleiste: Klick = Ticker öffnen, Maus darüber = Pause
 Ticker in Orange = Quartalszahlen in den nächsten 7 Tagen
+
+Alarme: Kurs, Tag%, RSI, SMA, Trailing-Stopp, EK%, 52W-Hoch/-Tief,
+Volumen-Spitze, Depotwert und Depot-Tag%. "Verlauf" zeigt alle
+Treffer. Handy-Push (ntfy/Telegram) und Ruhezeit: Einstellungen.
 "@
     [System.Windows.Forms.MessageBox]::Show($form, $txt, "Hilfe - $($script:AppTitle)",
         [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -9004,25 +9507,54 @@ $btnAddAlert.Add_Click({
     $raw   = $txtAlertPrice.Text
     $aPrice = 0.0
     if ($kind -ne "SMA") {
-        # Tag% may be negative, RSI 0..100, price > 0. SMA alerts need no value.
+        # value ranges per kind (Tag% / EK% / Depot Tag% may be negative)
         $aPrice = Parse-DecimalInput $raw
         $bad = [string]::IsNullOrWhiteSpace($raw) -or -not (Test-DecimalInput $raw) -or
-               ($kind -eq "PRICE" -and $aPrice -le 0) -or ($kind -eq "RSI" -and ($aPrice -le 0 -or $aPrice -ge 100))
+               ($kind -in @("PRICE", "PFVAL", "VOL") -and $aPrice -le 0) -or
+               ($kind -in @("RSI", "TRAIL") -and ($aPrice -le 0 -or $aPrice -ge 100)) -or
+               ($kind -in @("HIGH52", "LOW52") -and ($aPrice -lt 0 -or $aPrice -gt 50))
         if ($bad) {
-            Set-TransientStatus "Ungültiger Alarm-Wert: '$raw'"
+            Set-TransientStatus ("Ungültiger Alarm-Wert: '{0}' ({1})" -f $raw, (Get-AlertTargetHint $aCond)) 6
             return
         }
     }
-    $aSym = Resolve-BestSymbol -RawInput $txtAlertTicker.Text
-    if ([string]::IsNullOrWhiteSpace($aSym)) { return }
-    $txtAlertTicker.Text = $aSym
-    $curr = switch ($kind) { "PCT" { "%" } "RSI" { "RSI" } "SMA" { "SMA" } default { $script:Config.Currency } }
+    $isPf = Test-PortfolioAlertKind $kind
+    if ($isPf) {
+        if ($script:Portfolio.Count -eq 0) { Set-TransientStatus "Depot-Alarme brauchen Positionen im Portfolio." 5; return }
+        $aSym = "DEPOT"
+    } else {
+        $aSym = Resolve-BestSymbol -RawInput $txtAlertTicker.Text
+        if ([string]::IsNullOrWhiteSpace($aSym)) { return }
+        $txtAlertTicker.Text = $aSym
+    }
+    if ($kind -eq "EKPCT" -and -not $script:Portfolio.ContainsKey($aSym)) {
+        Set-TransientStatus "EK%-Alarme gehen nur für Positionen im Portfolio ($aSym fehlt)." 5
+        return
+    }
+    $qc = if ($script:QuoteStore.ContainsKey($aSym)) { [string]$script:QuoteStore[$aSym].Currency } else { "" }
+    $curr = switch ($kind) {
+        "PCT"    { "%" }
+        "RSI"    { "RSI" }
+        "SMA"    { "SMA" }
+        "HIGH52" { "52W" }
+        "LOW52"  { "52W" }
+        "VOL"    { "VOL" }
+        "PFPCT"  { "%" }
+        # percent to the average cost in the position's currency (no FX effect)
+        "EKPCT"  { [string]$script:Portfolio[$aSym].Currency }
+        # trailing high in the instrument's own currency
+        "TRAIL"  { if ($qc) { $qc } else { $script:Config.Currency } }
+        default  { $script:Config.Currency }
+    }
     $rearm = 0
     if ($null -ne $cmbAlertRearm.SelectedItem) { $rearm = [int]$script:RearmChoices[[string]$cmbAlertRearm.SelectedItem] }
-    $ok = Add-WidgetAlert -Ticker $aSym -Condition $aCond -Target $aPrice -Currency $curr -Note $txtAlertNote.Text.Trim() -RearmMin $rearm
+    $expDays = 0
+    if ($null -ne $cmbAlertExp.SelectedItem) { $expDays = [int]$script:AlertExpiryChoices[[string]$cmbAlertExp.SelectedItem] }
+    $ok = Add-WidgetAlert -Ticker $aSym -Condition $aCond -Target $aPrice -Currency $curr -Note $txtAlertNote.Text.Trim() -RearmMin $rearm -ExpiresAt (Get-AlertExpiryDate -Days $expDays)
     if (-not $ok) { return }
     $txtAlertPrice.Text = ""
     $txtAlertNote.Text = ""
+    $script:AlertAutoValue = ""
     Refresh-AllMarketData
     Evaluate-GlobalAlerts
     Update-AllUiViews
@@ -9033,24 +9565,36 @@ $btnDelAlert.Add_Click({
     if ($idx -ge 0 -and $idx -lt $script:Alerts.Count) {
         if (-not (Confirm-Action -Text "Alarm '$($lstAlerts.Items[$idx])' löschen?" -Title "Preis-Alarm")) { return }
         $script:Alerts.RemoveAt($idx)
-        Save-JsonState -Path $script:AlertsPath -Data $script:Alerts.ToArray()
+        Save-Alerts
         Update-AllUiViews
     }
 })
 
+$script:AlertAutoValue = ""
 $cmbAlertCond.Add_SelectedIndexChanged({
-    $kind = Get-AlertKind ([string]$cmbAlertCond.SelectedItem)
+    $cond = [string]$cmbAlertCond.SelectedItem
+    $kind = Get-AlertKind $cond
     $isSma = ($kind -eq "SMA")
     $txtAlertPrice.Enabled = -not $isSma
     if ($isSma) { $txtAlertPrice.Text = "" }
-    # v3.0: say what the value means for the chosen condition
-    $hint = switch ($kind) {
-        "PCT"   { "Tagesänderung in %, z.B. -3 oder 2,5" }
-        "RSI"   { "RSI-Wert 1..99 (Stundenbasis), z.B. 70" }
-        "SMA"   { "Kein Wert nötig: Kurs kreuzt SMA$($script:Config.SmaFastPeriod) (1h)" }
-        default { "Kurs in $($script:Config.Currency) (Anzeigewährung)" }
+    # v4.3: portfolio alerts watch the whole depot, not a ticker
+    if (Test-PortfolioAlertKind $kind) {
+        $txtAlertTicker.Text = "DEPOT"
+        $txtAlertTicker.Enabled = $false
+    } elseif (-not $txtAlertTicker.Enabled) {
+        $txtAlertTicker.Enabled = $true
+        $txtAlertTicker.Text = $script:Config.ActiveTicker
     }
-    Set-Tip $txtAlertPrice $hint "ALERTCOND"
+    # suggested value; replaced again as long as the user did not type one
+    $def = switch ($kind) { "TRAIL" { "8" } "VOL" { "2" } "HIGH52" { "0" } "LOW52" { "0" } "RSI" { "70" } default { "" } }
+    if (-not $isSma -and ([string]::IsNullOrWhiteSpace($txtAlertPrice.Text) -or $txtAlertPrice.Text -eq $script:AlertAutoValue)) {
+        $txtAlertPrice.Text = $def
+        $script:AlertAutoValue = $def
+    }
+    $hint = Get-AlertTargetHint $cond
+    if ($kind -eq "PRICE" -or $kind -eq "PFVAL") { $hint += " ($($script:Config.Currency))" }
+    if ($kind -eq "SMA") { $hint = "Kein Wert nötig: Kurs kreuzt SMA$($script:Config.SmaFastPeriod) (1h)" }
+    Set-Tip $txtAlertPrice $hint $(if ($kind -eq "TRAIL") { "TRAIL" } elseif ($kind -eq "VOL") { "RELVOL" } else { "ALERTCOND" })
 })
 $cmbAlertCond.SelectedIndex = 1; $cmbAlertCond.SelectedIndex = 0   # fire once for the hint
 
@@ -9073,12 +9617,22 @@ $lstAlerts.Add_KeyDown({
 $lstAlerts.Add_DoubleClick({
     $idx = $lstAlerts.SelectedIndex
     if ($idx -ge 0 -and $idx -lt $script:Alerts.Count) {
-        $script:Alerts[$idx].Triggered = -not $script:Alerts[$idx].Triggered
-        $script:Alerts[$idx].TriggeredAt = if ($script:Alerts[$idx].Triggered) { (Get-Date).ToString("o") } else { "" }
-        Save-JsonState -Path $script:AlertsPath -Data $script:Alerts.ToArray()
+        $al = $script:Alerts[$idx]
+        if (Test-AlertExpired -Alert $al) {
+            # v4.3: an expired alert comes back without an end date
+            $al.ExpiresAt = ""
+            $al.Triggered = $false
+        } else {
+            $al.Triggered = -not $al.Triggered
+        }
+        $al.TriggeredAt = if ($al.Triggered) { (Get-Date).ToString("o") } else { "" }
+        if (-not $al.Triggered -and (Get-AlertKind $al.Condition) -eq "TRAIL") { $al.Peak = 0.0 }
+        Save-Alerts
         Refresh-WatchlistAndAlerts
     }
 })
+
+$btnAlertLog.Add_Click({ Show-AlertLogDialog })
 
 # Header Ticker Dropdown & Live Search Events
 $btnTickerDrop.Add_Click({
@@ -9420,6 +9974,7 @@ $uiTimer.Add_Tick({
     try {
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
+        if ($script:PushPending.Count -gt 0) { Pump-PushTasks }
         if ($nowTick -ge $script:NextEventsCheck) {
             $script:NextEventsCheck = $nowTick.AddMinutes(10)
             Update-EventsIfStale

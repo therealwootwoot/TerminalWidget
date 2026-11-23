@@ -246,8 +246,8 @@ Describe "Helpers" {
 Describe "Shared lists (v3.0)" {
     It "offers all alert conditions, each with a known kind" {
         $conds = @(Get-AlertConditions)
-        $conds.Count | Should -Be 8
-        @($conds | ForEach-Object { Get-AlertKind $_ } | Sort-Object -Unique) -join "," | Should -Be "PCT,PRICE,RSI,SMA"
+        $conds.Count | Should -Be 18
+        @($conds | ForEach-Object { Get-AlertKind $_ } | Sort-Object -Unique) -join "," | Should -Be "EKPCT,HIGH52,LOW52,PCT,PFPCT,PFVAL,PRICE,RSI,SMA,TRAIL,VOL"
     }
     It "cycles the display currency <From> -> <To>" -TestCases @(
         @{ From = "EUR"; To = "USD" }
@@ -1030,5 +1030,171 @@ Describe "Opening bookings across splits (v4.2)" {
         $p = Get-PositionFromTransactions -Transactions $tx -Ticker "NVDA" -Splits $s
         $p.Shares | Should -Be 100
         $p.AvgPrice | Should -Be 15
+    }
+}
+
+# ==============================================================================
+# v4.3
+# ==============================================================================
+Describe "Alert kinds (v4.3)" {
+    It "classifies <C> as <K>" -TestCases @(
+        @{ C = "Depot Tag% <="; K = "PFPCT" }, @{ C = "Depot >="; K = "PFVAL" }, @{ C = "Tag% >="; K = "PCT" },
+        @{ C = "Trailing %"; K = "TRAIL" }, @{ C = "EK% <="; K = "EKPCT" }, @{ C = "52W Hoch"; K = "HIGH52" },
+        @{ C = "52W Tief"; K = "LOW52" }, @{ C = "Volumen x"; K = "VOL" }, @{ C = "<="; K = "PRICE" }
+    ) {
+        param($C, $K)
+        Get-AlertKind $C | Should -Be $K
+    }
+    It "has a hint for every condition" {
+        foreach ($c in Get-AlertConditions) { Get-AlertTargetHint $c | Should -Not -BeNullOrEmpty }
+    }
+}
+
+Describe "Alert evaluation (v4.3)" {
+    BeforeAll {
+        function New-A { param([string]$C, [double]$T, [double]$Peak = [double]::NaN) [PSCustomObject]@{ Condition = $C; TargetPrice = $T; Currency = "EUR"; Peak = $Peak } }
+    }
+    It "price alert" {
+        $r = Get-AlertEvaluation -Alert (New-A ">=" 100) -Ctx @{ Price = 101.0 }
+        $r.Ok | Should -BeTrue; $r.Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A ">=" 100) -Ctx @{ Price = 99.0 }).Met | Should -BeFalse
+    }
+    It "is not ok without data" {
+        (Get-AlertEvaluation -Alert (New-A ">=" 100) -Ctx @{}).Ok | Should -BeFalse
+        (Get-AlertEvaluation -Alert (New-A "EK% >=" 10) -Ctx @{ Price = 100.0 }).Ok | Should -BeFalse
+    }
+    It "trailing stop follows the high and fires on the drop" {
+        $a = New-A "Trailing %" 10
+        $r1 = Get-AlertEvaluation -Alert $a -Ctx @{ Price = 100.0 }
+        $r1.Peak | Should -Be 100; $r1.Met | Should -BeFalse
+        $a.Peak = $r1.Peak
+        $r2 = Get-AlertEvaluation -Alert $a -Ctx @{ Price = 120.0 }
+        $r2.Peak | Should -Be 120; $r2.Met | Should -BeFalse
+        $a.Peak = $r2.Peak
+        (Get-AlertEvaluation -Alert $a -Ctx @{ Price = 109.0 }).Met | Should -BeFalse
+        $r4 = Get-AlertEvaluation -Alert $a -Ctx @{ Price = 108.0 }
+        $r4.Met | Should -BeTrue
+        $r4.Peak | Should -Be 120
+        [math]::Round($r4.Value, 2) | Should -Be -10
+    }
+    It "percent from average cost" {
+        $r = Get-AlertEvaluation -Alert (New-A "EK% >=" 20) -Ctx @{ Price = 121.0; AvgCost = 100.0 }
+        $r.Met | Should -BeTrue
+        [math]::Round($r.Value, 1) | Should -Be 21
+        (Get-AlertEvaluation -Alert (New-A "EK% <=" -10) -Ctx @{ Price = 95.0; AvgCost = 100.0 }).Met | Should -BeFalse
+        (Get-AlertEvaluation -Alert (New-A "EK% <=" -10) -Ctx @{ Price = 89.0; AvgCost = 100.0 }).Met | Should -BeTrue
+    }
+    It "52-week high with tolerance" {
+        (Get-AlertEvaluation -Alert (New-A "52W Hoch" 0) -Ctx @{ QuotePrice = 199.0; High52 = 200.0 }).Met | Should -BeFalse
+        (Get-AlertEvaluation -Alert (New-A "52W Hoch" 0) -Ctx @{ QuotePrice = 200.0; High52 = 200.0 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "52W Hoch" 1) -Ctx @{ QuotePrice = 198.5; High52 = 200.0 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "52W Tief" 2) -Ctx @{ QuotePrice = 51.0; Low52 = 50.0 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "52W Tief" 2) -Ctx @{ QuotePrice = 52.0; Low52 = 50.0 }).Met | Should -BeFalse
+    }
+    It "volume spike and portfolio alerts" {
+        (Get-AlertEvaluation -Alert (New-A "Volumen x" 2) -Ctx @{ RelVol = 2.4 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "Volumen x" 2) -Ctx @{ RelVol = [double]::NaN }).Ok | Should -BeFalse
+        (Get-AlertEvaluation -Alert (New-A "Depot >=" 50000) -Ctx @{ PfValue = 50100.0 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "Depot Tag% <=" -2) -Ctx @{ PfDayPct = -2.5 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "Depot Tag% <=" -2) -Ctx @{ PfDayPct = -1.5 }).Met | Should -BeFalse
+        Test-PortfolioAlertKind "PFVAL" | Should -BeTrue
+        Test-PortfolioAlertKind "PRICE" | Should -BeFalse
+    }
+    It "keeps the v3 behaviour for day%, RSI and SMA" {
+        (Get-AlertEvaluation -Alert (New-A "Tag% <=" -3) -Ctx @{ ChangePct = -3.2 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "RSI >=" 70) -Ctx @{ Rsi = 71.0; RsiPeriod = 14 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "> SMA" 0) -Ctx @{ QuotePrice = 10.0; Sma = 9.0; SmaPeriod = 20 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert (New-A "< SMA" 0) -Ctx @{ QuotePrice = 10.0; Sma = 9.0; SmaPeriod = 20 }).Met | Should -BeFalse
+    }
+}
+
+Describe "Relative volume (v4.3)" {
+    It "compares today with the same time of the previous days" {
+        $d0 = 1700000000 - (1700000000 % 86400)
+        $ts = @(); $vol = @()
+        foreach ($day in 0..2) {
+            foreach ($h in 0..5) { $ts += [long]($d0 + $day * 86400 + 50400 + $h * 3600); $vol += 100.0 }
+        }
+        # today: two hours so far with 300 each -> 600 vs 200 usual
+        $ts += [long]($d0 + 3 * 86400 + 50400); $vol += 300.0
+        $ts += [long]($d0 + 3 * 86400 + 54000); $vol += 300.0
+        [math]::Round((Get-RelativeVolume -Ts $ts -Vol $vol -GmtOffset 0), 2) | Should -Be 3
+    }
+    It "is NaN with only one day" {
+        [double]::IsNaN((Get-RelativeVolume -Ts @(1000L, 4600L) -Vol @(1.0, 2.0))) | Should -BeTrue
+    }
+}
+
+Describe "Quiet hours and expiry (v4.3)" {
+    It "quiet <From>-<To> at <At> = <Exp>" -TestCases @(
+        @{ From = "22:00"; To = "07:00"; At = "23:30"; Exp = $true }, @{ From = "22:00"; To = "07:00"; At = "06:59"; Exp = $true },
+        @{ From = "22:00"; To = "07:00"; At = "07:00"; Exp = $false }, @{ From = "12:00"; To = "13:00"; At = "12:30"; Exp = $true },
+        @{ From = "12:00"; To = "13:00"; At = "13:30"; Exp = $false }, @{ From = ""; To = ""; At = "03:00"; Exp = $false },
+        @{ From = "08:00"; To = "08:00"; At = "08:00"; Exp = $false }
+    ) {
+        param($From, $To, $At, $Exp)
+        Test-QuietHours -From $From -To $To -Now ([DateTime]::Parse("2026-11-23 $At", [System.Globalization.CultureInfo]::InvariantCulture)) | Should -Be $Exp
+    }
+    It "computes expiry dates and checks them" {
+        $now = [DateTime]::new(2026, 1, 31, 10, 0, 0)
+        Get-AlertExpiryDate -Days 0 -Now $now | Should -Be ""
+        Get-AlertExpiryDate -Days 1 -Now $now | Should -Be "2026-01-31"
+        Get-AlertExpiryDate -Days 7 -Now $now | Should -Be "2026-02-07"
+        Get-AlertExpiryDate -Days 31 -Now $now | Should -Be "2026-02-28"
+        $a = [PSCustomObject]@{ ExpiresAt = "2026-01-31" }
+        Test-AlertExpired -Alert $a -Now $now | Should -BeFalse
+        Test-AlertExpired -Alert $a -Now $now.AddDays(1) | Should -BeTrue
+        Test-AlertExpired -Alert ([PSCustomObject]@{ ExpiresAt = "" }) -Now $now | Should -BeFalse
+        @((Get-AlertExpiryChoices).Keys).Count | Should -Be 5
+    }
+}
+
+Describe "Phone push (v4.3)" {
+    It "builds an ntfy request" {
+        $r = New-PushRequest -Service "ntfy" -Title "Alarm: NVDA" -Message "Kurs 120 über 118" -Server "https://ntfy.sh/" -Topic "tw-abc123" -Priority 4 -Tags @("bell")
+        $r.Url | Should -Be "https://ntfy.sh"
+        $j = $r.Json | ConvertFrom-Json
+        $j.topic | Should -Be "tw-abc123"
+        $j.title | Should -Be "Alarm: NVDA"
+        $j.priority | Should -Be 4
+        @($j.tags)[0] | Should -Be "bell"
+    }
+    It "keeps umlauts in the JSON" {
+        $r = New-PushRequest -Service "ntfy" -Title "Ä" -Message "Größer" -Topic "t1"
+        ($r.Json | ConvertFrom-Json).message | Should -Be "Größer"
+    }
+    It "refuses bad ntfy topics and servers" {
+        New-PushRequest -Service "ntfy" -Title "x" -Message "y" -Topic "" | Should -BeNullOrEmpty
+        New-PushRequest -Service "ntfy" -Title "x" -Message "y" -Topic "a/b" | Should -BeNullOrEmpty
+        New-PushRequest -Service "ntfy" -Title "x" -Message "y" -Topic "ok" -Server "ftp://x" | Should -BeNullOrEmpty
+    }
+    It "builds a Telegram request" {
+        $r = New-PushRequest -Service "Telegram" -Title "T" -Message "M" -Token "123456:AAbb-cc_DD" -ChatId "-100987"
+        $r.Url | Should -Be "https://api.telegram.org/bot123456:AAbb-cc_DD/sendMessage"
+        $j = $r.Json | ConvertFrom-Json
+        $j.chat_id | Should -Be "-100987"
+        $j.text | Should -Be "T`nM"
+    }
+    It "refuses incomplete Telegram settings and unknown services" {
+        New-PushRequest -Service "Telegram" -Title "T" -Message "M" -Token "bad" -ChatId "1" | Should -BeNullOrEmpty
+        New-PushRequest -Service "Telegram" -Title "T" -Message "M" -Token "1:a" -ChatId "abc" | Should -BeNullOrEmpty
+        New-PushRequest -Service "Aus" -Title "T" -Message "M" | Should -BeNullOrEmpty
+    }
+    It "finds the chat id in getUpdates" {
+        $j = '{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":111}}},{"update_id":2,"message":{"chat":{"id":222}}}]}' | ConvertFrom-Json
+        Get-TelegramChatId $j | Should -Be "222"
+        Get-TelegramChatId ('{"ok":true,"result":[]}' | ConvertFrom-Json) | Should -Be ""
+    }
+    It "limits pushes per minute" {
+        $now = Get-Date
+        $sent = @(1..10 | ForEach-Object { $now.AddSeconds(-$_) })
+        Test-PushAllowed -Sent $sent -Now $now -Max 10 | Should -BeFalse
+        Test-PushAllowed -Sent @($now.AddMinutes(-5)) -Now $now -Max 10 | Should -BeTrue
+        Test-PushAllowed -Sent @() -Now $now | Should -BeTrue
+    }
+    It "makes random topics" {
+        $t = New-RandomTopic
+        $t | Should -Match '^tw-[a-z0-9]{12}$'
+        (New-PushRequest -Service "ntfy" -Title "x" -Message "y" -Topic $t) | Should -Not -BeNullOrEmpty
     }
 }

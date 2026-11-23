@@ -645,14 +645,6 @@ function Parse-DecimalInput {
     return 0.0
 }
 
-function Get-AlertKind {
-    param([string]$Condition)
-    if ($Condition -like "Tag%*") { return "PCT" }
-    if ($Condition -like "RSI*")  { return "RSI" }
-    if ($Condition -like "*SMA") { return "SMA" }
-    return "PRICE"
-}
-
 function Format-RearmLabel {
     param([int]$Min)
     if ($Min -ge 1440) { return ("{0}T" -f [int]($Min / 1440)) }
@@ -672,10 +664,6 @@ function Format-RearmLabel {
 # ------------------------------------------------------------------------------
 function Get-DisplayCurrencies {
     return @("EUR", "USD", "CHF", "GBP")
-}
-
-function Get-AlertConditions {
-    return @(">=", "<=", "Tag% >=", "Tag% <=", "RSI >=", "RSI <=", "> SMA", "< SMA")
 }
 
 function Get-NextDisplayCurrency {
@@ -1091,7 +1079,7 @@ function Get-DataMigrationAction {
 }
 
 function Get-DataFileNames {
-    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json")
+    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -1136,7 +1124,7 @@ function Get-GlossaryEntries {
     & $add "TARGETEK" "Ziel-EK" "Kapital, das für einen gewünschten EK nötig wäre." "Gib einen gewünschten neuen Einstandskurs ein: du siehst, wie viel Kapital du zum aktuellen Kurs nachkaufen müsstest. Geht nur, wenn der Ziel-EK zwischen aktuellem EK und Kurs liegt."
     & $add "SPARK" "5-Tage-Trend" "Verlauf der letzten 5 Tage." "Mini-Chart aus Stundenkursen der letzten 5 Handelstage, nur reguläre Sitzung. Grün = höher als vor 5 Tagen."
     & $add "HIGH52" "52W-H" "Abstand zum 52-Wochen-Hoch." "Wie weit der Kurs unter dem höchsten Kurs der letzten 52 Wochen liegt. -20 % heißt: 20 % unter dem Jahreshoch."
-    & $add "ALERTCOND" "Alarm-Bedingung" "Wann der Alarm auslöst." "Kurs >= / <=: Kurs in Anzeigewährung. Tag% >= / <=: Tagesänderung in %. RSI >= / <=: RSI auf Stundenbasis. > SMA / < SMA: Kurs kreuzt den schnellen SMA (Stundenbasis), kein Wert nötig."
+    & $add "ALERTCOND" "Alarm-Bedingung" "Wann der Alarm auslöst." "Kurs >= / <=: Kurs in Anzeigewährung. Tag% >= / <=: Tagesänderung in %. RSI >= / <=: RSI auf Stundenbasis. > SMA / < SMA: Kurs kreuzt den schnellen SMA (Stundenbasis), kein Wert nötig. Trailing %: Rückgang vom höchsten Kurs seit dem Anlegen. EK% >= / <=: Gewinn/Verlust zum Einstand der Position. 52W Hoch / Tief: Kurs erreicht das 52-Wochen-Hoch/-Tief (Zahl = erlaubter Abstand in %). Volumen x: Volumen ist ein Vielfaches des Üblichen zur gleichen Uhrzeit. Depot >= / <= und Depot Tag%: ganzes Portfolio (Ticker egal)."
     & $add "REARM" "Wieder scharf (Re-Arm)" "Alarm nach einer Wartezeit erneut aktivieren." "Einmalig: der Alarm bleibt nach dem Auslösen aus. R 15m bis R 1T: der Alarm wird wieder scharf, sobald die Wartezeit um ist UND die Bedingung nicht mehr erfüllt ist, damit er nicht bei jeder Aktualisierung erneut auslöst."
     & $add "FX" "Wechselkurse" "Umrechnung über die EUR-Kurse von Yahoo." "Alle Beträge werden über EUR-Kurse von Yahoo (z. B. EURUSD=X) umgerechnet. 'Fallback' bedeutet: es gibt noch keinen Live-Kurs, ein fester Ersatzkurs wird verwendet und die Werte sind ungenau."
     & $add "STAND" "Stand" "Zeit der letzten erfolgreichen Aktualisierung." "Uhrzeit der letzten erfolgreichen Datenabfrage. Gelb = älter als zwei Intervalle, rot = offline oder sehr alt."
@@ -1168,6 +1156,12 @@ function Get-GlossaryEntries {
     & $add "EXDATE" "Ex-Tag" "Ab diesem Tag ohne Dividende gehandelt." "Wer die Aktie am Tag vor dem Ex-Tag (Schluss) hält, bekommt die Dividende. Am Ex-Tag fällt der Kurs ungefähr um die Dividende. Die Auszahlung (Zahltag) folgt meist einige Tage bis Wochen später. Mit ~ markierte Tage sind aus dem Rhythmus der letzten Zahlungen geschätzt."
     & $add "DIVFORECAST" "Dividendenprognose" "Erwartete Zahlungen der nächsten 12 Monate." "Die Zahlungen des letzten Jahres, um ein Jahr verschoben, mal deine Stückzahl, in der Basiswährung zum heutigen Wechselkurs. Nach Ex-Tag in Monate einsortiert. Eine Schätzung: Kürzungen, Erhöhungen und Sonderdividenden sind nicht enthalten, Steuern nicht abgezogen."
     & $add "EARNINGS" "Quartalszahlen" "Termin der nächsten Geschäftszahlen." "An diesem Tag veröffentlicht das Unternehmen seine Quartals- oder Jahreszahlen, oft vor Börsenbeginn oder nach Börsenschluss. Der Kurs schwankt dann meist stärker als sonst. Termin von Yahoo, manchmal noch vorläufig (Zeitraum)."
+    & $add "TRAIL" "Trailing Stop" "Alarm, wenn der Kurs um X % vom Höchststand fällt." "Der Alarm merkt sich den höchsten Kurs seit dem Anlegen (bzw. seit dem letzten Wieder-scharf-Schalten). Fällt der Kurs um die eingestellten Prozent unter dieses Hoch, löst er aus. Steigt der Kurs, wandert die Stopp-Marke mit nach oben - Gewinne laufen lassen, Verluste begrenzen. Es wird nichts verkauft, nur gemeldet."
+    & $add "RELVOL" "Relatives Volumen" "Heutiges Volumen im Vergleich zum Üblichen." "Umsatz heute bis jetzt geteilt durch den durchschnittlichen Umsatz der letzten Tage bis zur gleichen Uhrzeit (Stundenkerzen, nur reguläre Sitzung). 2x = doppelt so viel gehandelt wie sonst - oft ein Zeichen für Nachrichten."
+    & $add "EXPIRY" "Gültig bis" "Alarm läuft automatisch ab." "Nach diesem Tag wird der Alarm nicht mehr geprüft und in der Liste als abgelaufen (EXP) angezeigt. Doppelklick schaltet ihn wieder scharf, Entf löscht ihn."
+    & $add "QUIET" "Ruhezeit" "In dieser Zeit kein Ton und kein Handy-Push." "Alarme werden weiter geprüft und im Verlauf protokolliert, aber zwischen Beginn und Ende gibt es keinen Ton und keine Push-Nachricht (die Sprechblase am PC erscheint still). Über Mitternacht möglich, z. B. 22:00 bis 07:00. Gleiche Zeiten = keine Ruhezeit."
+    & $add "PUSH" "Handy-Push" "Alarme aufs Handy schicken (ntfy oder Telegram)." "ntfy: kostenlose App ntfy installieren, dasselbe Thema (Topic) abonnieren wie hier eingetragen - fertig, kein Konto nötig. Das Thema ist wie ein Passwort: wer es kennt, liest mit, darum ein zufälliges nehmen. Telegram: bei @BotFather einen Bot anlegen, den Token hier eintragen, dem Bot eine Nachricht schreiben und 'Chat-ID holen' klicken. Der Token wird mit Windows (DPAPI) verschlüsselt gespeichert."
+    & $add "ALERTLOG" "Alarm-Verlauf" "Liste aller ausgelösten Alarme." "Jeder Treffer wird mit Zeit, Ticker, Wert und Notiz gespeichert (die letzten 500), auch während der Ruhezeit. Ob ein Push verschickt wurde, steht in der letzten Spalte."
     & $add "OPENING" "Anfangsbestand" "Nachgetragener Kauf für Stück ohne Buchung." "Für Stück, die im Portfolio-Editor eingetragen, aber nie als Kauf gebucht wurden, wird mit deinem Kaufdatum ein Kauf nachgebucht. Der Kurs wird so gewählt, dass dein EK gleich bleibt. Die Position selbst ändert sich nicht; Wertentwicklung, XIRR und Jahresreport können sie dann mitrechnen."
     $script:GlossaryCache = $e.ToArray()
     return $script:GlossaryCache
@@ -2251,4 +2245,263 @@ function Get-SplitFactorAfter {
         if ([string]::CompareOrdinal([string]$sp.Date, $Date) -gt 0) { $f *= [double]$sp.Ratio }
     }
     return $f
+}
+
+# ==============================================================================
+# v4.3: more alert types, quiet hours, expiry, phone push
+# ==============================================================================
+
+# Alert kinds by condition text (the order matters: "Depot Tag% >=" is a
+# portfolio alert, "Tag% >=" a ticker alert)
+function Get-AlertKind {
+    param([string]$Condition)
+    if ($Condition -like "Depot Tag%*") { return "PFPCT" }
+    if ($Condition -like "Depot*")      { return "PFVAL" }
+    if ($Condition -like "Tag%*")       { return "PCT" }
+    if ($Condition -like "RSI*")        { return "RSI" }
+    if ($Condition -like "*SMA")        { return "SMA" }
+    if ($Condition -like "Trailing*")   { return "TRAIL" }
+    if ($Condition -like "EK%*")        { return "EKPCT" }
+    if ($Condition -eq "52W Hoch")      { return "HIGH52" }
+    if ($Condition -eq "52W Tief")      { return "LOW52" }
+    if ($Condition -like "Volumen*")    { return "VOL" }
+    return "PRICE"
+}
+
+function Get-AlertConditions {
+    return @(">=", "<=", "Tag% >=", "Tag% <=", "RSI >=", "RSI <=", "> SMA", "< SMA",
+             "Trailing %", "EK% >=", "EK% <=", "52W Hoch", "52W Tief", "Volumen x",
+             "Depot >=", "Depot <=", "Depot Tag% >=", "Depot Tag% <=")
+}
+
+function Test-PortfolioAlertKind {
+    param([string]$Kind)
+    return ($Kind -eq "PFVAL" -or $Kind -eq "PFPCT")
+}
+
+function Get-AlertTargetHint {
+    # What the number field means for a condition (placeholder / tooltip)
+    param([string]$Condition)
+    switch (Get-AlertKind $Condition) {
+        "PCT"    { return "Tagesänderung in %, z. B. 5 oder -3" }
+        "RSI"    { return "RSI-Wert 0-100, z. B. 70" }
+        "SMA"    { return "keine Zahl nötig" }
+        "TRAIL"  { return "Rückgang vom Höchstkurs in %, z. B. 8" }
+        "EKPCT"  { return "Gewinn/Verlust zum Einstand in %, z. B. 20 oder -10" }
+        "HIGH52" { return "Abstand zum 52W-Hoch in %, 0 = neues Hoch" }
+        "LOW52"  { return "Abstand zum 52W-Tief in %, 0 = neues Tief" }
+        "VOL"    { return "Vielfaches des normalen Volumens, z. B. 2" }
+        "PFVAL"  { return "Depotwert in der Anzeigewährung" }
+        "PFPCT"  { return "Tagesänderung des Depots in %" }
+        default  { return "Kurs in der gewählten Währung" }
+    }
+}
+
+function Get-AlertEvaluation {
+    # Pure alert check. $Ctx (all optional, NaN = unknown):
+    #   Price (in the alert currency), QuotePrice, High52, Low52 (quote currency),
+    #   ChangePct, Rsi, Sma, AvgCost (alert currency), RelVol,
+    #   PfValue (alert currency), PfDayPct, RsiPeriod, SmaPeriod
+    # Returns @{ Ok; Value; Met; Text; Peak } - Peak = new trailing high
+    param($Alert, [hashtable]$Ctx)
+    $res = @{ Ok = $false; Value = [double]::NaN; Met = $false; Text = ""; Peak = [double]::NaN }
+    $cond = [string]$Alert.Condition
+    $t = [double]$Alert.TargetPrice
+    $get = { param([string]$K) if ($Ctx.ContainsKey($K) -and $null -ne $Ctx[$K]) { return [double]$Ctx[$K] } return [double]::NaN }
+    $cmp = {
+        param([double]$V, [string]$Op)
+        return (($Op -like "*>=*" -and $V -ge $t) -or ($Op -like "*<=*" -and $V -le $t))
+    }
+    $cur = [string]$Alert.Currency
+    switch (Get-AlertKind $cond) {
+        "PCT" {
+            $v = & $get "ChangePct"; if ([double]::IsNaN($v)) { return $res }
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Tagesänderung {0:+0.00;-0.00}% (Ziel {1} {2:N2}%)" -f $v, $cond.Substring(4).Trim(), $t
+        }
+        "RSI" {
+            $v = & $get "Rsi"; if ([double]::IsNaN($v)) { return $res }
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "RSI-{0} (1h) {1:N1} (Ziel {2} {3:N1})" -f [int](& $get "RsiPeriod"), $v, $cond.Substring(3).Trim(), $t
+        }
+        "SMA" {
+            $sma = & $get "Sma"; $qp = & $get "QuotePrice"
+            if ([double]::IsNaN($sma) -or $sma -le 0 -or [double]::IsNaN($qp)) { return $res }
+            $dist = (($qp / $sma) - 1.0) * 100.0
+            $res.Ok = $true; $res.Value = $dist
+            $res.Met = if ($cond -like ">*") { $qp -gt $sma } else { $qp -lt $sma }
+            $res.Text = "Kurs {0:N2} vs. SMA{1} (1h) {2:N2} ({3:+0.00;-0.00}%)" -f $qp, [int](& $get "SmaPeriod"), $sma, $dist
+        }
+        "TRAIL" {
+            $px = & $get "Price"; if ([double]::IsNaN($px) -or $px -le 0 -or $t -le 0) { return $res }
+            $peak = [double]$Alert.Peak
+            if ([double]::IsNaN($peak) -or $peak -le 0 -or $px -gt $peak) { $peak = $px }
+            $drop = (($px / $peak) - 1.0) * 100.0
+            $stop = $peak * (1.0 - $t / 100.0)
+            $res.Ok = $true; $res.Value = $drop; $res.Peak = $peak
+            $res.Met = ($px -le $stop)
+            $res.Text = "Kurs {0:N2} {1}, Hoch seit Start {2:N2} ({3:+0.00;-0.00}%), Stopp bei {4:N2}" -f $px, $cur, $peak, $drop, $stop
+        }
+        "EKPCT" {
+            $px = & $get "Price"; $avg = & $get "AvgCost"
+            if ([double]::IsNaN($px) -or [double]::IsNaN($avg) -or $avg -le 0) { return $res }
+            $v = (($px / $avg) - 1.0) * 100.0
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Kurs {0:N2} {1} = {2:+0.00;-0.00}% zum EK {3:N2} (Ziel {4} {5:N1}%)" -f $px, $cur, $v, $avg, $cond.Substring(3).Trim(), $t
+        }
+        "HIGH52" {
+            $qp = & $get "QuotePrice"; $h = & $get "High52"
+            if ([double]::IsNaN($qp) -or [double]::IsNaN($h) -or $h -le 0) { return $res }
+            $v = (($qp / $h) - 1.0) * 100.0
+            $res.Ok = $true; $res.Value = $v
+            $res.Met = ($qp -ge $h * (1.0 - [math]::Abs($t) / 100.0) - 1e-9)
+            $res.Text = "Kurs {0:N2}, 52W-Hoch {1:N2} ({2:+0.00;-0.00}%)" -f $qp, $h, $v
+        }
+        "LOW52" {
+            $qp = & $get "QuotePrice"; $l = & $get "Low52"
+            if ([double]::IsNaN($qp) -or [double]::IsNaN($l) -or $l -le 0) { return $res }
+            $v = (($qp / $l) - 1.0) * 100.0
+            $res.Ok = $true; $res.Value = $v
+            $res.Met = ($qp -le $l * (1.0 + [math]::Abs($t) / 100.0) + 1e-9)
+            $res.Text = "Kurs {0:N2}, 52W-Tief {1:N2} ({2:+0.00;-0.00}%)" -f $qp, $l, $v
+        }
+        "VOL" {
+            $rv = & $get "RelVol"; if ([double]::IsNaN($rv) -or $t -le 0) { return $res }
+            $res.Ok = $true; $res.Value = $rv; $res.Met = ($rv -ge $t)
+            $res.Text = "Volumen {0:N1}x so hoch wie üblich um diese Zeit (Ziel {1:N1}x)" -f $rv, $t
+        }
+        "PFVAL" {
+            $v = & $get "PfValue"; if ([double]::IsNaN($v)) { return $res }
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Depotwert {0:N2} {1} (Ziel {2} {3:N2})" -f $v, $cur, $cond.Substring(5).Trim(), $t
+        }
+        "PFPCT" {
+            $v = & $get "PfDayPct"; if ([double]::IsNaN($v)) { return $res }
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Depot heute {0:+0.00;-0.00}% (Ziel {1} {2:N2}%)" -f $v, $cond.Substring(10).Trim(), $t
+        }
+        default {
+            $v = & $get "Price"; if ([double]::IsNaN($v)) { return $res }
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Kurs {0:N2} {1} (Ziel {2} {3:N2})" -f $v, $cur, $cond, $t
+        }
+    }
+    return $res
+}
+
+function Get-RelativeVolume {
+    # Today's volume so far / average volume of the previous days up to the
+    # same time of day (regular-session bars only). NaN when not computable.
+    param([long[]]$Ts, [double[]]$Vol, [int]$GmtOffset = 0)
+    $n = [math]::Min(@($Ts).Count, @($Vol).Count)
+    if ($n -lt 2) { return [double]::NaN }
+    $days = [ordered]@{}
+    for ($i = 0; $i -lt $n; $i++) {
+        $loc = [long]$Ts[$i] + $GmtOffset
+        $day = [long][math]::Floor($loc / 86400.0)
+        $tod = $loc - $day * 86400
+        # string keys: an integer key would hit the "by position" indexer
+        $dk = "d" + $day
+        if (-not $days.Contains($dk)) { $days[$dk] = New-Object System.Collections.Generic.List[double[]] }
+        $days[$dk].Add([double[]]@($tod, [double]$Vol[$i]))
+    }
+    $keys = @($days.Keys)
+    if ($keys.Count -lt 2) { return [double]::NaN }
+    $today = $days[$keys[$keys.Count - 1]]
+    $lastTod = $today[$today.Count - 1][0]
+    $todayVol = 0.0
+    foreach ($b in $today) { $todayVol += $b[1] }
+    $sum = 0.0; $cnt = 0
+    for ($k = 0; $k -lt $keys.Count - 1; $k++) {
+        $s = 0.0
+        foreach ($b in $days[$keys[$k]]) { if ($b[0] -le $lastTod) { $s += $b[1] } }
+        if ($s -gt 0) { $sum += $s; $cnt++ }
+    }
+    if ($cnt -eq 0 -or $sum -le 0) { return [double]::NaN }
+    return ($todayVol / ($sum / $cnt))
+}
+
+function Test-QuietHours {
+    # "22:00" - "07:00" (over midnight allowed); empty or equal = never quiet
+    param([string]$From, [string]$To, [DateTime]$Now = (Get-Date))
+    $f = [TimeSpan]::Zero; $t = [TimeSpan]::Zero
+    if (-not [TimeSpan]::TryParse([string]$From, [ref]$f) -or -not [TimeSpan]::TryParse([string]$To, [ref]$t)) { return $false }
+    if ($f -eq $t) { return $false }
+    $n = $Now.TimeOfDay
+    if ($f -lt $t) { return ($n -ge $f -and $n -lt $t) }
+    return ($n -ge $f -or $n -lt $t)
+}
+
+function Get-AlertExpiryChoices {
+    return [ordered]@{ "unbegrenzt" = 0; "heute" = 1; "1 Woche" = 7; "1 Monat" = 31; "3 Monate" = 92 }
+}
+
+function Get-AlertExpiryDate {
+    # Days from Get-AlertExpiryChoices -> last valid day (yyyy-MM-dd), "" = no end
+    param([int]$Days, [DateTime]$Now = (Get-Date))
+    if ($Days -le 0) { return "" }
+    if ($Days -eq 1) { return $Now.ToString("yyyy-MM-dd") }
+    if ($Days -eq 31) { return $Now.AddMonths(1).ToString("yyyy-MM-dd") }
+    if ($Days -eq 92) { return $Now.AddMonths(3).ToString("yyyy-MM-dd") }
+    return $Now.AddDays($Days).ToString("yyyy-MM-dd")
+}
+
+function Test-AlertExpired {
+    param($Alert, [DateTime]$Now = (Get-Date))
+    $e = [string]$Alert.ExpiresAt
+    if (-not $e) { return $false }
+    return ([string]::CompareOrdinal($Now.ToString("yyyy-MM-dd"), $e) -gt 0)
+}
+
+# ------------------------------------------------------------------------------
+# Phone push (ntfy or Telegram): request building is pure, sending is in the UI
+# ------------------------------------------------------------------------------
+function New-PushRequest {
+    # Returns @{ Url; Json } or $null when the service is not configured
+    param([string]$Service, [string]$Title, [string]$Message, [string]$Server = "https://ntfy.sh",
+          [string]$Topic = "", [string]$Token = "", [string]$ChatId = "", [int]$Priority = 3, [string[]]$Tags = @())
+    switch ($Service) {
+        "ntfy" {
+            if (-not $Topic -or $Topic -notmatch '^[A-Za-z0-9_-]{1,64}$') { return $null }
+            $srv = ([string]$Server).Trim().TrimEnd('/')
+            if (-not $srv) { $srv = "https://ntfy.sh" }
+            if ($srv -notmatch '^https?://') { return $null }
+            $body = [ordered]@{ topic = $Topic; title = $Title; message = $Message; priority = [math]::Max(1, [math]::Min(5, $Priority)) }
+            if (@($Tags).Count -gt 0) { $body.tags = @($Tags) }
+            return @{ Url = $srv; Json = ($body | ConvertTo-Json -Compress) }
+        }
+        "Telegram" {
+            if (-not $Token -or $Token -notmatch '^\d+:[A-Za-z0-9_-]+$' -or -not $ChatId -or $ChatId -notmatch '^-?\d+$') { return $null }
+            $txt = if ($Title) { "{0}`n{1}" -f $Title, $Message } else { $Message }
+            $body = [ordered]@{ chat_id = $ChatId; text = $txt; disable_web_page_preview = $true }
+            return @{ Url = ("https://api.telegram.org/bot{0}/sendMessage" -f $Token); Json = ($body | ConvertTo-Json -Compress) }
+        }
+    }
+    return $null
+}
+
+function Get-TelegramChatId {
+    # Chat of the newest message the bot received (getUpdates); "" if none
+    param($Json)
+    $id = ""
+    try {
+        foreach ($u in @($Json.result)) {
+            $m = if ($null -ne $u.message) { $u.message } elseif ($null -ne $u.channel_post) { $u.channel_post } else { $null }
+            if ($null -ne $m -and $null -ne $m.chat -and $null -ne $m.chat.id) { $id = [string]$m.chat.id }
+        }
+    } catch { $id = "" }
+    return $id
+}
+
+function Test-PushAllowed {
+    # Simple rate limit: at most $Max pushes in the last 60 seconds
+    param([DateTime[]]$Sent, [DateTime]$Now = (Get-Date), [int]$Max = 10)
+    $recent = @(@($Sent) | Where-Object { ($Now - $_).TotalSeconds -lt 60 })
+    return ($recent.Count -lt $Max)
+}
+
+function New-RandomTopic {
+    $chars = "abcdefghijkmnpqrstuvwxyz23456789".ToCharArray()
+    $rng = New-Object System.Random
+    return ("tw-" + (-join (1..12 | ForEach-Object { $chars[$rng.Next($chars.Length)] })))
 }
