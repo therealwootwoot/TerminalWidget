@@ -246,14 +246,18 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.4"
+$script:AppVersion    = "4.7"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
 # ==============================================================================
 # Part 1: Storage Paths, Atomic Persistence & Config Migration
 # ==============================================================================
-$script:DataDir       = Join-Path $env:LOCALAPPDATA "TerminalWidget"
+# v4.5: portable.txt next to the script = data in <program folder>\data
+$script:IsPortable    = Test-Path (Join-Path $script:ScriptDir "portable.txt")
+$script:DataDir       = if ($script:IsPortable) { Join-Path $script:ScriptDir "data" } else { Join-Path $env:LOCALAPPDATA "TerminalWidget" }
+# v4.7: the CI smoke test runs on its own data folder
+if ($env:TW_SMOKE_TEST -and $env:TW_SMOKE_DIR) { $script:DataDir = $env:TW_SMOKE_DIR }
 $script:OldDataDir    = Join-Path $env:LOCALAPPDATA "NvidiaWidgetV2"   # v2.x / v3.x
 $script:ConfigPath    = Join-Path $script:DataDir "config.json"
 $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
@@ -379,6 +383,8 @@ Write-WidgetLog "Mutex acquired, building UI"
 
 function Save-JsonState {
     param([string]$Path, $Data)
+    # v4.5: after a restore / import the files on disk must stay as they are
+    if ($script:FreezeData) { return }
     $tmpPath = "$Path.tmp"
     try {
         # -InputObject (not the pipeline) so arrays with 0/1 items stay JSON arrays
@@ -438,9 +444,12 @@ function Backup-DataFiles {
         $dest = Join-Path $script:BackupDir ("{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $safe)
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
         foreach ($f in $files) { Copy-Item -Path $f -Destination $dest -Force }
+        # v4.5: further depots
+        $dd = Join-Path $script:DataDir "depots"
+        if (Test-Path $dd) { Copy-Item -Path $dd -Destination (Join-Path $dest "depots") -Recurse -Force }
         $all = @(Get-ChildItem -Path $script:BackupDir -Directory | Sort-Object Name -Descending)
-        if ($all.Count -gt 10) {
-            $all | Select-Object -Skip 10 | ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($all.Count -gt 20) {
+            $all | Select-Object -Skip 20 | ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
         }
         Write-WidgetLog "Backup created: $dest"
         return $dest
@@ -480,6 +489,27 @@ $defaultConfig = [PSCustomObject]@{
     # v4.4
     CommandHistory        = @()
     ClosedPollMinutes     = 10
+    # v4.5
+    Depots                = @()
+    ActiveDepot           = ""
+    MainDepotName         = "Hauptdepot"
+    LastAutoBackup        = ""
+    # v4.6
+    MaType                = "SMA"
+    LowerPanel            = "RSI"
+    UpDownScheme          = "Standard"
+    UpColor               = ""
+    DownColor             = ""
+    AccentHex             = ""
+    ShowArrows            = $false
+    PriceFlash            = $true
+    GlobalHotkey          = "Ctrl+Alt+W"
+    SnapToEdges           = $true
+    GridLayouts           = [PSCustomObject]@{}
+    UserLayouts           = @()
+    FirstRunDone          = $false
+    # v4.7
+    Language              = "DE"
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -578,14 +608,52 @@ if ([string]$script:Config.AnalysisRange -notin @("6M", "1Y", "3Y", "Max")) { $s
 $script:Config.ConcentrationWarnPct = [math]::Max(5, [math]::Min(90, [int]$script:Config.ConcentrationWarnPct))
 if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio")) { $script:Config.TerminalBottom = "Watchlist" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
-if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet")) { $script:Config.AccentColor = "Sky" }
+if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene")) { $script:Config.AccentColor = "Sky" }
+if ([string]$script:Config.MaType -notin @("SMA", "EMA")) { $script:Config.MaType = "SMA" }
+if ([string]$script:Config.LowerPanel -notin @("RSI", "MACD")) { $script:Config.LowerPanel = "RSI" }
 if ([int]$script:Config.RefreshSeconds -lt 5) { $script:Config.RefreshSeconds = 15 }
 if ([int]$script:Config.SlowRefreshSeconds -lt [int]$script:Config.RefreshSeconds) { $script:Config.SlowRefreshSeconds = [math]::Max(60, [int]$script:Config.RefreshSeconds) }
 if ([int]$script:Config.SmaFastPeriod -lt 2) { $script:Config.SmaFastPeriod = 20 }
 if ([int]$script:Config.SmaSlowPeriod -lt 5) { $script:Config.SmaSlowPeriod = 50 }
 if ([int]$script:Config.RsiPeriod -lt 2) { $script:Config.RsiPeriod = 14 }
 
+# ------------------------------------------------------------------------------
+# Depots (v4.5): several portfolios. The main depot uses portfolio.json /
+# transactions.json in the data folder (as before), others live in
+# depots\<id>\. Alerts, profiles and event dates are shared.
+# ------------------------------------------------------------------------------
+$script:DepotDir = Join-Path $script:DataDir "depots"
+
+function Get-DepotList {
+    $list = @([PSCustomObject]@{ Id = ""; Name = $(if ($script:Config.MainDepotName) { [string]$script:Config.MainDepotName } else { "Hauptdepot" }) })
+    foreach ($d in @($script:Config.Depots)) { if ($null -ne $d -and $d.Id) { $list += [PSCustomObject]@{ Id = [string]$d.Id; Name = [string]$d.Name } } }
+    return $list
+}
+
+function Get-DepotName {
+    param([string]$Id)
+    foreach ($d in Get-DepotList) { if ($d.Id -eq $Id) { return $d.Name } }
+    return ""
+}
+
+function Set-DepotPaths {
+    param([string]$Id)
+    if (-not $Id) {
+        $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
+        $script:TransactionsPath = Join-Path $script:DataDir "transactions.json"
+        return
+    }
+    $dir = Join-Path $script:DepotDir $Id
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $script:PortfolioPath = Join-Path $dir "portfolio.json"
+    $script:TransactionsPath = Join-Path $dir "transactions.json"
+}
+
+if ([string]$script:Config.ActiveDepot -and -not (@(Get-DepotList | Where-Object { $_.Id -eq [string]$script:Config.ActiveDepot }).Count)) { $script:Config.ActiveDepot = "" }
+Set-DepotPaths ([string]$script:Config.ActiveDepot)
+
 # Portfolio Holdings
+function Read-PortfolioData {
 $script:Portfolio = @{}
 $rawPortfolio = Load-JsonState -Path $script:PortfolioPath -DefaultValue $null
 if ($null -ne $rawPortfolio) {
@@ -605,6 +673,8 @@ if ($null -ne $rawPortfolio) {
         }
     }
 }
+}
+Read-PortfolioData
 
 # Global Alerts
 $script:Alerts = New-Object System.Collections.Generic.List[PSObject]
@@ -643,7 +713,8 @@ foreach ($e in @(Load-JsonState -Path $script:AlertLogPath -DefaultValue @())) {
 }
 
 # Transaction history (v2.9): buys / sells / dividends with realized P/L
-$script:TransactionsPath = Join-Path $script:DataDir "transactions.json"
+# (path set by Set-DepotPaths)
+function Read-TransactionsData {
 $script:Transactions = New-Object System.Collections.Generic.List[PSObject]
 foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @())) {
     if ($null -ne $t -and $t.Ticker -and $t.Type) {
@@ -661,6 +732,8 @@ foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @()
         })
     }
 }
+}
+Read-TransactionsData
 
 # Company profiles (v4.1): sector / country from Yahoo plus manual overrides,
 # kept apart from portfolio.json so editing a position never loses them
@@ -1460,6 +1533,7 @@ function Resolve-BestSymbol {
 
 function Confirm-Action {
     param([string]$Text, [string]$Title = "Bestätigen")
+    if ($env:TW_SMOKE_TEST) { return $true }
     # Pass the form as owner so the box never hides behind the TopMost widget
     $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
     $ans = [System.Windows.Forms.MessageBox]::Show(
@@ -1512,9 +1586,8 @@ function Remove-SymbolFromWatchlist {
     $u = $Symbol.Trim().ToUpper()
     if ([string]::IsNullOrWhiteSpace($u)) { return $false }
     if (@($script:Config.Watchlist) -notcontains $u) { return $false }
-    if ($AskConfirm -and -not (Confirm-Action -Text "'$u' aus der Watchlist entfernen?" -Title "Watchlist")) {
-        return $false
-    }
+    # v4.6: no question - Ctrl+Z restores the list ($AskConfirm kept for callers)
+    $undoList = @($script:Config.Watchlist)
 
     $list = New-Object System.Collections.Generic.List[string]
     foreach ($w in $script:Config.Watchlist) {
@@ -1535,6 +1608,7 @@ function Remove-SymbolFromWatchlist {
 
     $script:Config.Watchlist = $list.ToArray()
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-Undo -Kind "Watchlist" -Data $undoList -Text "$u aus der Watchlist entfernt"
     if ($script:Config.ActiveTicker.ToUpper() -eq $u) {
         Switch-ActiveTicker -NewTicker $list[0] -SkipResolve $true
     } else {
@@ -2261,8 +2335,14 @@ function Build-ActiveChartSeries {
 
     $script:ActiveSeries    = $dispArr
     $script:ActiveRsiSeries = Compute-Rsi -Prices $closeArr -Period ([int]$script:Config.RsiPeriod)
-    $script:ActiveSma20     = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
-    $script:ActiveSma50     = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    if ([string]$script:Config.MaType -eq "EMA") {
+        $script:ActiveSma20 = Compute-Ema -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
+        $script:ActiveSma50 = Compute-Ema -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    } else {
+        $script:ActiveSma20 = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
+        $script:ActiveSma50 = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    }
+    $script:ActiveMacd      = Compute-Macd -Prices $closeArr
     $script:ActiveVwap      = Compute-Vwap -Series $dispArr -GmtOffsetSec $script:ActiveGmtOffset
     $bb                     = Compute-BollingerBands -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod) -Multiplier 2.0
     $script:ActiveBbUpper   = $bb.Upper
@@ -2288,8 +2368,10 @@ function Enable-DoubleBuffering {
 $script:HoverIndex = -1
 
 # Palette & Cached GDI+ Resources
-$colGreen = [System.Drawing.Color]::FromArgb(16, 185, 129)
-$colRed   = [System.Drawing.Color]::FromArgb(244, 63, 94)
+# v4.6: up/down colours from the chosen scheme (colour-blind safe option)
+$udInit   = Get-UpDownColors -Scheme ([string]$script:Config.UpDownScheme) -UpHex ([string]$script:Config.UpColor) -DownHex ([string]$script:Config.DownColor)
+$colGreen = [System.Drawing.Color]::FromArgb($udInit.Up[0], $udInit.Up[1], $udInit.Up[2])
+$colRed   = [System.Drawing.Color]::FromArgb($udInit.Down[0], $udInit.Down[1], $udInit.Down[2])
 
 $fontTicker = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $fontPrice  = New-Object System.Drawing.Font("Consolas", 13.0, [System.Drawing.FontStyle]::Bold)
@@ -2303,6 +2385,10 @@ $script:GdiCache = @{}
 
 function Get-ThemeColors {
     $accent = switch ($script:Config.AccentColor) {
+        "Eigene" {
+            $rgb = ConvertFrom-HexColor ([string]$script:Config.AccentHex)
+            if ($null -ne $rgb) { [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) } else { [System.Drawing.Color]::FromArgb(56, 189, 248) }
+        }
         "Amber"  { [System.Drawing.Color]::FromArgb(245, 158, 11) }
         "Violet" { [System.Drawing.Color]::FromArgb(168, 85, 247) }
         default  { [System.Drawing.Color]::FromArgb(56, 189, 248) }
@@ -2805,8 +2891,8 @@ function Render-ChartAndRsi {
         if ($sma20Pts.Count -ge 2) { $g.DrawLines($c["sma20Pen"], $sma20Pts.ToArray()) }
         if ($sma50Pts.Count -ge 2) { $g.DrawLines($c["sma50Pen"], $sma50Pts.ToArray()) }
 
-        $s1Lbl = "SMA$($script:Config.SmaFastPeriod)"
-        $s2Lbl = "SMA$($script:Config.SmaSlowPeriod)"
+        $s1Lbl = "$($script:Config.MaType)$($script:Config.SmaFastPeriod)"
+        $s2Lbl = "$($script:Config.MaType)$($script:Config.SmaSlowPeriod)"
         $g.DrawString($s1Lbl, $fontAxis, $c["sma20Br"], ($priceRect.Left + $leftLegendOffset), ($priceRect.Top + (S 4)))
         $g.DrawString($s2Lbl, $fontAxis, $c["sma50Br"], ($priceRect.Left + $leftLegendOffset + (S 44)), ($priceRect.Top + (S 4)))
         & $addLeg $s1Lbl ($priceRect.Left + $leftLegendOffset) ($priceRect.Top + (S 4)) "SMA"
@@ -2879,8 +2965,59 @@ function Render-ChartAndRsi {
     $bottomAxisAnchor = $priceRect.Bottom
     $rsiRectL = $null
 
-    # Optional RSI Sub-Panel
-    if ($showRsi -and $rsiH -ge (S 42)) {
+    # Optional RSI Sub-Panel (v4.6: or MACD)
+    if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
+        $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
+        $g.FillRectangle($c["panelBrush"], $rsiRect)
+        $g.DrawRectangle($c["sepPen"], $rsiRect)
+        $mAll = $script:ActiveMacd
+        if ($null -ne $mAll -and @($mAll.Macd).Count -eq $totalN) {
+            $vM = Get-ArraySlice $mAll.Macd $s0 $s1
+            $vS = Get-ArraySlice $mAll.Signal $s0 $s1
+            $vH = Get-ArraySlice $mAll.Hist $s0 $s1
+            $mx = 0.0
+            for ($i = 0; $i -lt $n; $i++) {
+                foreach ($v in @($vM[$i], $vS[$i], $vH[$i])) { if (-not [double]::IsNaN([double]$v) -and [math]::Abs([double]$v) -gt $mx) { $mx = [math]::Abs([double]$v) } }
+            }
+            if ($mx -gt 0) {
+                $mx *= 1.1
+                $y0 = $rsiRect.Top + $rsiRect.Height / 2.0
+                $sc = ($rsiRect.Height / 2.0) / $mx
+                $g.DrawLine($c["gridPen"], $rsiRect.Left, [int]$y0, $rsiRect.Right, [int]$y0)
+                $bw = [math]::Max(1.0, ($rsiRect.Width / [double][math]::Max(1, $n)) * 0.6)
+                $mPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+                $sPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+                for ($i = 0; $i -lt $n; $i++) {
+                    $x = $rsiRect.Left + (($i / [double][math]::Max(1, $n - 1)) * $rsiRect.Width)
+                    $hv = [double]$vH[$i]
+                    if (-not [double]::IsNaN($hv) -and $hv -ne 0) {
+                        $hy = $hv * $sc
+                        $br = if ($hv -ge 0) { $c["brUp"] } else { $c["brDown"] }
+                        $top = if ($hv -ge 0) { $y0 - $hy } else { $y0 }
+                        $g.FillRectangle($br, [float]($x - $bw / 2), [float]$top, [float]$bw, [float][math]::Max(1.0, [math]::Abs($hy)))
+                    }
+                    if (-not [double]::IsNaN([double]$vM[$i])) { $mPts.Add((New-Object System.Drawing.PointF([float]$x, [float]($y0 - [double]$vM[$i] * $sc)))) }
+                    if (-not [double]::IsNaN([double]$vS[$i])) { $sPts.Add((New-Object System.Drawing.PointF([float]$x, [float]($y0 - [double]$vS[$i] * $sc)))) }
+                }
+                if ($mPts.Count -ge 2) { $g.DrawLines($c["rsiPenAcc"], $mPts.ToArray()) }
+                if ($sPts.Count -ge 2) {
+                    $sigPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(245, 158, 11), [float](1.1 * $script:DpiScale))
+                    $g.DrawLines($sigPen, $sPts.ToArray())
+                    $sigPen.Dispose()
+                }
+                $lastM = [double]$vM[$n - 1]; $lastS = [double]$vS[$n - 1]
+                $mTxt = if ([double]::IsNaN($lastM)) { "MACD(12,26,9)" } else { "MACD(12,26,9): {0:N2}  Signal {1:N2}" -f $lastM, $lastS }
+                $g.DrawString($mTxt, $fontBadge, $c["rsiBrAcc"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+                & $addLeg $mTxt ($rsiRect.Left + (S 6)) ($rsiRect.Top + 3) "MACD" $fontBadge
+            } else {
+                $g.DrawString("MACD: zu wenig Daten", $fontAxis, $c["axisTextBrush"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+            }
+        } else {
+            $g.DrawString("MACD: zu wenig Daten", $fontAxis, $c["axisTextBrush"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+        }
+        $bottomAxisAnchor = $rsiRect.Bottom
+        $rsiRectL = $rsiRect
+    } elseif ($showRsi -and $rsiH -ge (S 42)) {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         $g.FillRectangle($c["panelBrush"], $rsiRect)
         $g.DrawRectangle($c["sepPen"], $rsiRect)
@@ -3375,9 +3512,105 @@ $script:TipReg = @{}
 
 function Get-TipModeNow { return [string]$script:Config.TooltipMode }
 
+# ==============================================================================
+# v4.7: English user interface (Settings > Sprache). Static texts of windows,
+# buttons, column headers, menus and the command list are translated when a
+# window is built; messages, explanations and the glossary stay German.
+# ==============================================================================
+$script:EnText = @{
+    "Vergleichen mit" = "Compare with"; "Ticker (Kursentwicklung in % ab Chartbeginn):" = "Ticker (performance in % from chart start):"; "Vergleichen" = "Compare"
+    "Abbrechen" = "Cancel"; "Kerzen" = "Candles"; "Volumen" = "Volume"; "Vollbild" = "Fullscreen"; "EK-Währ.:" = "Cost ccy:"
+    "Position speichern" = "Save position"; "Löschen" = "Delete"; "Transaktion..." = "Transaction..."; "Historie" = "History"; "Analyse" = "Analysis"
+    "Position wählen oder Ticker, Stück & EK eintragen für Live-Nachkauf-Simulation." = "Pick a position or enter ticker, shares & cost for a live top-up simulation."
+    "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" = "Watchlist (drag = order | Del = remove)"; "+ Aktiven Ticker" = "+ Active ticker"; "+ Suchen / Add" = "+ Search / add"
+    "Entfernen" = "Remove"; "Alarme (Doppelklick = Reset)" = "Alerts (double-click = reset)"; "Verlauf" = "History"; "Leeren" = "Clear"; "Schließen" = "Close"
+    "Bei Alarmen" = "On alerts"; "Quartalszahlen (Vortag)" = "Earnings (day before)"; "Buchen" = "Book"; "Eintrag löschen" = "Delete entry"; "CSV export" = "CSV export"
+    "Position neu berechnen" = "Recalculate position"; "Jahresreport..." = "Yearly report..."; "Berechnen" = "Calculate"; "Basis:" = "Base:"; "Netto investiert" = "Net invested"
+    "Hinweis ab (%):" = "Warn from (%):"; "Sektor/Land per Klick überschreiben (blau = manuell). Leer = wieder automatisch." = "Click to override sector/country (blue = manual). Empty = automatic again."
+    "Übernehmen" = "Apply"; "Währung, wenn leer:" = "Currency if empty:"; "ISIN bevorzugt an Börse:" = "Preferred exchange for ISINs:"; "ISINs auflösen" = "Resolve ISINs"
+    "Positionen danach aus Buchungen berechnen" = "Recalculate positions from bookings"; "Importieren" = "Import"; "Überspringen" = "Skip"
+    "Ruhezeit (kein Ton / Push) von - bis" = "Quiet hours (no sound / push) from - to"; "Handy-Push einrichten ..." = "Phone push setup ..."
+    "Globales Tastenkürzel (zeigen / verstecken)" = "Global hotkey (show / hide)"; "Glossar öffnen (G)" = "Open glossary (G)"; "Datenordner öffnen" = "Open data folder"
+    "Backup jetzt" = "Backup now"; "Log öffnen" = "Open log"; "Suchen:" = "Search:"; "Kein Begriff gefunden." = "No term found."
+    "Alarm hier setzen (Rechtsklick im Kursbereich)" = "Set alert here (right-click in the price area)"; "Stück" = "Shares"; "Kurs" = "Price"; "Wert" = "Value"; "Anteil" = "Weight"
+    "G/V Gesamt" = "Total P/L"; "Tag %" = "Day %"; "Markt" = "Market"; "Anzeigen / Wiederherstellen" = "Show / restore"; "Jetzt aktualisieren (F5)" = "Refresh now (F5)"; "Beenden" = "Exit"
+    "Aktuellen Kurs kopieren" = "Copy current price"; "Aktiven Ticker zur Watchlist hinzufügen" = "Add active ticker to watchlist"; "Chartdaten als CSV exportieren" = "Export chart data as CSV"
+    "Chart im Vollbild (F11)" = "Fullscreen chart (F11)"; "Vergleichen mit ... (X)" = "Compare with ... (X)"; "Vergleich entfernen" = "Remove comparison"; "Zoom zurücksetzen (Z)" = "Reset zoom (Z)"
+    "Durchklicken (Maus geht durch)" = "Click-through (mouse passes through)"
+    "Noch keine Alarme." = "No alerts yet."; "Ticker, Bedingung, Wert -> '+'" = "Ticker, condition, value -> '+'"; "oder Rechtsklick in den Chart." = "or right-click into the chart."
+    "Alle Ticker" = "All tickers"; "(keine)" = "(none)"; "Aktualisierung" = "Refresh"; "Intervall (Sekunden)" = "Interval (seconds)"; "Nur-Watchlist-Ticker (Sekunden)" = "Watchlist-only tickers (seconds)"
+    "HTTP-Timeout (Sekunden, ab Neustart)" = "HTTP timeout (seconds, after restart)"; "Alle Börsen zu: nur alle X Minuten (0 = aus)" = "All markets closed: every X minutes (0 = off)"
+    "Indikatoren" = "Indicators"; "SMA schnell (auch Bollinger-Periode)" = "Fast SMA (also Bollinger period)"; "SMA langsam" = "Slow SMA"; "RSI-Periode" = "RSI period"
+    "RSI überkauft ab" = "RSI overbought from"; "RSI überverkauft bis" = "RSI oversold up to"; "Gleitender Durchschnitt" = "Moving average"; "Unteres Feld im Chart" = "Lower chart panel"
+    "Darstellung" = "Appearance"; "Akzentfarbe" = "Accent colour"; "Immer im Vordergrund" = "Always on top"; "Laufleiste (Watchlist) im Compact-Layout" = "Ticker tape (watchlist) in Compact layout"
+    "Benachrichtigungen" = "Notifications"; "Tray-Hinweis + Ton bei Alarmen" = "Tray notice + sound on alerts"; "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" = "Notice when trading starts (portfolio exchanges / active ticker)"
+    "Hinweis am Vortag von Quartalszahlen (Portfolio)" = "Notice the day before earnings (portfolio)"; "Mit Windows starten (Verknüpfung im Autostart-Ordner)" = "Start with Windows (shortcut in the startup folder)"
+    "Layout und Fenster" = "Layout and window"; "Deckkraft (%)" = "Opacity (%)"; "Terminal: Watchlist und Alarme anzeigen" = "Terminal: show watchlist and alerts"; "Terminal: Portfolio anzeigen" = "Terminal: show portfolio"
+    "Terminal: Chart-Höhe (%)" = "Terminal: chart height (%)"; "Farben und Fenster" = "Colours and window"; "Farben für Plus / Minus" = "Colours for up / down"
+    "Pfeile vor Veränderungen anzeigen" = "Show arrows before changes"; "Kurs kurz einfärben, wenn er sich ändert" = "Flash the price when it changes"; "Fenster am Bildschirmrand einrasten" = "Snap the window to screen edges"
+    "Erklärungen (Maus darüber)" = "Explanations (hover)"; "Ausführlichkeit" = "Detail"; "Verzögerung (Millisekunden)" = "Delay (milliseconds)"; "Zufällig" = "Random"; "Chat-ID holen" = "Get chat ID"
+    "Test senden" = "Send test"; "Wertentwicklung" = "Performance"; "Rendite" = "Returns"; "Aufteilung" = "Allocation"; "Dividenden" = "Dividends"; "Neu laden" = "Reload"; "Kaufdaten ..." = "Buy dates ..."
+    "Zeit" = "Time"; "Bedingung" = "Condition"; "Notiz" = "Note"; "Verkauf" = "Sell"; "Kauf" = "Buy"; "Datum" = "Date"; "Typ" = "Type"; "Kurs/Betrag" = "Price/amount"; "Gebühr" = "Fee"; "Whg" = "Ccy"
+    "Realisiert" = "Realized"; "Dividende" = "Dividend"; "Betrag (Whg)" = "Amount (ccy)"; "Erlös" = "Proceeds"; "Einstand" = "Cost"; "Gebühr/Steuer" = "Fee/tax"; "Ergebnis" = "Result"
+    "Seit" = "Since"; "Unrealisiert" = "Unrealized"; "Gesamt" = "Total"; "Gesamt %" = "Total %"; "Währung" = "Currency"; "Sektor" = "Sector"; "Land" = "Country"; "Quelle" = "Source"
+    "Rhythmus" = "Frequency"; "Letzte" = "Last"; "Pro Jahr" = "Per year"; "auf EK" = "on cost"; "Erwartet 12M" = "Expected 12M"; "Nächster Ex-Tag" = "Next ex-date"; "Zahltag" = "Pay date"
+    "Quartalszahlen" = "Earnings"; "Art" = "Kind"; "Kaufdatum" = "Buy date"; "Wann" = "When"; "Anlass" = "Reason"; "Hinweis" = "Note"; "Kurs / Betrag" = "Price / amount"
+    "Einstellungen" = "Settings"; "Sprache" = "Language"; "Wiederherstellen ..." = "Restore ..."; "Daten exportieren ..." = "Export data ..."; "Daten importieren ..." = "Import data ..."
+    "Portabel machen ..." = "Make portable ..."; "Portabel beenden ..." = "End portable mode ..."; "Weiter" = "Next"; "Los geht's" = "Let's go"; "Feld" = "Field"; "Titel" = "Title"
+    "Ereignis" = "Event"; "Inhalt" = "Content"; "Zeitpunkt" = "Time"; "Betrag je Aktie" = "Amount per share"; "Summe Jahr" = "Year total"; "Ex-Tag" = "Ex-date"
+    "1 EUR =" = "1 EUR ="; "1 Einheit = EUR" = "1 unit = EUR"; "zum 52W-Hoch" = "to 52W high"; "Dienst" = "Service"; "ntfy-Server" = "ntfy server"; "ntfy-Thema" = "ntfy topic"
+    "Telegram-Token" = "Telegram token"; "Telegram-Chat-ID" = "Telegram chat ID"; "Stück:" = "Shares:"; "Kurs:" = "Price:"; "Gebühr:" = "Fee:"; "Datum:" = "Date:"; "Ticker:" = "Ticker:"
+    # command list
+    "Chart (optional Zeitraum: GP 1Y)" = "Chart (optional range: GP 1Y)"; "Beschreibung: Profil, Kennzahlen, Termine, Position" = "Description: profile, figures, dates, position"; "Nachrichten" = "News"
+    "Dividenden (ohne Ticker: Depot-Dividenden)" = "Dividends (without ticker: portfolio dividends)"; "Termine: Quartalszahlen, Ex-Tag, Zahltag" = "Dates: earnings, ex-date, pay date"
+    "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" = "Create alert: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (without ticker: alert list)"
+    "Zur Watchlist hinzufügen" = "Add to watchlist"; "Vergleich im Chart (CMP ohne Ticker = aus)" = "Compare in chart (CMP without ticker = off)"; "Transaktion erfassen / Historie" = "Book transaction / history"
+    "Portfolio-Analyse" = "Portfolio analysis"; "Terminkalender (Portfolio + Watchlist)" = "Event calendar (portfolio + watchlist)"; "Gewinner / Verlierer heute" = "Today's winners / losers"
+    "Wechselkurse" = "Exchange rates"; "Alarm-Verlauf" = "Alert history"; "Jahresreport" = "Yearly report"; "Zeitraum: TF 1D / 5D / 1M / 3M / 6M / 1Y" = "Range: TF 1D / 5D / 1M / 3M / 6M / 1Y"
+    "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <Name>, LAYOUT DEL <Name>" = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <name>, LAYOUT DEL <name>"
+    "Theme wechseln (THEME <Name>)" = "Change theme (THEME <name>)"; "Handy-Push einrichten" = "Phone push setup"; "Glossar" = "Glossary"; "Tastenkürzel und Befehle" = "Shortcuts and commands"
+    "Version, Pfade, Update-Prüfung" = "Version, paths, update check"; "Depot wechseln: PF <Name> (ohne Name: neues Depot)" = "Switch depot: PF <name> (without name: new depot)"
+    "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
+    "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
+}
+
+function Tr {
+    param([string]$Text)
+    if ([string]$script:Config.Language -ne "EN" -or -not $Text) { return $Text }
+    $t = $script:EnText[$Text]
+    if ($null -ne $t) { return $t }
+    return $Text
+}
+
+function Apply-Language {
+    # Translates the static texts of a window and its menus (English mode only)
+    param($Root)
+    if ([string]$script:Config.Language -ne "EN" -or $null -eq $Root) { return }
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.DataGridView]) {
+            foreach ($col in $c.Columns) { $col.HeaderText = Tr $col.HeaderText }
+        } elseif ($c -is [System.Windows.Forms.Control] -and -not ($c -is [System.Windows.Forms.TextBox]) -and -not ($c -is [System.Windows.Forms.ComboBox])) {
+            if ($c.Text) { $c.Text = Tr $c.Text }
+        }
+        if ($c -is [System.Windows.Forms.Control]) {
+            if ($null -ne $c.ContextMenuStrip) { $stack.Push($c.ContextMenuStrip) }
+            foreach ($ch in $c.Controls) { $stack.Push($ch) }
+        }
+        if ($c -is [System.Windows.Forms.ToolStrip]) { foreach ($it in $c.Items) { $stack.Push($it) } }
+        if ($c -is [System.Windows.Forms.ToolStripItem]) {
+            if ($c.Text) { $c.Text = Tr $c.Text }
+            if ($c -is [System.Windows.Forms.ToolStripDropDownItem]) { foreach ($it in $c.DropDownItems) { $stack.Push($it) } }
+        }
+    }
+}
+
 function Set-Tip {
     param([System.Windows.Forms.Control]$Ctl, [string]$Text, [string]$Key = "")
     if ($null -eq $Ctl) { return }
+    $Text = Tr $Text
     $script:TipReg[$Ctl] = @{ Text = $Text; Key = $Key }
     $toolTip.SetToolTip($Ctl, (Get-TooltipText -Text $Text -Key $Key -Mode (Get-TipModeNow)))
 }
@@ -3385,6 +3618,7 @@ function Set-Tip {
 function Set-DynTip {
     param([System.Windows.Forms.Control]$Ctl, [string]$Text, [string]$Key = "")
     if ($null -eq $Ctl -or $Ctl.IsDisposed) { return }
+    $Text = Tr $Text
     $toolTip.SetToolTip($Ctl, (Get-TooltipText -Text $Text -Key $Key -Mode (Get-TipModeNow)))
 }
 
@@ -3477,6 +3711,10 @@ foreach ($ln in @("Ticker", "Compact", "Standard", "Terminal")) {
 }
 [void]$trayMenu.Items.Add($miLayout)
 $miRefresh = $trayMenu.Items.Add("Jetzt aktualisieren (F5)")
+# v4.6: click-through (mouse goes to the window below; hotkey brings it back)
+$miClickThrough = New-Object System.Windows.Forms.ToolStripMenuItem("Durchklicken (Maus geht durch)")
+[void]$trayMenu.Items.Add($miClickThrough)
+$miClickThrough.Add_Click({ Set-ClickThrough (-not $script:ClickThrough) })
 [void]$trayMenu.Items.Add("-")
 $miExit    = $trayMenu.Items.Add("Beenden")
 $trayIcon.ContextMenuStrip = $trayMenu
@@ -4047,7 +4285,7 @@ $btnToggleSma = New-Object System.Windows.Forms.Button
 $btnToggleSma.Location = New-Object System.Drawing.Point((S 350), (S 4))
 $btnToggleSma.Size = New-Object System.Drawing.Size((S 58), (S 25))
 $btnToggleSma.Font = $fontUiBold
-$btnToggleSma.Text = "SMA"
+$btnToggleSma.Text = [string]$script:Config.MaType
 $pnlChartControls.Controls.Add($btnToggleSma)
 Set-Tip $btnToggleSma "Gleitende Durchschnitte SMA $($script:Config.SmaFastPeriod)/$($script:Config.SmaSlowPeriod) (Taste M)" "SMA"
 
@@ -4071,7 +4309,7 @@ $btnToggleRsi = New-Object System.Windows.Forms.Button
 $btnToggleRsi.Location = New-Object System.Drawing.Point((S 528), (S 4))
 $btnToggleRsi.Size = New-Object System.Drawing.Size((S 70), (S 25))
 $btnToggleRsi.Font = $fontUiBold
-$btnToggleRsi.Text = "RSI-$($script:Config.RsiPeriod)"
+$btnToggleRsi.Text = if ([string]$script:Config.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($script:Config.RsiPeriod)" }
 $pnlChartControls.Controls.Add($btnToggleRsi)
 Set-Tip $btnToggleRsi "Relative Strength Index Sub-Panel (Taste R)" "RSI"
 
@@ -4363,15 +4601,30 @@ $form.Controls.Add($viewPortfolio)
 
 $lblPortSummary = New-Object System.Windows.Forms.Label
 $lblPortSummary.Location = New-Object System.Drawing.Point((S 10), (S 8))
-$lblPortSummary.Size = New-Object System.Drawing.Size((S 544), (S 22))
+$lblPortSummary.Size = New-Object System.Drawing.Size((S 456), (S 22))
+$lblPortSummary.AutoEllipsis = $true
 $lblPortSummary.Font = $fontMono
 $lblPortSummary.ForeColor = $script:Pal.Text
 $lblPortSummary.Text = "Depotwert: 0.00 $($script:Config.Currency) | Gesamt G/V: +0.00 $($script:Config.Currency) (+0.00%)"
 $viewPortfolio.Controls.Add($lblPortSummary)
 
+# v4.5: depot selector
+$cmbDepot = New-Object System.Windows.Forms.ComboBox
+$cmbDepot.Location = New-Object System.Drawing.Point((S 470), (S 6))
+$cmbDepot.Size = New-Object System.Drawing.Size((S 136), (S 24))
+$cmbDepot.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cmbDepot.BackColor = $script:Pal.Input
+$cmbDepot.ForeColor = $script:Pal.Accent
+$cmbDepot.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbDepot.Font = $fontUi
+$cmbDepot.DropDownWidth = S 200
+$viewPortfolio.Controls.Add($cmbDepot)
+Set-Tip $cmbDepot "Depot wählen: mehrere Portfolios (z. B. zweiter Broker, Übungsdepot). Befehl: PF <Name>"
+
 $cmbPortSort = New-Object System.Windows.Forms.ComboBox
-$cmbPortSort.Location = New-Object System.Drawing.Point((S 560), (S 6))
-$cmbPortSort.Size = New-Object System.Drawing.Size((S 188), (S 24))
+$cmbPortSort.Location = New-Object System.Drawing.Point((S 612), (S 6))
+$cmbPortSort.Size = New-Object System.Drawing.Size((S 136), (S 24))
+$cmbPortSort.DropDownWidth = S 200
 $cmbPortSort.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $cmbPortSort.BackColor = $script:Pal.Input
 $cmbPortSort.ForeColor = $script:Pal.Text
@@ -4796,6 +5049,7 @@ $pnlChartControls.Anchor = $aB -bor $aL -bor $aR
 # Portfolio view
 $lblPortSummary.Anchor = $aT -bor $aL -bor $aR
 $cmbPortSort.Anchor    = $aT -bor $aR
+$cmbDepot.Anchor       = $aT -bor $aR
 $dgvPortfolio.Anchor   = $anchorAll
 $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
 $lblNachkaufOut.Anchor = $aT -bor $aL -bor $aR
@@ -4918,6 +5172,7 @@ function Apply-TooltipMode {
 }
 
 function Apply-ThemeToAllControls {
+    Update-UpDownColors
     $script:Pal = Get-ThemeColors
     Rebuild-GdiCache
     Apply-DwmTitlebarTheme
@@ -4974,6 +5229,7 @@ function Apply-ThemeToAllControls {
 
     $viewPortfolio.BackColor = $p.Card
     $cmbPortSort.BackColor = $p.Input
+    $cmbDepot.BackColor = $p.Input; $cmbDepot.ForeColor = $p.Accent
     $cmbPortSort.ForeColor = $p.Text
     Style-DataGrid -Grid $dgvPortfolio
     $pnlPortBottom.BackColor = $p.HeaderBg
@@ -5424,6 +5680,8 @@ function Refresh-PortfolioGrid {
         )
         $dgvPortfolio.Rows[$idx].Cells[7].Style.ForeColor = if ($r.PnlAbs -ge 0) { $colGreen } else { $colRed }
         $dgvPortfolio.Rows[$idx].Cells[8].Style.ForeColor = if ($r.DayPct -ge 0) { $colGreen } else { $colRed }
+        if ([bool]$script:Config.ShowArrows) { $dgvPortfolio.Rows[$idx].Cells[8].Value = (Get-ArrowPrefix ([double]$r.DayPct)) + [string]$dgvPortfolio.Rows[$idx].Cells[8].Value }
+        Set-PriceFlash -Cell $dgvPortfolio.Rows[$idx].Cells["Price"] -Key ("P|" + $r.Ticker) -Price ([double]$r.Price)
         $eb = Get-TickerEarningsBadge $r.Ticker
         if ($null -ne $eb) {
             $dgvPortfolio.Rows[$idx].Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
@@ -5581,6 +5839,8 @@ function Refresh-WatchlistAndAlerts {
                 $row.Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
             }
             $row.Cells["Day"].Style.ForeColor = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
+            if ([bool]$script:Config.ShowArrows) { $row.Cells["Day"].Value = (Get-ArrowPrefix ([double]$q.ChangePct)) + [string]$row.Cells["Day"].Value }
+            if (-not [bool]$q.FromCache) { Set-PriceFlash -Cell $row.Cells["Price"] -Key ("W|" + $uSym) -Price ([double]$q.Price) }
             if ([bool]$q.FromCache) {
                 $row.Cells["Price"].Style.ForeColor = $script:Pal.Muted
                 $row.Cells["Price"].ToolTipText = "Kurs aus dem Cache (Stand {0}) - wird gerade aktualisiert" -f $q.UpdatedAt.ToString("dd.MM. HH:mm")
@@ -6388,7 +6648,9 @@ function Update-AllUiViews {
         $priceTip = if ($fromCache) { "Kurs aus dem Cache (Stand {0}) - wird gerade aktualisiert" -f $q.UpdatedAt.ToString("dd.MM. HH:mm") } else { "Doppelklick = Kurs kopieren" }
         if ($priceTip -ne $script:LastPriceTip) { Set-Tip $lblLivePrice $priceTip $(if ($fromCache) { "CACHE" } else { "PRICE" }); $script:LastPriceTip = $priceTip }
         $lblDayChange.ForeColor = $col
-        $lblDayChange.Text = "{0}{1:N2}%" -f $sign, $q.ChangePct
+        $lblDayChange.Text = "{0}{1}{2:N2}%" -f (Get-ArrowPrefix ([double]$q.ChangePct)), $sign, $q.ChangePct
+        # v4.6: coloured "pill" behind the day change
+        $lblDayChange.BackColor = Get-BlendColor -A $col -B $p.HeaderBg -T 0.18
         $dispPrev = Convert-CurrencyValue -Amount $q.PrevClose -FromCurrency $q.Currency -ToCurrency $curr
         $lblDayAbs.Text = if ($q.PrevClose -gt 0) { "{0}{1:N2} {2}" -f $sign, ($dispPrice - $dispPrev), $curr } else { "" }
         # v4.2: quarterly figures within a week -> amber note in front of the name
@@ -6425,6 +6687,7 @@ function Update-AllUiViews {
     } else {
         $lblLivePrice.Text = "--.-- $curr"
         $lblDayChange.ForeColor = $p.Muted
+        $lblDayChange.BackColor = $p.HeaderBg
         $lblDayChange.Text = "0.00%"
         $lblDayAbs.Text = ""
         $lblExtQuote.Text = ""
@@ -6673,6 +6936,9 @@ function New-DialogForm {
     $d.BackColor = $p.BodyBg; $d.ForeColor = $p.Text; $d.Font = $fontUi
     $d.TopMost = $form.TopMost
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
+    # v4.7: English mode translates the static texts once the dialog is built
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
+    $d.Text = Tr $Title
     return $d
 }
 
@@ -6928,15 +7194,28 @@ function Show-TransactionHistory {
         $sfd.Dispose()
     })
     & $fill
+    # v4.5: CSV import from the history window
+    $btnImp = New-Object System.Windows.Forms.Button
+    $btnImp.SetBounds((S 572), (S 398), (S 60), (S 28))
+    $btnImp.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    Style-FlatButton -Btn $btnImp -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnImp.Text = "Import"
+    $btnImp.Add_Click({ $script:TxHist.Import = $true; $script:TxHist.Dlg.Close() })
+    $dlg.Controls.Add($btnImp)
+    Set-DynTip $btnImp "Buchungen aus einer Broker-CSV importieren (Trade Republic, Scalable, Flatex, comdirect, IBKR ... - Spalten werden erkannt). Befehl: IMP"
+    $script:TxHist.Import = $false
     [void]$dlg.ShowDialog($form)
+    $doImport = [bool]$script:TxHist.Import
     $script:TxHist = $null
     $dlg.Dispose()
+    if ($doImport) { Show-CsvImportDialog }
 }
 
 function Invoke-PositionRebuild {
     # v3.0: replays all buys/sells of one ticker (average cost, see Core) and -
     # after a preview - replaces the position. Returns $true when it changed.
-    param([string]$Ticker, $Owner = $null)
+    # v4.5: -Silent = no dialogs (CSV import)
+    param([string]$Ticker, $Owner = $null, [switch]$Silent)
     $sym = ([string]$Ticker).Trim().ToUpper()
     if (-not $sym) { return $false }
     $own = if ($null -ne $Owner) { $Owner } else { $form }
@@ -6945,6 +7224,7 @@ function Invoke-PositionRebuild {
     Ensure-SplitsLoaded -Tickers @($sym)
     $r = Get-PositionFromTransactions -Transactions $script:Transactions.ToArray() -Ticker $sym -Splits (Get-SplitMap)
     if ($null -eq $r) {
+        if ($Silent) { return $false }
         [System.Windows.Forms.MessageBox]::Show($own, "Für $sym gibt es keine Kauf-/Verkaufsbuchungen.", $title,
             [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         return $false
@@ -6957,8 +7237,10 @@ function Invoke-PositionRebuild {
     if ($r.Clamped) { $notes += "`r`n- Ein Verkauf war größer als der Bestand und wurde begrenzt" }
     if ($r.Splits -gt 0) { $notes += "`r`n- {0} Aktiensplit(s) berücksichtigt (Stück und EK umgerechnet)" -f $r.Splits }
     $msg = ("{0}: aus {1} Buchung(en) neu berechnen (Durchschnittskosten)?`r`n`r`nAktuell:  {2}`r`nNeu:      {3}{4}`r`n`r`nHinweis: Werte, die im Portfolio-Editor direkt überschrieben wurden, sind nicht als Buchung erfasst und gehen dabei verloren." -f $sym, $r.Used, $oldTxt, $newTxt, $notes)
-    $ans = [System.Windows.Forms.MessageBox]::Show($own, $msg, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    if (-not $Silent) {
+        $ans = [System.Windows.Forms.MessageBox]::Show($own, $msg, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    }
 
     if ($r.Shares -le 0) {
         [void]$script:Portfolio.Remove($sym)
@@ -8819,10 +9101,42 @@ function Invoke-TerminalCommand {
                 Set-Timeframe -Tf $tfMap[$arg0]
             }
             "LAYOUT" {
+                $rest = (@($c.Args | Select-Object -Skip 1) -join " ").Trim()
+                if ($arg0 -eq "SAVE") {
+                    if (-not $rest) { return "Name fehlt: LAYOUT SAVE <Name>" }
+                    if (@(Get-LayoutNames | Where-Object { $_.ToUpper() -eq $rest.ToUpper() }).Count -gt 0) { return "'$rest' ist ein eingebautes Layout - bitte anderen Namen wählen" }
+                    Save-UserLayout -Name $rest
+                    return ""
+                }
+                if ($arg0 -eq "DEL") {
+                    $script:Config.UserLayouts = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -ne $rest.ToUpper() })
+                    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                    Set-TransientStatus "Layout '$rest' gelöscht" 3
+                    return ""
+                }
+                $full = (@($c.Args) -join " ").Trim()
                 $ln = @(Get-LayoutNames | Where-Object { $_.ToUpper() -eq $arg0 })
-                if ($ln.Count -eq 0) { return "Layout: " + ((Get-LayoutNames) -join " / ") }
-                Apply-Layout $ln[0]
+                if ($ln.Count -gt 0) { Apply-Layout $ln[0]; return "" }
+                if (Use-UserLayout -Name $full) { return "" }
+                $own = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name })
+                return "Layout: " + ((@(Get-LayoutNames) + $own) -join " / ") + " - eigenes speichern: LAYOUT SAVE <Name>"
             }
+            "IND"    {
+                switch ($arg0) {
+                    "MACD" { $script:Config.LowerPanel = "MACD"; $script:Config.ShowRsi = $true }
+                    "RSI"  { $script:Config.LowerPanel = "RSI"; $script:Config.ShowRsi = $true }
+                    "EMA"  { $script:Config.MaType = "EMA"; $script:Config.ShowSma = $true }
+                    "SMA"  { $script:Config.MaType = "SMA"; $script:Config.ShowSma = $true }
+                    default { return "IND MACD / RSI / EMA / SMA" }
+                }
+                Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                $btnToggleRsi.Text = if ([string]$script:Config.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($script:Config.RsiPeriod)" }
+                $btnToggleSma.Text = [string]$script:Config.MaType
+                Refresh-AllMarketData -Force
+                Update-AllUiViews
+            }
+            "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "TOUR"   { Show-WelcomeTour }
             "THEME"  {
                 if (-not $arg0) { $btnThemeCycle.PerformClick(); return "" }
                 $tn = @(Get-ThemeNames | Where-Object { $_.ToUpper() -eq $arg0 })
@@ -8836,6 +9150,16 @@ function Invoke-TerminalCommand {
             "GLOS"   { Show-GlossaryDialog }
             "HELP"   { Show-ShortcutHelp }
             "ABOUT"  { Show-AboutDialog }
+            "IMP"    { Show-CsvImportDialog }
+            "BAK"    { Show-RestoreDialog }
+            "PF"     {
+                $want = (@($c.Args) -join " ").Trim()
+                if (-not $want) { New-Depot; return "" }
+                $hit = @(Get-DepotList | Where-Object { $_.Name.ToUpper() -eq $want.ToUpper() -or $_.Id.ToUpper() -eq $want.ToUpper() })
+                if ($hit.Count -eq 0) { return "Depot '$want' gibt es nicht. Vorhanden: " + ((Get-DepotList | ForEach-Object { $_.Name }) -join ", ") }
+                Switch-Depot $hit[0].Id
+                Set-ActiveTab -TabName "Portfolio"
+            }
         }
         return ""
     }
@@ -8888,10 +9212,10 @@ function Invoke-TerminalCommand {
 function Update-PaletteSuggestions {
     $pc = $script:PalCtl
     if ($null -eq $pc) { return }
-    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12)
+    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }) -Layouts @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name }))
     $pc.List.BeginUpdate()
     $pc.List.Items.Clear()
-    foreach ($it in $pc.Items) { [void]$pc.List.Items.Add($it.Text) }
+    foreach ($it in $pc.Items) { $it.Desc = Tr ([string]$it.Desc); [void]$pc.List.Items.Add($it.Text) }
     $pc.List.EndUpdate()
     $pc.List.SelectedIndex = -1
     $pc.Err.Text = ""
@@ -9064,6 +9388,792 @@ function Get-PrioMarketStates {
         $out += [string]$ms.State
     }
     return $out
+}
+
+function Show-InfoBox {
+    param([string]$Text, [string]$Title = "Hinweis")
+    if ($env:TW_SMOKE_TEST) { Write-WidgetLog "InfoBox: $Text"; return }
+    $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
+    [void][System.Windows.Forms.MessageBox]::Show($owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+}
+
+# ==============================================================================
+# v4.5: depots, CSV import, backups / restore, export / import, portable mode
+# ==============================================================================
+function Switch-Depot {
+    param([string]$Id)
+    if ($Id -eq [string]$script:Config.ActiveDepot) { return }
+    Set-DepotPaths $Id
+    Read-PortfolioData
+    Read-TransactionsData
+    $script:Config.ActiveDepot = $Id
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Write-WidgetLog ("Depot switched to '{0}'" -f (Get-DepotName $Id))
+    Update-DepotCombo
+    Set-TransientStatus ("Depot: {0}" -f (Get-DepotName $Id)) 3
+    Refresh-AllMarketData
+    Update-AllUiViews
+}
+
+function Read-TextInput {
+    # Small input box; returns the text or $null when cancelled
+    param([string]$Title, [string]$Prompt, [string]$Value = "")
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title $Title -W (S 380) -H (S 130)
+    $l = New-Object System.Windows.Forms.Label
+    $l.SetBounds((S 14), (S 12), (S 352), (S 20)); $l.Text = $Prompt
+    $dlg.Controls.Add($l)
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.SetBounds((S 14), (S 38), (S 352), (S 24)); $t.Text = $Value
+    $t.BackColor = $p.Input; $t.ForeColor = $p.Text; $t.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $dlg.Controls.Add($t)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds((S 172), (S 86), (S 94), (S 28)); $ok.Text = "OK"
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($ok)
+    $ca = New-Object System.Windows.Forms.Button
+    $ca.SetBounds((S 272), (S 86), (S 94), (S 28)); $ca.Text = "Abbrechen"
+    Style-FlatButton -Btn $ca -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($ca)
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $ca
+    $res = $dlg.ShowDialog($form)
+    $v = $t.Text.Trim()
+    $dlg.Dispose()
+    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    return $v
+}
+
+function New-Depot {
+    $name = Read-TextInput -Title "Neues Depot" -Prompt "Name des Depots (z. B. Zweitbroker, Übungsdepot):"
+    if (-not $name) { return }
+    $base = ConvertTo-DepotId $name
+    $id = $base; $n = 2
+    while (@(Get-DepotList | Where-Object { $_.Id -eq $id }).Count -gt 0) { $id = "{0}-{1}" -f $base, $n; $n++ }
+    $script:Config.Depots = @(@($script:Config.Depots) | Where-Object { $null -ne $_ }) + @([PSCustomObject]@{ Id = $id; Name = $name })
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Write-WidgetLog "Depot created: $name ($id)"
+    Switch-Depot $id
+}
+
+function Rename-ActiveDepot {
+    $id = [string]$script:Config.ActiveDepot
+    $name = Read-TextInput -Title "Depot umbenennen" -Prompt "Neuer Name:" -Value (Get-DepotName $id)
+    if (-not $name) { return }
+    if (-not $id) { $script:Config.MainDepotName = $name }
+    else { foreach ($d in @($script:Config.Depots)) { if ([string]$d.Id -eq $id) { $d.Name = $name } } }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-DepotCombo
+}
+
+function Remove-ActiveDepot {
+    $id = [string]$script:Config.ActiveDepot
+    if (-not $id) { Show-InfoBox -Text "Das Hauptdepot kann nicht gelöscht werden." -Title "Depot"; return }
+    $name = Get-DepotName $id
+    if (-not (Confirm-Action -Text ("Depot '{0}' mit allen Positionen und Buchungen löschen?`r`n`r`nDie Dateien werden vorher ins Backup kopiert." -f $name) -Title "Depot löschen")) { return }
+    [void](Backup-DataFiles -Reason ("vor_loeschen_" + $id))
+    Switch-Depot ""
+    try { Remove-Item -Path (Join-Path $script:DepotDir $id) -Recurse -Force -ErrorAction Stop } catch { Write-WidgetLog "Depot folder not removed: $($_.Exception.Message)" "WARN" }
+    $script:Config.Depots = @(@($script:Config.Depots) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $id })
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-DepotCombo
+    Set-TransientStatus "Depot '$name' gelöscht" 4
+}
+
+$script:DepotComboBusy = $false
+function Update-DepotCombo {
+    $script:DepotComboBusy = $true
+    try {
+        $cmbDepot.Items.Clear()
+        $sel = 0; $i = 0
+        foreach ($d in Get-DepotList) {
+            [void]$cmbDepot.Items.Add($d.Name)
+            if ($d.Id -eq [string]$script:Config.ActiveDepot) { $sel = $i }
+            $i++
+        }
+        foreach ($x in @("+ Neues Depot ...", "  Umbenennen ...", "  Löschen ...")) { [void]$cmbDepot.Items.Add($x) }
+        $cmbDepot.SelectedIndex = $sel
+    } finally { $script:DepotComboBusy = $false }
+}
+
+# ---- backups ----
+function Invoke-DailyBackup {
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    if ([string]$script:Config.LastAutoBackup -eq $today) { return }
+    if (Backup-DataFiles -Reason "taeglich") {
+        $script:Config.LastAutoBackup = $today
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    }
+}
+
+function Restart-Widget {
+    # Restored / imported data must not be overwritten by this instance on exit
+    $script:FreezeData = $true
+    $bat = Join-Path $script:ScriptDir "TerminalWidget_Start.bat"
+    try {
+        if (Test-Path $bat) {
+            Start-Process -FilePath "cmd.exe" -ArgumentList ('/c timeout /t 3 /nobreak >nul & start "" "{0}"' -f $bat) -WindowStyle Hidden
+        } else {
+            $exe = (Get-Process -Id $PID).Path
+            $self = Join-Path $script:ScriptDir "TerminalWidget.ps1"
+            Start-Process -FilePath "cmd.exe" -ArgumentList ('/c timeout /t 3 /nobreak >nul & start "" "{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}"' -f $exe, $self) -WindowStyle Hidden
+        }
+    } catch { Write-WidgetLog "Restart failed: $($_.Exception.Message)" "ERROR" }
+    Write-WidgetLog "Restarting the widget"
+    $trayIcon.Visible = $false
+    $form.Close()
+}
+
+function Copy-DataSet {
+    # Copies the data files (+ depots folder) from $From to $To
+    param([string]$From, [string]$To)
+    foreach ($f in @(Get-DataFileNames)) {
+        $src = Join-Path $From $f
+        if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $To $f) -Force }
+    }
+    $dSrc = Join-Path $From "depots"
+    if (Test-Path $dSrc) {
+        $dDst = Join-Path $To "depots"
+        if (Test-Path $dDst) { Remove-Item -Path $dDst -Recurse -Force }
+        Copy-Item -Path $dSrc -Destination $dDst -Recurse -Force
+    }
+}
+
+function Show-RestoreDialog {
+    $rows = @()
+    if (Test-Path $script:BackupDir) {
+        foreach ($d in @(Get-ChildItem -Path $script:BackupDir -Directory | Sort-Object Name -Descending)) {
+            $bi = Get-BackupInfo $d.Name
+            $n = @(Get-ChildItem -Path $d.FullName -File).Count
+            $dep = if (Test-Path (Join-Path $d.FullName "depots")) { "+ Depots" } else { "" }
+            $rows += @{ Cells = @($(if ($bi.When -gt [DateTime]::MinValue) { $bi.When.ToString("dd.MM.yyyy HH:mm") } else { $d.Name }), $bi.Reason, ("{0} Dateien {1}" -f $n, $dep).Trim()); Tag = $d.FullName }
+        }
+    }
+    Show-InfoGrid -Title "Backup wiederherstellen (BAK)" -Columns @("Zeitpunkt", "Anlass", "Inhalt") -Weights @(140, 200, 140) -W 560 -H 460 -Footer "Doppelklick = dieses Backup wiederherstellen (der aktuelle Stand wird vorher gesichert, danach startet das Widget neu). Täglich wird automatisch gesichert, die letzten 20 bleiben." -Extra @{ Rows = $rows } -OnShown { Set-InfoRows -Rows $script:InfoCtl.Rows } -OnDouble {
+        param($Tag)
+        $src = [string]$Tag
+        $bi = Get-BackupInfo (Split-Path -Leaf $src)
+        if (-not (Confirm-Action -Text ("Stand vom {0} wiederherstellen?`r`n`r`nEinstellungen, Portfolio, Depots, Alarme und Buchungen werden ersetzt. Der aktuelle Stand wird vorher gesichert. Danach startet das Widget neu." -f $bi.When.ToString("dd.MM.yyyy HH:mm")) -Title "Wiederherstellen")) { return }
+        [void](Backup-DataFiles -Reason "vor_wiederherstellung")
+        try {
+            Copy-DataSet -From $src -To $script:DataDir
+            Write-WidgetLog "Backup restored: $src"
+        } catch {
+            Write-WidgetLog "Restore failed: $($_.Exception.Message)" "ERROR"
+            Show-InfoBox -Text "Wiederherstellen fehlgeschlagen: $($_.Exception.Message)" -Title "Wiederherstellen"
+            return
+        }
+        $script:InfoCtl.Dlg.Close()
+        Restart-Widget
+    }
+}
+
+function Export-DataZip {
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "ZIP-Archiv (*.zip)|*.zip"
+    $sfd.FileName = "TerminalWidget_Daten_{0}.zip" -f (Get-Date -Format "yyyyMMdd")
+    if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tw_export_" + [Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Copy-DataSet -From $script:DataDir -To $tmp
+        Compress-Archive -Path (Join-Path $tmp "*") -DestinationPath $sfd.FileName -Force
+        Write-WidgetLog "Data exported: $($sfd.FileName)"
+        Show-InfoBox -Text ("Exportiert nach:`r`n{0}`r`n`r`nHinweis: ein Telegram-Token ist an dein Windows-Konto gebunden und muss auf einem anderen PC neu eingetragen werden." -f $sfd.FileName) -Title "Export"
+    } catch {
+        Write-WidgetLog "Export failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox -Text "Export fehlgeschlagen: $($_.Exception.Message)" -Title "Export"
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Import-DataZip {
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "ZIP-Archiv (*.zip)|*.zip"
+    if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tw_import_" + [Guid]::NewGuid().ToString("N"))
+    try {
+        Expand-Archive -Path $ofd.FileName -DestinationPath $tmp -Force
+        if (-not (Test-Path (Join-Path $tmp "config.json"))) { Show-InfoBox -Text "Das Archiv enthält keine config.json - kein TerminalWidget-Export." -Title "Import"; return }
+        if (-not (Confirm-Action -Text "Alle Daten durch den Inhalt des Archivs ersetzen?`r`nDer aktuelle Stand wird vorher gesichert. Danach startet das Widget neu." -Title "Import")) { return }
+        [void](Backup-DataFiles -Reason "vor_import")
+        Copy-DataSet -From $tmp -To $script:DataDir
+        Write-WidgetLog "Data imported: $($ofd.FileName)"
+        Restart-Widget
+    } catch {
+        Write-WidgetLog "Import failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox -Text "Import fehlgeschlagen: $($_.Exception.Message)" -Title "Import"
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Switch-PortableMode {
+    # portable.txt next to the script = data in <program folder>\data
+    $flag = Join-Path $script:ScriptDir "portable.txt"
+    $portDir = Join-Path $script:ScriptDir "data"
+    $localDir = Join-Path $env:LOCALAPPDATA "TerminalWidget"
+    if ($script:IsPortable) {
+        if (-not (Confirm-Action -Text ("Portabel-Modus beenden?`r`nDie Daten werden nach {0} kopiert, danach startet das Widget neu." -f $localDir) -Title "Portabel")) { return }
+        try {
+            if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Path $localDir -Force | Out-Null }
+            [void](Backup-DataFiles -Reason "vor_portabel_aus")
+            Copy-DataSet -From $script:DataDir -To $localDir
+            Remove-Item -Path $flag -Force
+        } catch { Show-InfoBox -Text "Fehlgeschlagen: $($_.Exception.Message)" -Title "Portabel"; return }
+    } else {
+        if (-not (Confirm-Action -Text ("Portabel-Modus einschalten?`r`nDie Daten werden nach {0} kopiert (z. B. für einen USB-Stick), danach startet das Widget neu. Autostart zeigt weiter auf diesen Ordner." -f $portDir) -Title "Portabel")) { return }
+        try {
+            if (-not (Test-Path $portDir)) { New-Item -ItemType Directory -Path $portDir -Force | Out-Null }
+            Copy-DataSet -From $script:DataDir -To $portDir
+            Set-Content -Path $flag -Value "Daten liegen im Unterordner data (TerminalWidget portabel). Datei löschen = wieder %LOCALAPPDATA%." -Encoding UTF8
+        } catch { Show-InfoBox -Text "Fehlgeschlagen (Ordner schreibgeschützt?): $($_.Exception.Message)" -Title "Portabel"; return }
+    }
+    Restart-Widget
+}
+
+# ---- CSV import ----
+function Read-TextFileGuess {
+    # UTF-8 (with or without BOM), else Windows-1252 (German broker exports)
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    try { return $utf8.GetString($bytes).TrimStart([char]0xFEFF) } catch { return [System.Text.Encoding]::GetEncoding(1252).GetString($bytes) }
+}
+
+function Show-CsvImportDialog {
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "CSV / Text (*.csv;*.txt)|*.csv;*.txt|Alle Dateien (*.*)|*.*"
+    $ofd.Title = "Broker-Export (CSV) wählen"
+    if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $csv = $null
+    try { $csv = ConvertFrom-CsvText (Read-TextFileGuess $ofd.FileName) } catch { Write-WidgetLog "CSV read failed: $($_.Exception.Message)" "ERROR" }
+    if ($null -eq $csv -or @($csv.Headers).Count -lt 2 -or @($csv.Rows).Count -eq 0) {
+        Show-InfoBox -Text "In der Datei wurde keine Tabelle gefunden (Kopfzeile + Zeilen, getrennt mit ; , oder Tab)." -Title "CSV-Import"
+        return
+    }
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title ("CSV-Import - {0} -> Depot '{1}'" -f (Split-Path -Leaf $ofd.FileName), (Get-DepotName ([string]$script:Config.ActiveDepot))) -W (S 1000) -H (S 640)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 860), (S 480))
+    $aTLR = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $aAll = $aTLR -bor [System.Windows.Forms.AnchorStyles]::Bottom
+    $aBL = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $info = New-Object System.Windows.Forms.Label
+    $info.SetBounds((S 12), (S 8), (S 976), (S 20)); $info.Anchor = $aTLR; $info.ForeColor = $p.Muted
+    $info.Text = "Spalten zuordnen (automatisch erkannt). Häkchen = wird importiert. Symbol-Spalte ist änderbar. Schon vorhandene Buchungen werden nicht doppelt importiert."
+    $dlg.Controls.Add($info)
+    $guess = Get-CsvColumnGuess -Headers $csv.Headers
+    $fields = Get-CsvFieldNames
+    $combos = @{}
+    $i = 0
+    foreach ($f in $fields.Keys) {
+        $x = (S 12) + ($i % 5) * (S 196)
+        $y = (S 34) + [math]::Floor($i / 5) * (S 30)
+        $l = New-Object System.Windows.Forms.Label
+        $l.SetBounds($x, ($y + (S 3)), (S 74), (S 18)); $l.Text = $fields[$f]
+        $dlg.Controls.Add($l)
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.SetBounds(($x + (S 76)), $y, (S 112), (S 24))
+        $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $cb.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cb.BackColor = $p.Input; $cb.ForeColor = $p.Text
+        [void]$cb.Items.Add("(keine)")
+        foreach ($h in $csv.Headers) { [void]$cb.Items.Add($(if ($h) { $h } else { "(leer)" })) }
+        $cb.SelectedIndex = [int]$guess[$f] + 1
+        $cb.DropDownWidth = S 200
+        $dlg.Controls.Add($cb)
+        $combos[$f] = $cb
+        $i++
+    }
+    $y2 = S 98
+    $lCur = New-Object System.Windows.Forms.Label
+    $lCur.SetBounds((S 12), ($y2 + (S 3)), (S 150), (S 18)); $lCur.Text = "Währung, wenn leer:"
+    $dlg.Controls.Add($lCur)
+    $cbCur = New-Object System.Windows.Forms.ComboBox
+    $cbCur.SetBounds((S 164), $y2, (S 70), (S 24))
+    $cbCur.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbCur.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbCur.BackColor = $p.Input; $cbCur.ForeColor = $p.Text
+    foreach ($c in @("EUR", "USD", "CHF", "GBP")) { [void]$cbCur.Items.Add($c) }
+    $cbCur.SelectedIndex = 0
+    $dlg.Controls.Add($cbCur)
+    $lSuf = New-Object System.Windows.Forms.Label
+    $lSuf.SetBounds((S 250), ($y2 + (S 3)), (S 150), (S 18)); $lSuf.Text = "ISIN bevorzugt an Börse:"
+    $dlg.Controls.Add($lSuf)
+    $cbSuf = New-Object System.Windows.Forms.ComboBox
+    $cbSuf.SetBounds((S 402), $y2, (S 120), (S 24))
+    $cbSuf.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbSuf.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbSuf.BackColor = $p.Input; $cbSuf.ForeColor = $p.Text
+    foreach ($c in @("Heimatbörse", ".DE Xetra", ".F Frankfurt", ".VI Wien", ".SW Zürich", ".L London", ".AS Amsterdam", ".PA Paris")) { [void]$cbSuf.Items.Add($c) }
+    $cbSuf.SelectedIndex = 0
+    $dlg.Controls.Add($cbSuf)
+    Set-DynTip $cbSuf "Bei ISINs: welches Yahoo-Symbol genommen wird. Heimatbörse = erster Treffer (meist US/Heimatmarkt); .DE = Xetra-Kurse in EUR."
+    $btnRes = New-Object System.Windows.Forms.Button
+    $btnRes.SetBounds((S 534), ($y2 - (S 1)), (S 150), (S 26))
+    Style-FlatButton -Btn $btnRes -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnRes.Text = "ISINs auflösen"
+    $dlg.Controls.Add($btnRes)
+    $chkReb = New-Object System.Windows.Forms.CheckBox
+    $chkReb.SetBounds((S 700), $y2, (S 290), (S 24)); $chkReb.Anchor = $aTLR
+    $chkReb.Text = "Positionen danach aus Buchungen berechnen"; $chkReb.Checked = $true
+    $chkReb.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $dlg.Controls.Add($chkReb)
+    Set-DynTip $chkReb "Stück und EK der betroffenen Positionen werden aus allen Buchungen neu berechnet (Durchschnittskosten, Splits berücksichtigt)" "REBUILD"
+    $g = New-Object System.Windows.Forms.DataGridView
+    $g.SetBounds((S 12), (S 132), (S 976), (S 450)); $g.Anchor = $aAll
+    Style-DataGrid -Grid $g
+    $g.ReadOnly = $false
+    $g.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::CellSelect
+    $chkCol = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $chkCol.Name = "Use"; $chkCol.HeaderText = ""; $chkCol.FillWeight = [float](S 30)
+    [void]$g.Columns.Add($chkCol)
+    foreach ($cd in @(@("Date", "Datum", 90), @("Type", "Art", 80), @("Ident", "Ticker / ISIN", 130), @("Sym", "Symbol", 90), @("Shares", "Stück", 80), @("Price", "Kurs / Betrag", 100), @("Fee", "Gebühr", 70), @("Cur", "Whg", 50), @("Note", "Hinweis", 220))) {
+        $ci = $g.Columns.Add($cd[0], $cd[1])
+        $g.Columns[$ci].FillWeight = [float](S $cd[2])
+        $g.Columns[$ci].ReadOnly = ($cd[0] -ne "Sym")
+    }
+    $g.Columns["Sym"].DefaultCellStyle.ForeColor = $p.Accent
+    $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $dlg.Controls.Add($g)
+    $lSum = New-Object System.Windows.Forms.Label
+    $lSum.SetBounds((S 12), (S 594), (S 700), (S 34)); $lSum.Anchor = $aBL -bor [System.Windows.Forms.AnchorStyles]::Right; $lSum.ForeColor = $p.Muted
+    $dlg.Controls.Add($lSum)
+    $btnImp = New-Object System.Windows.Forms.Button
+    $btnImp.SetBounds((S 794), (S 598), (S 94), (S 28)); $btnImp.Anchor = $aBR
+    Style-FlatButton -Btn $btnImp -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $btnImp.Text = "Importieren"
+    $dlg.Controls.Add($btnImp)
+    $btnCa = New-Object System.Windows.Forms.Button
+    $btnCa.SetBounds((S 894), (S 598), (S 94), (S 28)); $btnCa.Anchor = $aBR
+    Style-FlatButton -Btn $btnCa -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $btnCa.Text = "Abbrechen"
+    $btnCa.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCa)
+    $dlg.CancelButton = $btnCa
+
+    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Imported = 0 }
+    $script:CsvCtl.Fill = {
+        $cc = $script:CsvCtl
+        $map = @{}
+        foreach ($f in $cc.Combos.Keys) { $map[$f] = $cc.Combos[$f].SelectedIndex - 1 }
+        $cc.Rows = @(ConvertFrom-BrokerRows -Rows $cc.Csv.Rows -Map $map -DefaultCurrency ([string]$cc.Cur.SelectedItem))
+        $existing = $script:Transactions.ToArray()
+        $cc.Grid.Rows.Clear()
+        $nOk = 0; $nDup = 0; $nIsin = 0
+        foreach ($b in $cc.Rows) {
+            $sym = if (Test-Isin $b.Ident) { [string]$cc.IsinMap[$b.Ident] } else { $b.Ident }
+            $note = $b.Note
+            $use = $b.Ok
+            if ($b.Ok -and -not $sym) { $note = "ISIN noch nicht aufgelöst"; $use = $false; $nIsin++ }
+            elseif ($b.Ok -and (Test-DuplicateTransaction -Existing $existing -New ([PSCustomObject]@{ Date = $b.Date; Ticker = $sym; Type = $b.Type; Shares = $b.Shares; Price = $b.Price }))) { $note = "schon vorhanden"; $use = $false; $nDup++ }
+            if ($use) { $nOk++ }
+            $ri = $cc.Grid.Rows.Add($use, (Format-IsoDateDe $b.Date), $b.Type, $b.Ident, $sym, ("{0:N4}" -f $b.Shares), ("{0:N4}" -f $b.Price), ("{0:N2}" -f $b.Fee), $b.Currency, $note)
+            if (-not $b.Ok) { $cc.Grid.Rows[$ri].DefaultCellStyle.ForeColor = $script:Pal.Muted }
+        }
+        $cc.Sum.Text = "{0} Zeilen: {1} zum Import, {2} schon vorhanden, {3} ISIN offen, {4} übersprungen (Art/Datum/Stück fehlen, z. B. Ein-/Auszahlungen)." -f $cc.Rows.Count, $nOk, $nDup, $nIsin, @($cc.Rows | Where-Object { -not $_.Ok }).Count
+    }
+    foreach ($cb in @($combos.Values) + @($cbCur)) { $cb.Add_SelectionChangeCommitted({ & $script:CsvCtl.Fill }) }
+    $btnRes.Add_Click({
+        $cc = $script:CsvCtl
+        $isins = @($cc.Rows | Where-Object { Test-Isin $_.Ident } | ForEach-Object { $_.Ident } | Sort-Object -Unique | Where-Object { -not $cc.IsinMap.ContainsKey($_) })
+        if ($isins.Count -eq 0) { & $cc.Fill; return }
+        $suf = ([string]$cc.Suf.SelectedItem).Split(' ')[0]
+        if (-not $suf.StartsWith(".")) { $suf = "" }
+        $cc.Sum.Text = "Suche {0} ISIN(s) bei Yahoo ..." -f $isins.Count
+        $cc.Dlg.Refresh()
+        $urls = @{}
+        foreach ($is in $isins) { $urls[$is] = "https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=10&newsCount=0" -f $is }
+        $res = Invoke-ParallelFetch -Urls @($urls.Values) -TimeoutSec 12
+        foreach ($is in $isins) {
+            $s = Get-YahooSymbolFromSearch -Json $res[$urls[$is]] -PreferSuffix $suf
+            if ($s) { $cc.IsinMap[$is] = $s }
+        }
+        & $cc.Fill
+    })
+    $g.Add_CellEndEdit({
+        param($sender, $e)
+        if ($sender.Columns[$e.ColumnIndex].Name -ne "Sym") { return }
+        $cc = $script:CsvCtl
+        $b = $cc.Rows[$e.RowIndex]
+        $v = ([string]$sender.Rows[$e.RowIndex].Cells["Sym"].Value).Trim().ToUpper()
+        $sender.Rows[$e.RowIndex].Cells["Sym"].Value = $v
+        if ((Test-Isin $b.Ident) -and $v) { $cc.IsinMap[$b.Ident] = $v }
+        if ($v -and $b.Ok) { $sender.Rows[$e.RowIndex].Cells["Use"].Value = $true }
+    })
+    $btnImp.Add_Click({
+        $cc = $script:CsvCtl
+        $cc.Grid.EndEdit() | Out-Null
+        $n = 0
+        $syms = New-Object System.Collections.Generic.HashSet[string]
+        for ($k = 0; $k -lt $cc.Rows.Count; $k++) {
+            $row = $cc.Grid.Rows[$k]
+            if (-not [bool]$row.Cells["Use"].Value) { continue }
+            $b = $cc.Rows[$k]
+            $sym = ([string]$row.Cells["Sym"].Value).Trim().ToUpper()
+            if (-not $b.Ok -or -not $sym) { continue }
+            $script:Transactions.Add([PSCustomObject]@{
+                Id = [Guid]::NewGuid().ToString("N"); Date = $b.Date; Ticker = $sym; Type = $b.Type
+                Shares = [double]$b.Shares; Price = [double]$b.Price; Fee = [double]$b.Fee; Currency = $b.Currency
+                Realized = 0.0; Note = "CSV-Import " + $cc.File
+            })
+            [void]$syms.Add($sym)
+            $n++
+        }
+        if ($n -eq 0) { $cc.Sum.Text = "Nichts ausgewählt."; return }
+        [void](Backup-DataFiles -Reason "vor_csv_import")
+        Save-Transactions
+        Write-WidgetLog ("CSV import: {0} bookings from {1}" -f $n, $cc.File)
+        if ($cc.Reb.Checked) {
+            foreach ($s in $syms) { [void](Invoke-PositionRebuild -Ticker $s -Owner $cc.Dlg -Silent) }
+        }
+        $cc.Imported = $n
+        $cc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $cc.Dlg.Close()
+    })
+    $dlg.Add_Shown({ & $script:CsvCtl.Fill })
+    [void]$dlg.ShowDialog($form)
+    $n = [int]$script:CsvCtl.Imported
+    $script:CsvCtl = $null
+    $dlg.Dispose()
+    if ($n -gt 0) {
+        Set-TransientStatus ("{0} Buchungen importiert" -f $n) 5
+        Refresh-AllMarketData
+        Update-AllUiViews
+    }
+}
+
+# ==============================================================================
+# v4.6: grid columns, global hotkey, click-through, snapping, undo, price
+# flash, colours, own layouts, welcome tour
+# ==============================================================================
+
+# ---- colours ----
+function Get-BlendColor {
+    param([System.Drawing.Color]$A, [System.Drawing.Color]$B, [double]$T)
+    return [System.Drawing.Color]::FromArgb([int]($B.R + ($A.R - $B.R) * $T), [int]($B.G + ($A.G - $B.G) * $T), [int]($B.B + ($A.B - $B.B) * $T))
+}
+
+function Update-UpDownColors {
+    $ud = Get-UpDownColors -Scheme ([string]$script:Config.UpDownScheme) -UpHex ([string]$script:Config.UpColor) -DownHex ([string]$script:Config.DownColor)
+    $script:colGreen = [System.Drawing.Color]::FromArgb($ud.Up[0], $ud.Up[1], $ud.Up[2])
+    $script:colRed = [System.Drawing.Color]::FromArgb($ud.Down[0], $ud.Down[1], $ud.Down[2])
+}
+
+function Get-ArrowPrefix {
+    param([double]$V)
+    if (-not [bool]$script:Config.ShowArrows) { return "" }
+    if ($V -gt 0) { return [string][char]0x25B2 + " " }
+    if ($V -lt 0) { return [string][char]0x25BC + " " }
+    return ""
+}
+
+# ---- grid columns: right-click on a header, drag headers to reorder ----
+$script:GridDefaults = @{}
+$script:GridLayoutSig = @{}
+$script:GridLayoutBusy = $false
+
+function Save-GridLayout {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key)
+    if ($script:GridLayoutBusy) { return }
+    $gl = $script:Config.GridLayouts
+    if ($null -eq $gl) { $gl = [PSCustomObject]@{}; $script:Config.GridLayouts = $gl }
+    $val = @(ConvertTo-GridLayout @($Grid.Columns))
+    # resizing the window changes widths but not the weights: only save real changes
+    $sig = ($val | ForEach-Object { "{0}:{1}:{2:F1}:{3}" -f $_.Name, $_.Index, $_.Weight, $_.Visible }) -join "|"
+    if ($script:GridLayoutSig[$Key] -eq $sig) { return }
+    $script:GridLayoutSig[$Key] = $sig
+    if ($null -eq $gl.PSObject.Properties[$Key]) { $gl | Add-Member -NotePropertyName $Key -NotePropertyValue $val -Force } else { $gl.$Key = $val }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
+function Restore-GridLayout {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key, [switch]$Defaults)
+    $items = $null
+    if ($Defaults) { $items = $script:GridDefaults[$Key] }
+    elseif ($null -ne $script:Config.GridLayouts -and $null -ne $script:Config.GridLayouts.PSObject.Properties[$Key]) { $items = @($script:Config.GridLayouts.$Key) }
+    if ($null -eq $items) { return }
+    $script:GridLayoutBusy = $true
+    try {
+        foreach ($it in @($items | Sort-Object -Property @{ Expression = { [int]$_.Index } })) {
+            $col = $Grid.Columns[[string]$it.Name]
+            if ($null -eq $col) { continue }
+            if ($col.Index -ne 0) { $col.Visible = [bool]$it.Visible }
+            if ([double]$it.Weight -gt 0) { $col.FillWeight = [float][double]$it.Weight }
+            $col.DisplayIndex = [math]::Min([int]$it.Index, $Grid.Columns.Count - 1)
+        }
+    } catch { Write-WidgetLog "Grid layout $Key not restored: $($_.Exception.Message)" "WARN" }
+    finally { $script:GridLayoutBusy = $false }
+}
+
+function Enable-GridCustomization {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key)
+    $script:GridDefaults[$Key] = @(ConvertTo-GridLayout @($Grid.Columns))
+    $Grid.AllowUserToOrderColumns = $true
+    $Grid.Tag = $Key
+    Restore-GridLayout -Grid $Grid -Key $Key
+    $script:GridLayoutSig[$Key] = (@(ConvertTo-GridLayout @($Grid.Columns)) | ForEach-Object { "{0}:{1}:{2:F1}:{3}" -f $_.Name, $_.Index, $_.Weight, $_.Visible }) -join "|"
+    $Grid.Add_ColumnDisplayIndexChanged({ param($sender, $e) Save-GridLayout -Grid $sender -Key ([string]$sender.Tag) })
+    $Grid.Add_ColumnWidthChanged({ param($sender, $e) Save-GridLayout -Grid $sender -Key ([string]$sender.Tag) })
+    $Grid.Add_ColumnHeaderMouseClick({
+        param($sender, $e)
+        if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) { return }
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $menu.ShowCheckMargin = $true
+        foreach ($col in @($sender.Columns | Sort-Object DisplayIndex)) {
+            $mi = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($col.HeaderText) { $col.HeaderText } else { $col.Name }))
+            $mi.Checked = $col.Visible
+            $mi.Enabled = ($col.Index -ne 0)
+            $mi.Tag = @($sender, $col.Name)
+            $mi.Add_Click({
+                param($s2, $e2)
+                $gr = $s2.Tag[0]; $cn = [string]$s2.Tag[1]
+                $gr.Columns[$cn].Visible = -not $gr.Columns[$cn].Visible
+                Save-GridLayout -Grid $gr -Key ([string]$gr.Tag)
+            })
+            [void]$menu.Items.Add($mi)
+        }
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        $rs = New-Object System.Windows.Forms.ToolStripMenuItem("Standard wiederherstellen")
+        $rs.Tag = $sender
+        $rs.Add_Click({
+            param($s2, $e2)
+            Restore-GridLayout -Grid $s2.Tag -Key ([string]$s2.Tag.Tag) -Defaults
+            Save-GridLayout -Grid $s2.Tag -Key ([string]$s2.Tag.Tag)
+        })
+        [void]$menu.Items.Add($rs)
+        $menu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
+    })
+}
+
+# ---- global hotkey + click-through (Win32 via a small helper class) ----
+$script:Hotkey = $null
+$script:HotkeyTypeOk = $false
+try {
+    if (-not ("TwHotkeyWindow" -as [type])) {
+        $refs = New-Object System.Collections.Generic.List[string]
+        foreach ($t in @([System.Windows.Forms.NativeWindow], [System.Windows.Forms.Message], [System.Windows.Forms.CreateParams])) {
+            $loc = $t.Assembly.Location
+            if ($loc -and -not $refs.Contains($loc)) { $refs.Add($loc) }
+        }
+        Add-Type -ReferencedAssemblies $refs.ToArray() -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class TwHotkeyWindow : System.Windows.Forms.NativeWindow, IDisposable {
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+    public Action OnHotkey;
+    bool registered;
+    public TwHotkeyWindow() { CreateHandle(new System.Windows.Forms.CreateParams()); }
+    public bool Register(uint mods, uint vk) { Unregister(); registered = RegisterHotKey(Handle, 0x7A11, mods | 0x4000, vk); return registered; }
+    public void Unregister() { if (registered) { UnregisterHotKey(Handle, 0x7A11); registered = false; } }
+    protected override void WndProc(ref System.Windows.Forms.Message m) {
+        if (m.Msg == 0x0312 && OnHotkey != null) { try { OnHotkey(); } catch { } }
+        base.WndProc(ref m);
+    }
+    public void Dispose() { Unregister(); DestroyHandle(); }
+    public static void SetClickThrough(IntPtr hWnd, bool on) {
+        int ex = GetWindowLong(hWnd, -20);
+        if (on) { ex = ex | 0x80000 | 0x20; } else { ex = ex & ~0x20; }
+        SetWindowLong(hWnd, -20, ex);
+    }
+}
+"@
+    }
+    $script:HotkeyTypeOk = $true
+} catch {
+    Write-WidgetLog "Hotkey helper not available: $($_.Exception.Message)" "WARN"
+}
+
+function Invoke-HotkeyToggle {
+    if ($script:IsClosing) { return }
+    if ($script:ClickThrough) { Set-ClickThrough $false }
+    if ($form.Visible -and $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized -and [System.Windows.Forms.Form]::ActiveForm -eq $form) {
+        $form.Hide()
+    } else {
+        Show-MainWindow
+        $form.Activate()
+    }
+}
+
+function Register-GlobalHotkey {
+    if (-not $script:HotkeyTypeOk) { return "nicht verfügbar" }
+    try {
+        if ($null -eq $script:Hotkey) {
+            $script:Hotkey = New-Object TwHotkeyWindow
+            $script:Hotkey.OnHotkey = [Action]{ Invoke-HotkeyToggle }
+        }
+        $script:Hotkey.Unregister()
+        $hk = ConvertFrom-HotkeyText ([string]$script:Config.GlobalHotkey)
+        if ($null -eq $hk) { return "aus" }
+        if ($script:Hotkey.Register([uint32]$hk.Mods, [uint32]$hk.Key)) { Write-WidgetLog "Global hotkey: $($hk.Text)"; return "" }
+        Write-WidgetLog "Global hotkey $($hk.Text) is used by another program" "WARN"
+        return "$($hk.Text) ist schon von einem anderen Programm belegt"
+    } catch {
+        Write-WidgetLog "Global hotkey failed: $($_.Exception.Message)" "WARN"
+        return "Fehler: $($_.Exception.Message)"
+    }
+}
+
+$script:ClickThrough = $false
+function Set-ClickThrough {
+    param([bool]$On)
+    if (-not $script:HotkeyTypeOk) { Set-TransientStatus "Durchklicken ist auf diesem System nicht verfügbar" 4; return }
+    if ($On -and -not (ConvertFrom-HotkeyText ([string]$script:Config.GlobalHotkey))) {
+        Show-InfoBox -Text "Zum Zurückholen wird das globale Tastenkürzel gebraucht (Einstellungen). Ohne Kürzel bleibt nur das Tray-Menü." -Title "Durchklicken"
+    }
+    $script:ClickThrough = $On
+    try { [TwHotkeyWindow]::SetClickThrough($form.Handle, $On) } catch { Write-WidgetLog "Click-through failed: $($_.Exception.Message)" "WARN" }
+    if ($On) {
+        if (-not $form.TopMost) { $form.TopMost = $true }
+        if ($form.Opacity -gt 0.85) { $form.Opacity = 0.85 }
+    } else {
+        $form.Opacity = [double]$script:Config.Opacity / 100.0
+        $form.TopMost = [bool]$script:Config.TopMost
+    }
+    $miClickThrough.Checked = $On
+    Write-WidgetLog "Click-through: $On"
+}
+
+# ---- undo for deletions (Ctrl+Z within 10 seconds) ----
+$script:Undo = $null
+function Set-Undo {
+    param([string]$Kind, $Data, [string]$Text)
+    $script:Undo = @{ Kind = $Kind; Data = $Data; Until = (Get-Date).AddSeconds(10) }
+    Set-TransientStatus ("{0} - Strg+Z = rückgängig" -f $Text) 10
+}
+
+function Invoke-Undo {
+    $u = $script:Undo
+    if (-not (Test-UndoValid -Undo $u)) { return $false }
+    $script:Undo = $null
+    switch ($u.Kind) {
+        "Alert" {
+            $ix = [math]::Min([int]$u.Data.Index, $script:Alerts.Count)
+            $script:Alerts.Insert($ix, $u.Data.Item)
+            Save-Alerts
+        }
+        "Position" {
+            $script:Portfolio[[string]$u.Data.Key] = $u.Data.Item
+            Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
+        }
+        "Watchlist" {
+            $script:Config.Watchlist = @($u.Data)
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        }
+    }
+    Set-TransientStatus "Wiederhergestellt" 3
+    Refresh-AllMarketData
+    Update-AllUiViews
+    return $true
+}
+
+# ---- price flash ----
+$script:LastFlashPrice = @{}
+$script:FlashTimer = New-Object System.Windows.Forms.Timer
+$script:FlashTimer.Interval = 900
+$script:FlashTimer.Add_Tick({
+    $script:FlashTimer.Stop()
+    foreach ($pair in @(@($dgvWatchlist, "Price"), @($dgvPortfolio, "Price"))) {
+        $g = $pair[0]
+        if ($null -eq $g.Columns[$pair[1]]) { continue }
+        foreach ($r in $g.Rows) { $r.Cells[$pair[1]].Style.BackColor = [System.Drawing.Color]::Empty }
+    }
+})
+
+function Set-PriceFlash {
+    # Tints the price cell when the price changed since the last refresh
+    param($Cell, [string]$Key, [double]$Price)
+    if (-not [bool]$script:Config.PriceFlash -or $Price -le 0) { return }
+    $old = $script:LastFlashPrice[$Key]
+    $script:LastFlashPrice[$Key] = $Price
+    if ($null -eq $old -or [math]::Abs([double]$old - $Price) -lt 1e-9) { return }
+    $c = if ($Price -gt [double]$old) { $script:colGreen } else { $script:colRed }
+    $Cell.Style.BackColor = Get-BlendColor -A $c -B $script:Pal.Card -T 0.35
+    $script:FlashTimer.Stop()
+    $script:FlashTimer.Start()
+}
+
+# ---- own layouts ----
+$script:LayoutKeys = @("Layout", "TerminalChartPct", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalBottom", "Theme", "AccentColor", "AccentHex",
+                       "UpDownScheme", "ChartType", "ShowVolume", "ShowSma", "ShowRsi", "ShowVwap", "ShowBollinger", "ShowExtended", "Timeframe", "LowerPanel", "MaType", "Opacity", "TopMost")
+
+function Save-UserLayout {
+    param([string]$Name)
+    $snap = [ordered]@{ Name = $Name }
+    foreach ($k in $script:LayoutKeys) { $snap[$k] = $script:Config.$k }
+    $list = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -ne $Name.ToUpper() })
+    $script:Config.UserLayouts = @($list) + @([PSCustomObject]$snap)
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-TransientStatus "Layout '$Name' gespeichert (LAYOUT $($Name.ToUpper()))" 4
+}
+
+function Use-UserLayout {
+    param([string]$Name)
+    $hit = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -eq $Name.ToUpper() })
+    if ($hit.Count -eq 0) { return $false }
+    $l = $hit[0]
+    foreach ($k in $script:LayoutKeys) { if ($null -ne $l.PSObject.Properties[$k] -and $k -ne "Layout") { $script:Config.$k = $l.$k } }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-UpDownColors
+    Apply-ThemeToAllControls
+    $form.Opacity = [double]$script:Config.Opacity / 100.0
+    $form.TopMost = [bool]$script:Config.TopMost
+    Apply-Layout ([string]$l.Layout)
+    Refresh-AllMarketData -Force
+    Update-AllUiViews
+    return $true
+}
+
+# ---- welcome tour ----
+function Show-WelcomeTour {
+    $pages = @(
+        @("Willkommen beim TerminalWidget", "Vom kleinen Ticker bis zum Terminal: mit L (oder dem Layout-Button oben rechts) wechselst du zwischen Ticker, Compact, Standard und Terminal.`r`n`r`nMaus über ein Element halten zeigt eine Erklärung. G öffnet das Glossar, H alle Tastenkürzel."),
+        @("Ticker und Watchlist", "Strg+F sucht einen Ticker (Name, Symbol oder ISIN). In der Watchlist: ziehen = Reihenfolge, Entf = löschen (Strg+Z holt ihn zurück), Rechtsklick auf eine Spaltenüberschrift = Spalten ein-/ausblenden, Überschriften ziehen = umsortieren."),
+        @("Portfolio", "Positionen im Portfolio-Tab anlegen - beim Speichern wird nach dem Kaufdatum gefragt. Buchungen vom Broker: Historie > Import (CSV). Mehrere Depots: Auswahl oben im Portfolio-Tab. P öffnet die Analyse mit Wertentwicklung, Rendite, Aufteilung und Dividenden."),
+        @("Alarme und Handy", "Alarme im Watch-Tab oder per Rechtsklick in den Chart: Kurs, Tag%, Trailing-Stopp, 52W-Hoch, Volumen, Depotwert ... Einstellungen > Handy-Push schickt sie per ntfy oder Telegram aufs Handy, mit Ruhezeit für die Nacht."),
+        @("Befehlszeile", "Strg+K öffnet die Befehlszeile wie im Terminal:`r`n  NVDA GP 1Y   Chart     NVDA DES   Beschreibung`r`n  NVDA N   Nachrichten   CAL   Termine   TOP   Gewinner/Verlierer`r`n  NVDA ALRT TRAIL 8   Alarm`r`n`r`nStrg+Alt+W holt das Widget von überall nach vorne (einstellbar).")
+    )
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title "Kurze Tour" -W (S 520) -H (S 300)
+    $t = New-Object System.Windows.Forms.Label
+    $t.SetBounds((S 20), (S 16), (S 480), (S 28)); $t.Font = $fontUiBold; $t.ForeColor = $p.Accent
+    $dlg.Controls.Add($t)
+    $b = New-Object System.Windows.Forms.Label
+    $b.SetBounds((S 20), (S 52), (S 480), (S 180)); $b.Font = $fontUi
+    $dlg.Controls.Add($b)
+    $n = New-Object System.Windows.Forms.Label
+    $n.SetBounds((S 20), (S 254), (S 120), (S 20)); $n.ForeColor = $p.Muted
+    $dlg.Controls.Add($n)
+    $next = New-Object System.Windows.Forms.Button
+    $next.SetBounds((S 406), (S 248), (S 96), (S 30))
+    Style-FlatButton -Btn $next -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $dlg.Controls.Add($next)
+    $skip = New-Object System.Windows.Forms.Button
+    $skip.SetBounds((S 302), (S 248), (S 96), (S 30)); $skip.Text = "Überspringen"
+    Style-FlatButton -Btn $skip -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $skip.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($skip)
+    $dlg.CancelButton = $skip
+    $script:TourCtl = @{ Dlg = $dlg; T = $t; B = $b; N = $n; Next = $next; Pages = $pages; I = 0 }
+    $script:TourCtl.Show = {
+        $tc = $script:TourCtl
+        $pg = $tc.Pages[$tc.I]
+        $tc.T.Text = $pg[0]; $tc.B.Text = $pg[1]
+        $tc.N.Text = "{0} / {1}" -f ($tc.I + 1), $tc.Pages.Count
+        $tc.Next.Text = if ($tc.I -ge $tc.Pages.Count - 1) { "Los geht's" } else { "Weiter" }
+    }
+    $next.Add_Click({
+        $tc = $script:TourCtl
+        if ($tc.I -ge $tc.Pages.Count - 1) { $tc.Dlg.Close(); return }
+        $tc.I++
+        & $tc.Show
+    })
+    & $script:TourCtl.Show
+    [void]$dlg.ShowDialog($form)
+    $script:TourCtl = $null
+    $dlg.Dispose()
+    $script:Config.FirstRunDone = $true
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
 }
 
 function Show-CurrencyMismatchNotice {
@@ -9295,10 +10405,13 @@ function Show-SettingsDialog {
     $nRsi   = & $addNum "RSI-Periode" 2 100 ([int]$cfg.RsiPeriod) "" "RSI"
     $nRsiOb = & $addNum "RSI überkauft ab" 51 99 ([int]$cfg.RsiOverbought) "" "RSI"
     $nRsiOs = & $addNum "RSI überverkauft bis" 1 49 ([int]$cfg.RsiOversold) "" "RSI"
+    $cbMa   = & $addCombo "Gleitender Durchschnitt" @("SMA", "EMA") ([string]$cfg.MaType) "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" "EMA"
+    $cbLow  = & $addCombo "Unteres Feld im Chart" @("RSI", "MACD") ([string]$cfg.LowerPanel) "" "MACD"
 
     & $addSection "Darstellung"
     $cbTheme  = & $addCombo "Theme" @(Get-ThemeNames) ([string]$cfg.Theme) "" "THEME"
-    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet") ([string]$cfg.AccentColor)
+    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen"
+    $cbLang   = & $addCombo "Sprache" @("Deutsch", "English") $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart."
     $chkTop   = & $addCheck "Immer im Vordergrund" ([bool]$cfg.TopMost) "" "PIN"
     $chkTape  = & $addCheck "Laufleiste (Watchlist) im Compact-Layout" ([bool]$cfg.CompactTape)
 
@@ -9358,6 +10471,54 @@ function Show-SettingsDialog {
     $chkTPort  = & $addCheck "Terminal: Portfolio anzeigen" ([bool]$cfg.TerminalShowPortfolio) "" "LAYOUT"
     $nTChart   = & $addNum "Terminal: Chart-Höhe (%)" 25 80 ([int]$cfg.TerminalChartPct) "Anteil des Charts an der Fensterhöhe; der Rest gehört den Listen" "LAYOUT" 5
 
+    # v4.6: colours and window
+    & $addSection "Farben und Fenster"
+    $cbUd     = & $addCombo "Farben für Plus / Minus" @(@((Get-UpDownSchemes).Keys) + @("Eigene")) ([string]$cfg.UpDownScheme) "Farbenblind = Blau / Orange. Eigene = frei wählen." "COLORS"
+    $chkArrow = & $addCheck "Pfeile vor Veränderungen anzeigen" ([bool]$cfg.ShowArrows) "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" "COLORS"
+    $chkFlash = & $addCheck "Kurs kurz einfärben, wenn er sich ändert" ([bool]$cfg.PriceFlash)
+    $chkSnap  = & $addCheck "Fenster am Bildschirmrand einrasten" ([bool]$cfg.SnapToEdges)
+    $lHk = New-Object System.Windows.Forms.Label
+    $lHk.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
+    $lHk.Size = New-Object System.Drawing.Size((S 258), (S 18))
+    $lHk.Text = "Globales Tastenkürzel (zeigen / verstecken)"
+    $dlg.Controls.Add($lHk)
+    $tHk = New-Object System.Windows.Forms.TextBox
+    $tHk.SetBounds(($lay.X + (S 292)), $lay.Y, (S 112), (S 22))
+    $tHk.BackColor = $p.Input; $tHk.ForeColor = $p.Text; $tHk.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tHk.Font = $fontMono; $tHk.Text = [string]$cfg.GlobalHotkey
+    $dlg.Controls.Add($tHk)
+    Set-DynTip $tHk "Funktioniert auch, wenn ein anderes Programm vorne ist. Z. B. Ctrl+Alt+W, Win+F9. Leer = aus." "HOTKEY"
+    Set-DynTip $lHk "" "HOTKEY"
+    $lay.Y += S 29
+    $script:NewColors = @{ Up = [string]$cfg.UpColor; Down = [string]$cfg.DownColor; Accent = [string]$cfg.AccentHex }
+    $pickColor = {
+        param([string]$Start)
+        $cd = New-Object System.Windows.Forms.ColorDialog
+        $cd.FullOpen = $true
+        $rgb = ConvertFrom-HexColor $Start
+        if ($null -ne $rgb) { $cd.Color = [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) }
+        $hex = ""
+        if ($cd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $hex = ConvertTo-HexColor $cd.Color.R $cd.Color.G $cd.Color.B }
+        $cd.Dispose()
+        return $hex
+    }
+    $script:PickColor = $pickColor
+    $cbUd.Add_SelectionChangeCommitted({
+        param($sender, $e)
+        if ([string]$sender.SelectedItem -ne "Eigene") { return }
+        $u = & $script:PickColor $script:NewColors.Up
+        if (-not $u) { return }
+        $d = & $script:PickColor $script:NewColors.Down
+        if (-not $d) { return }
+        $script:NewColors.Up = $u; $script:NewColors.Down = $d
+    })
+    $cbAccent.Add_SelectionChangeCommitted({
+        param($sender, $e)
+        if ([string]$sender.SelectedItem -ne "Eigene") { return }
+        $a = & $script:PickColor $script:NewColors.Accent
+        if ($a) { $script:NewColors.Accent = $a }
+    })
+
     & $addSection "Erklärungen (Maus darüber)"
     $modes = Get-TooltipModes
     $cbTip = & $addCombo "Ausführlichkeit" @($modes.Values) ([string]$modes[[string]$cfg.TooltipMode]) "" "TOOLTIPS"
@@ -9396,6 +10557,21 @@ function Show-SettingsDialog {
 
     $btnLog = New-Object System.Windows.Forms.Button
     $btnLog.SetBounds((S 266), $by, (S 100), (S 28))
+    # v4.5: restore / export / import / portable
+    $mkDataBtn = {
+        param([string]$T, [int]$X, [string]$Tip, [scriptblock]$Act)
+        $b = New-Object System.Windows.Forms.Button
+        $b.SetBounds($X, ($by + (S 36)), (S 130), (S 28))
+        Style-FlatButton -Btn $b -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
+        $b.Text = $T
+        $b.Add_Click($Act)
+        $dlg.Controls.Add($b)
+        Set-DynTip $b $Tip
+    }
+    & $mkDataBtn "Wiederherstellen ..." (S 14) "Ein Backup zurückspielen (täglich wird automatisch gesichert)" { $script:SettingsAfter = { Show-RestoreDialog }; $script:SettingsCtl.Dlg.Close() }
+    & $mkDataBtn "Daten exportieren ..." (S 150) "Alle Daten als ZIP sichern (z. B. für einen anderen PC)" { Export-DataZip }
+    & $mkDataBtn "Daten importieren ..." (S 286) "Einen ZIP-Export einlesen (ersetzt alle Daten, vorher Backup)" { $script:SettingsAfter = { Import-DataZip }; $script:SettingsCtl.Dlg.Close() }
+    & $mkDataBtn $(if ($script:IsPortable) { "Portabel beenden ..." } else { "Portabel machen ..." }) (S 422) $(if ($script:IsPortable) { "Daten liegen im Programmordner (data). Zurück nach %LOCALAPPDATA%." } else { "Daten in den Programmordner (data) verschieben, z. B. für einen USB-Stick" }) { $script:SettingsAfter = { Switch-PortableMode }; $script:SettingsCtl.Dlg.Close() }
     Style-FlatButton -Btn $btnLog -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
     $btnLog.Text = "Log öffnen"
     $btnLog.Add_Click({
@@ -9441,10 +10617,16 @@ function Show-SettingsDialog {
     $dlg.Controls.Add($btnOk)
     $dlg.AcceptButton = $btnOk
     $dlg.CancelButton = $btnCancel
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 42)))
+    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 78)))
 
+    $script:SettingsAfter = $null
+    Apply-Language $dlg
     $res = $dlg.ShowDialog($form)
     $script:SettingsCtl = $null
+    # v4.5: data actions run after the settings window is gone (changes there are discarded)
+    $after = $script:SettingsAfter
+    $script:SettingsAfter = $null
+    if ($null -ne $after) { $dlg.Dispose(); & $after; return }
     if ($res -ne [System.Windows.Forms.DialogResult]::OK) { $dlg.Dispose(); return }
 
     $needRefresh = ([int]$nSmaF.Value -ne [int]$cfg.SmaFastPeriod) -or ([int]$nSmaS.Value -ne [int]$cfg.SmaSlowPeriod) -or ([int]$nRsi.Value -ne [int]$cfg.RsiPeriod)
@@ -9474,6 +10656,26 @@ function Show-SettingsDialog {
     $cfg.TerminalChartPct      = [int]$nTChart.Value
     foreach ($mk in $modes.Keys) { if ($modes[$mk] -eq [string]$cbTip.SelectedItem) { $cfg.TooltipMode = $mk } }
     $cfg.TooltipDelayMs        = [int]$nTipDelay.Value
+    $newLang = if ([string]$cbLang.SelectedItem -eq "English") { "EN" } else { "DE" }
+    $langChanged = ($newLang -ne [string]$cfg.Language)
+    $cfg.Language              = $newLang
+    # v4.6
+    if ([string]$cbMa.SelectedItem -ne [string]$cfg.MaType -or [string]$cbLow.SelectedItem -ne [string]$cfg.LowerPanel) { $needRefresh = $true }
+    $cfg.MaType                = [string]$cbMa.SelectedItem
+    $cfg.LowerPanel            = [string]$cbLow.SelectedItem
+    $cfg.UpDownScheme          = [string]$cbUd.SelectedItem
+    if ($cfg.UpDownScheme -eq "Eigene" -and -not ($script:NewColors.Up -and $script:NewColors.Down)) { $cfg.UpDownScheme = "Standard" }
+    $cfg.UpColor               = [string]$script:NewColors.Up
+    $cfg.DownColor             = [string]$script:NewColors.Down
+    $cfg.AccentHex             = [string]$script:NewColors.Accent
+    if ($cfg.AccentColor -eq "Eigene" -and -not $cfg.AccentHex) { $cfg.AccentColor = "Sky" }
+    $cfg.ShowArrows            = [bool]$chkArrow.Checked
+    $cfg.PriceFlash            = [bool]$chkFlash.Checked
+    $cfg.SnapToEdges           = [bool]$chkSnap.Checked
+    $hkNew = $tHk.Text.Trim()
+    $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
+    if (-not $hkNew -or $null -ne (ConvertFrom-HotkeyText $hkNew)) { $cfg.GlobalHotkey = $hkNew }
+    else { Set-TransientStatus "Tastenkürzel '$hkNew' nicht erkannt - z. B. Ctrl+Alt+W" 6; $hkChanged = $false }
     $autoWanted = [bool]$chkAuto.Checked
     $dlg.Dispose()
     if ($autoWanted -ne $autoNow) {
@@ -9491,7 +10693,8 @@ function Show-SettingsDialog {
     if ($cmbRefresh.Items.IndexOf($refStr) -lt 0) { [void]$cmbRefresh.Items.Add($refStr) }
     $cmbRefresh.SelectedIndex = $cmbRefresh.Items.IndexOf($refStr)
     $form.TopMost = [bool]$cfg.TopMost
-    $btnToggleRsi.Text = "RSI-$($cfg.RsiPeriod)"
+    $btnToggleRsi.Text = if ([string]$cfg.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($cfg.RsiPeriod)" }
+    $btnToggleSma.Text = [string]$cfg.MaType
     Set-Tip $btnToggleSma "Gleitende Durchschnitte SMA $($cfg.SmaFastPeriod)/$($cfg.SmaSlowPeriod) (Taste M)" "SMA"
     Apply-TooltipMode
     Update-ChartControlsLayout
@@ -9500,6 +10703,14 @@ function Show-SettingsDialog {
     Apply-Layout $newLayout
     if ($needRefresh) { Refresh-AllMarketData -Force }
     Set-TransientStatus "Einstellungen gespeichert" 3
+    if ($langChanged -and (Confirm-Action -Text "Die Sprache wirkt nach einem Neustart. Jetzt neu starten? / Restart now to switch the language?" -Title "Sprache / Language")) {
+        Restart-Widget
+        return
+    }
+    if ($hkChanged) {
+        $hm = Register-GlobalHotkey
+        if ($hm -and $hm -ne "aus") { Set-TransientStatus "Tastenkürzel: $hm" 6 }
+    }
 }
 
 function Show-GlossaryDialog {
@@ -9567,6 +10778,41 @@ function Show-GlossaryDialog {
 }
 
 function Show-ShortcutHelp {
+    if ([string]$script:Config.Language -eq "EN") {
+        $txtEn = @"
+Keyboard shortcuts
+
+F1 / F2 / F3    Chart / Portfolio / Watch & alerts
+F5              Refresh now
+Ctrl+F          Search ticker
+Ctrl+K          Command line (also numpad /)
+Ctrl+Z          Undo the last deletion (10 seconds)
+Ctrl+Alt+W      Show / hide the widget from anywhere
+Left / Right    Previous / next watchlist ticker
+1 - 6           Range 1D / 5D / 1M / 3M / 6M / 1Y
+F11             Fullscreen chart
+
+K  line / candles      V  volume
+M  SMA/EMA             A  VWAP
+B  Bollinger           R  RSI / MACD
+E  pre/post market     W  currency
+T  theme               C  compact on/off
+L  next layout         G  glossary
+P  portfolio analysis  S  settings
+H  this help           Z  reset zoom   X  compare
+
+Command line: NVDA, NVDA GP 1Y, NVDA DES, NVDA N, NVDA DVD,
+NVDA EE, NVDA ALRT TRAIL 8, NVDA WL, PORT, ANA, DVD, CAL, TOP,
+FX, LOG, REP, TF 3M, LAYOUT TERMINAL, LAYOUT SAVE <name>,
+IND MACD, PF <depot>, IMP, BAK, SET, PUSH, ABOUT, TOUR
+
+Right-click a column header = choose columns, drag = reorder.
+Hover over controls for explanations (glossary is German).
+"@
+        [System.Windows.Forms.MessageBox]::Show($form, $txtEn, "Help - $($script:AppTitle)",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
     $txt = @"
 Tastenkürzel
 
@@ -9620,7 +10866,12 @@ NVDA DVD      Dividenden         NVDA EE     Termine
 NVDA ALRT TRAIL 8 / >= 150 / TAG- 3 / 52H / VOL 2
 NVDA WL / CMP / TX   Watchlist / Vergleich / Transaktion
 PORT  ANA  DVD  CAL  TOP  FX  LOG  REP  TF 3M  LAYOUT TERMINAL
-THEME OLED  SET  PUSH  GLOS  ABOUT
+THEME OLED  SET  PUSH  GLOS  ABOUT  PF <Depot>  IMP  BAK
+IND MACD/EMA  LAYOUT SAVE <Name>  CT (Durchklicken)  TOUR
+
+Strg+Z         Löschen rückgängig (10 Sekunden)
+Strg+Alt+W     Widget von überall zeigen / verstecken
+Rechtsklick auf Spaltenkopf = Spalten wählen, Kopf ziehen = Reihenfolge
 
 Alarme: Kurs, Tag%, RSI, SMA, Trailing-Stopp, EK%, 52W-Hoch/-Tief,
 Volumen-Spitze, Depotwert und Depot-Tag%. "Verlauf" zeigt alle
@@ -9809,6 +11060,28 @@ $cmiCompareOff.Add_Click({ Set-CompareTicker -Symbol "" })
 $cmiZoomReset.Add_Click({ Reset-ChartZoom })
 
 # Portfolio Grid & Editor Events
+Update-DepotCombo
+# v4.6: columns (right-click a header), global hotkey, snapping to screen edges
+Enable-GridCustomization -Grid $dgvWatchlist -Key "Watchlist"
+Enable-GridCustomization -Grid $dgvPortfolio -Key "Portfolio"
+$hkMsg = Register-GlobalHotkey
+if ($hkMsg -and $hkMsg -ne "aus") { Write-WidgetLog "Global hotkey: $hkMsg" "WARN" }
+$form.Add_ResizeEnd({
+    if (-not [bool]$script:Config.SnapToEdges -or $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) { return }
+    $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $sn = Get-SnappedPosition -X $form.Left -Y $form.Top -W $form.Width -H $form.Height -AreaLeft $wa.Left -AreaTop $wa.Top -AreaRight $wa.Right -AreaBottom $wa.Bottom -Dist (S 16)
+    if ($sn.Moved) { $form.Location = New-Object System.Drawing.Point([int]$sn.X, [int]$sn.Y) }
+})
+$cmbDepot.Add_SelectionChangeCommitted({
+    if ($script:DepotComboBusy) { return }
+    $ix = $cmbDepot.SelectedIndex
+    $list = @(Get-DepotList)
+    if ($ix -lt $list.Count) { Switch-Depot $list[$ix].Id; return }
+    $act = $ix - $list.Count
+    Update-DepotCombo
+    switch ($act) { 0 { New-Depot } 1 { Rename-ActiveDepot } 2 { Remove-ActiveDepot } }
+})
+
 $cmbPortSort.Add_SelectedIndexChanged({
     # choosing a preset ends a header-click sort
     $script:PfSort.Col = ""; $script:PfSort.Step = 0
@@ -9817,6 +11090,7 @@ $cmbPortSort.Add_SelectedIndexChanged({
 })
 $dgvPortfolio.Add_ColumnHeaderMouseClick({
     param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     $name = $sender.Columns[$e.ColumnIndex].Name
     if ($name -eq "Spark") { return }
     Step-GridSort -Sort $script:PfSort -Col $name -TextCols @("Ticker")
@@ -9825,6 +11099,7 @@ $dgvPortfolio.Add_ColumnHeaderMouseClick({
 })
 $dgvWatchlist.Add_ColumnHeaderMouseClick({
     param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     Step-GridSort -Sort $script:WlSort -Col ($sender.Columns[$e.ColumnIndex].Name) -TextCols @("Sym")
     Set-GridSortGlyph -Grid $dgvWatchlist -Sort $script:WlSort
     $lblWlTitle.Text = if ($script:WlSort.Col) { "Watchlist (sortiert - 3. Klick = eigene Reihenfolge)" } else { "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" }
@@ -9982,10 +11257,11 @@ $btnPortHist.Add_Click({ Show-TransactionHistory })
 $btnPortDel.Add_Click({
     $sym = $txtPortTicker.Text.Trim().ToUpper()
     if ($sym -and $script:Portfolio.ContainsKey($sym)) {
-        if (-not (Confirm-Action -Text "Position '$sym' wirklich löschen?" -Title "Portfolio")) { return }
+        $old = $script:Portfolio[$sym]
         $script:Portfolio.Remove($sym)
         Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
         Update-AllUiViews
+        Set-Undo -Kind "Position" -Data @{ Key = $sym; Item = $old } -Text "Position $sym gelöscht (Buchungen bleiben)"
     }
 })
 
@@ -10227,10 +11503,12 @@ $btnAddAlert.Add_Click({
 $btnDelAlert.Add_Click({
     $idx = $lstAlerts.SelectedIndex
     if ($idx -ge 0 -and $idx -lt $script:Alerts.Count) {
-        if (-not (Confirm-Action -Text "Alarm '$($lstAlerts.Items[$idx])' löschen?" -Title "Preis-Alarm")) { return }
+        # v4.6: no question any more - Ctrl+Z brings it back
+        $al = $script:Alerts[$idx]
         $script:Alerts.RemoveAt($idx)
         Save-Alerts
         Update-AllUiViews
+        Set-Undo -Kind "Alert" -Data @{ Item = $al; Index = $idx } -Text ("Alarm {0} {1} gelöscht" -f $al.Ticker, $al.Condition)
     }
 })
 
@@ -10452,6 +11730,10 @@ $script:GlobalKeyHandler = {
         if (-not $script:Config.CompactMode) { Populate-TickerDropdown -FilterText "" }
         return
     }
+    # v4.6: Ctrl+Z = undo the last deletion (not inside text boxes)
+    if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Z -and -not ($sender.ActiveControl -is [System.Windows.Forms.TextBox])) {
+        if (Invoke-Undo) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    }
     # v4.4: Ctrl+K = command line (works in the fullscreen chart too)
     if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::K) {
         $e.Handled = $true
@@ -10655,10 +11937,15 @@ $uiTimer.Add_Tick({
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
         if ($script:PushPending.Count -gt 0) { Pump-PushTasks }
+        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown -and -not $script:SmokeMode) {
+            $script:TourShown = $true
+            Show-WelcomeTour
+        }
         if ($nowTick -ge $script:NextEventsCheck) {
             $script:NextEventsCheck = $nowTick.AddMinutes(10)
             Update-EventsIfStale
             Check-EarningsNotifications
+            Invoke-DailyBackup
         }
     } catch {
         Write-WidgetLog "UI tick failed: $($_.Exception.Message)" "WARN"
@@ -10734,6 +12021,149 @@ $form.Add_FormClosing({
     # be on the call stack (inside DoEvents) and must not hit disposed objects.
 })
 
+# ==============================================================================
+# v4.7: UI smoke test (CI). TW_SMOKE_TEST = report path. Starts the real
+# window, opens every dialog (closed again by a timer), runs commands and
+# layout switches, then writes a JSON report and exits with the error count.
+# ==============================================================================
+$script:SmokeMode = [bool]$env:TW_SMOKE_TEST
+$script:SmokeSteps = New-Object System.Collections.Generic.List[PSObject]
+$script:SmokeFailures = New-Object System.Collections.Generic.List[string]
+$script:SmokeNotes = New-Object System.Collections.Generic.List[string]
+$script:SmokeProgErrors = @("CommandNotFoundException", "ParameterBindingFailed", "ParameterArgumentTransformationError", "NamedParameterNotFound",
+    "PositionalParameterNotFound", "MethodNotFound", "MethodCountCouldNotFindBest", "InvokeMethodOnNull", "NullArray", "PropertyAssignmentException",
+    "PropertyNotFound", "InvalidCastFromStringToInteger", "ArgumentTransformationError", "RuntimeException", "IndexOutOfRangeException", "NullReferenceException", "VariableIsUndefined")
+
+function Get-SmokeErrors {
+    # Errors since the last call: programming errors fail the step, the rest are notes
+    param([string]$Step)
+    $fails = @()
+    if ($global:Error.Count -gt 0) {
+        $errs = @($global:Error)
+        $global:Error.Clear()
+        [array]::Reverse($errs)
+        foreach ($er in $errs) {
+            $id = [string]$er.FullyQualifiedErrorId
+            $ln = if ($er.InvocationInfo) { $er.InvocationInfo.ScriptLineNumber } else { 0 }
+            $msg = "{0} @ line {1}: {2} [{3}]" -f $Step, $ln, $er.ToString(), $id
+            $isProg = $false
+            foreach ($p in $script:SmokeProgErrors) { if ($id -like "$p*") { $isProg = $true; break } }
+            if ($isProg) { $fails += $msg } else { $script:SmokeNotes.Add($msg) }
+        }
+    }
+    return $fails
+}
+
+function Invoke-SmokeStep {
+    param([string]$Name, [scriptblock]$Action, [int]$CloseAfterMs = 1200)
+    [void](Get-SmokeErrors -Step "before $Name")
+    $script:SmokeCloser.Interval = $CloseAfterMs
+    $script:SmokeCloser.Start()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ok = $true; $err = ""
+    try { & $Action } catch { $ok = $false; $err = "{0} @ line {1}" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber }
+    $script:SmokeCloser.Stop()
+    foreach ($f in @(Get-SmokeErrors -Step $Name)) { $ok = $false; $script:SmokeFailures.Add($f) }
+    if ($err) { $script:SmokeFailures.Add("$Name : $err") }
+    $script:SmokeSteps.Add([PSCustomObject]@{ Name = $Name; Ok = $ok; Ms = $sw.ElapsedMilliseconds; Error = $err })
+}
+
+$script:SmokeCloser = New-Object System.Windows.Forms.Timer
+$script:SmokeCloser.Add_Tick({
+    # closes every window except the main window (and the fullscreen chart)
+    foreach ($f in @([System.Windows.Forms.Application]::OpenForms)) {
+        if ([object]::ReferenceEquals($f, $form) -or ($null -ne $script:FsForm -and [object]::ReferenceEquals($f, $script:FsForm))) { continue }
+        try { $f.Close() } catch { }
+    }
+})
+
+function Invoke-SmokeTest {
+    $pump = { [System.Windows.Forms.Application]::DoEvents() }
+    Invoke-SmokeStep "Refresh" { Refresh-AllMarketData -Force; for ($i = 0; $i -lt 60 -and $script:IsRefreshing; $i++) { Start-Sleep -Milliseconds 250; & $pump }; Evaluate-GlobalAlerts; Update-AllUiViews }
+    foreach ($lay in @("Terminal", "Standard", "Compact", "Ticker", "Standard")) { Invoke-SmokeStep "Layout $lay" { Apply-Layout $lay; & $pump } }
+    foreach ($tab in @("Chart", "Portfolio", "Watchlist", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
+    foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
+    foreach ($cmd in @("TF 1Y", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
+        Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
+    }
+    Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
+    $dialogs = [ordered]@{
+        "Settings" = { Show-SettingsDialog }
+        "Glossary" = { Show-GlossaryDialog }
+        "Analysis Perf" = { Show-AnalysisDialog -Page "Perf" }
+        "Analysis Ret" = { Show-AnalysisDialog -Page "Ret" }
+        "Analysis Alloc" = { Show-AnalysisDialog -Page "Alloc" }
+        "Analysis Div" = { Show-AnalysisDialog -Page "Div" }
+        "Transaction history" = { Show-TransactionHistory }
+        "Transaction dialog" = { Show-TransactionDialog -Ticker "NVDA" }
+        "Year report" = { Show-YearReport }
+        "Buy dates" = { [void](Show-BuyDatesDialog) }
+        "Alert log" = { Show-AlertLogDialog }
+        "Push" = { [void](Show-PushDialog) }
+        "News" = { Show-NewsDialog "NVDA" }
+        "Description" = { Show-DescriptionDialog "NVDA" }
+        "Ticker dividends" = { Show-TickerDividendsDialog "MSFT" }
+        "Calendar" = { Show-CalendarDialog }
+        "Movers" = { Show-MoversDialog }
+        "FX" = { Show-FxDialog }
+        "About" = { Show-AboutDialog }
+        "Restore" = { Show-RestoreDialog }
+        "Compare" = { Show-CompareDialog }
+        "Command palette" = { Show-CommandPalette -Initial "NV" }
+        "Welcome tour" = { Show-WelcomeTour }
+    }
+    foreach ($k in $dialogs.Keys) { Invoke-SmokeStep "Dialog $k" $dialogs[$k] 2500 }
+    Invoke-SmokeStep "Depot switch" {
+        $script:Config.Depots = @([PSCustomObject]@{ Id = "smoke"; Name = "Smoke" })
+        Switch-Depot "smoke"; & $pump
+        Switch-Depot ""; & $pump
+    }
+    Invoke-SmokeStep "Undo" {
+        $script:Alerts.Add([PSCustomObject]@{ Id = "x"; Ticker = "AAPL"; Condition = ">="; TargetPrice = 1.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
+        Update-AllUiViews
+        $lstAlerts.SelectedIndex = $script:Alerts.Count - 1
+        $btnDelAlert.PerformClick()
+        [void](Invoke-Undo)
+    }
+    Invoke-SmokeStep "Click-through" { Set-ClickThrough $true; Set-ClickThrough $false }
+    Invoke-SmokeStep "Backup" { [void](Backup-DataFiles -Reason "smoke"); Invoke-DailyBackup }
+    Invoke-SmokeStep "English main window" { $script:Config.Language = "EN"; Apply-Language $form; Apply-Language $trayMenu; Apply-Language $chartContextMenu; Update-AllUiViews; & $pump }
+    Invoke-SmokeStep "English settings" { Show-SettingsDialog } 2500
+    Invoke-SmokeStep "English analysis" { Show-AnalysisDialog -Page "Div" } 2500
+    Invoke-SmokeStep "English palette" { Show-CommandPalette -Initial "NVDA " } 2000
+    Invoke-SmokeStep "English help text" { if (-not (Get-Command Show-ShortcutHelp -ErrorAction SilentlyContinue)) { throw "help missing" } }
+    $script:Config.Language = "DE"
+    Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
+
+    $rep = [PSCustomObject]@{
+        PowerShell = $PSVersionTable.PSVersion.ToString(); Version = $script:AppVersion
+        Steps = $script:SmokeSteps.ToArray(); Failures = $script:SmokeFailures.ToArray(); Notes = $script:SmokeNotes.ToArray()
+    }
+    try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, ($rep | ConvertTo-Json -Depth 5), [System.Text.Encoding]::UTF8) } catch { }
+    $script:SmokeExit = $script:SmokeFailures.Count
+    $trayIcon.Visible = $false
+    $form.Close()
+}
+
+$script:SmokeExit = 99
+if ($script:SmokeMode) {
+    $script:SmokeStarter = New-Object System.Windows.Forms.Timer
+    $script:SmokeStarter.Interval = 3000
+    $script:SmokeStarter.Add_Tick({
+        $script:SmokeStarter.Stop()
+        try { Invoke-SmokeTest } catch {
+            $script:SmokeFailures.Add("Smoke runner: $($_.Exception.Message) @ line $($_.InvocationInfo.ScriptLineNumber)")
+            try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, (@{ Failures = $script:SmokeFailures.ToArray(); Steps = $script:SmokeSteps.ToArray() } | ConvertTo-Json -Depth 5)) } catch { }
+            $script:SmokeExit = 98
+            $form.Close()
+        }
+    })
+    $form.Add_Shown({ $script:SmokeStarter.Start() })
+}
+
+# v4.7: English mode for the main window and its menus
+try { Apply-Language $form; Apply-Language $trayMenu; Apply-Language $chartContextMenu } catch { Write-WidgetLog "Language: $($_.Exception.Message)" "WARN" }
+
 Write-WidgetLog "Starting message loop"
 try {
     [void][System.Windows.Forms.Application]::Run($form)
@@ -10760,3 +12190,4 @@ try {
         $script:AppMutex.Dispose()
     }
 }
+if ($script:SmokeMode) { exit ([int]$script:SmokeExit) }

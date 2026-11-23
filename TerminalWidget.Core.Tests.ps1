@@ -543,7 +543,7 @@ Describe "Glossary and tooltips (v4.0)" {
         if (-not (Test-Path $ui)) { Set-ItResult -Skipped -Because "TerminalWidget.ps1 not next to the tests"; return }
         $keys = @(Get-GlossaryEntries | ForEach-Object { $_.Key })
         # quoted UPPERCASE tokens on tooltip / legend lines; label texts excluded
-        $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK")
+        $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK", "EN", "DE")
         $used = New-Object System.Collections.Generic.HashSet[string]
         foreach ($line in (Get-Content -Path $ui -Encoding UTF8)) {
             if ($line -notmatch 'Set-Tip|Set-DynTip|addLeg|Legends\.Add|GlossaryShort|Spark = "SPARK"|addNum|addCombo|addCheck') { continue }
@@ -1299,5 +1299,211 @@ Describe "News, calendar, polling, versions (v4.4)" {
         Compare-AppVersion "5.0" "4.9.9" | Should -Be 1
         Get-LatestTagVersion ('[{"name":"v4.3"},{"name":"v4.10"},{"name":"test"},{"name":"v4.4.1"}]' | ConvertFrom-Json) | Should -Be "4.10"
         Get-LatestTagVersion @() | Should -Be ""
+    }
+}
+
+# ==============================================================================
+# v4.5
+# ==============================================================================
+Describe "CSV import (v4.5)" {
+    It "splits quoted fields" {
+        (Split-CsvLine -Line 'a;"b;c";"say ""hi""";' -Delimiter ";") -join "|" | Should -Be 'a|b;c|say "hi"|'
+    }
+    It "detects the delimiter" {
+        Get-CsvDelimiter -Lines @("a;b;c", "1;2,5;3") | Should -Be ";"
+        Get-CsvDelimiter -Lines @("a,b,c", "1,2.5,3") | Should -Be ","
+        Get-CsvDelimiter -Lines @("a`tb`tc", "1`t2`t3") | Should -Be "`t"
+    }
+    It "skips a preamble and finds the header" {
+        $txt = "Depotumsätze`r`nZeitraum: 2025`r`nDatum;Typ;ISIN;Stück;Kurs;Gebühr`r`n15.01.2025;Kauf;US67066G1040;10;120,50;1,00`r`n`r`n"
+        $c = ConvertFrom-CsvText $txt
+        $c.Headers -join "|" | Should -Be "Datum|Typ|ISIN|Stück|Kurs|Gebühr"
+        @($c.Rows).Count | Should -Be 1
+        $c.Rows[0][4] | Should -Be "120,50"
+    }
+    It "guesses columns" {
+        $m = Get-CsvColumnGuess @("Buchungstag", "Transaktionsart", "Name", "ISIN", "Anzahl", "Ausführungskurs", "Betrag", "Provision", "Währung")
+        $m.Date | Should -Be 0; $m.Type | Should -Be 1; $m.Name | Should -Be 2; $m.Ident | Should -Be 3
+        $m.Shares | Should -Be 4; $m.Price | Should -Be 5; $m.Amount | Should -Be 6; $m.Fee | Should -Be 7; $m.Currency | Should -Be 8
+        (Get-CsvColumnGuess @("foo", "bar")).Date | Should -Be -1
+    }
+    It "reads numbers <Raw>" -TestCases @(
+        @{ Raw = "1.234,56"; V = 1234.56 }, @{ Raw = "1,234.56"; V = 1234.56 }, @{ Raw = "-12,5"; V = -12.5 },
+        @{ Raw = "12 EUR"; V = 12 }, @{ Raw = "1.234.567"; V = 1234567 }, @{ Raw = "0.5"; V = 0.5 }
+    ) {
+        param($Raw, $V)
+        ConvertFrom-CsvNumber $Raw | Should -Be $V
+    }
+    It "treats empty text as NaN" { [double]::IsNaN((ConvertFrom-CsvNumber "")) | Should -BeTrue; [double]::IsNaN((ConvertFrom-CsvNumber "abc")) | Should -BeTrue }
+    It "maps broker wording <Raw> -> <T>" -TestCases @(
+        @{ Raw = "Kauf"; T = "Kauf" }, @{ Raw = "BUY"; T = "Kauf" }, @{ Raw = "Sparplanausführung"; T = "Kauf" }, @{ Raw = "Verkauf"; T = "Verkauf" },
+        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "" }
+    ) {
+        param($Raw, $T)
+        ConvertFrom-CsvType $Raw | Should -Be $T
+    }
+    It "recognises ISINs" { Test-Isin "US67066G1040" | Should -BeTrue; Test-Isin "NVDA" | Should -BeFalse }
+    It "converts rows to bookings" {
+        $map = @{ Date = 0; Type = 1; Ident = 2; Shares = 3; Price = 4; Amount = 5; Fee = 6; Tax = -1; Currency = 7; Name = -1 }
+        $rows = @(
+            ,@("15.01.2025", "Kauf", "US67066G1040", "10", "120,50", "", "1,00", "USD")
+            ,@("2025-02-03T10:00:00", "Verkauf", "NVDA", "-4", "", "596,00", "4,00", "")
+            ,@("20.03.2025", "Dividende", "US67066G1040", "10", "", "0,40", "", "USD")
+            ,@("01.04.2025", "Einzahlung", "", "", "", "1000", "", "")
+        )
+        $b = @(ConvertFrom-BrokerRows -Rows $rows -Map $map -DefaultCurrency "EUR")
+        $b[0].Date | Should -Be "2025-01-15"; $b[0].Type | Should -Be "Kauf"; $b[0].Shares | Should -Be 10; $b[0].Price | Should -Be 120.5; $b[0].Fee | Should -Be 1; $b[0].Currency | Should -Be "USD"; $b[0].Ok | Should -BeTrue
+        $b[1].Date | Should -Be "2025-02-03"; $b[1].Shares | Should -Be 4; $b[1].Price | Should -Be 150; $b[1].Currency | Should -Be "EUR"
+        $b[2].Type | Should -Be "Dividende"; $b[2].Price | Should -Be 0.4
+        $b[3].Ok | Should -BeFalse
+        $b[3].Note | Should -Match "Art unbekannt"
+    }
+    It "infers buy/sell from the sign without a type column" {
+        $map = @{ Date = 0; Type = -1; Ident = 1; Shares = 2; Price = 3; Amount = -1; Fee = -1; Tax = -1; Currency = -1; Name = -1 }
+        $b = @(ConvertFrom-BrokerRows -Rows @(,@("20240115", "AAPL", "-3", "180.5")) -Map $map)
+        $b[0].Type | Should -Be "Verkauf"; $b[0].Date | Should -Be "2024-01-15"; $b[0].Shares | Should -Be 3
+    }
+    It "finds duplicates" {
+        $ex = @([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "NVDA"; Type = "Kauf"; Shares = 10.0; Price = 120.5 })
+        Test-DuplicateTransaction -Existing $ex -New ([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "nvda"; Type = "Kauf"; Shares = 10.0; Price = 120.9 }) | Should -BeTrue
+        Test-DuplicateTransaction -Existing $ex -New ([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "NVDA"; Type = "Kauf"; Shares = 11.0; Price = 120.5 }) | Should -BeFalse
+        Test-DuplicateTransaction -Existing @() -New $ex[0] | Should -BeFalse
+    }
+    It "picks a symbol from the search" {
+        $j = '{"quotes":[{"symbol":"NVD.DE","quoteType":"EQUITY","shortname":"NVIDIA"},{"symbol":"NVDA","quoteType":"EQUITY","shortname":"NVIDIA"},{"symbol":"X","quoteType":"OPTION"}]}' | ConvertFrom-Json
+        Get-YahooSymbolFromSearch $j | Should -Be "NVD.DE"
+        Get-YahooSymbolFromSearch $j -PreferSuffix "NVDA" | Should -Be "NVDA"
+        Get-YahooSymbolFromSearch $null | Should -Be ""
+    }
+}
+
+Describe "Depots and backups (v4.5)" {
+    It "makes folder-safe ids" {
+        ConvertTo-DepotId "Zweites Depot (Flatex)" | Should -Be "zweites-depot-flatex"
+        ConvertTo-DepotId "Übungsdepot" | Should -Be "uebungsdepot"
+        ConvertTo-DepotId "   " | Should -Be "depot"
+    }
+    It "reads backup folder names" {
+        $i = Get-BackupInfo "20251124_093000_taeglich"
+        $i.When | Should -Be ([DateTime]::new(2025, 11, 24, 9, 30, 0))
+        $i.Reason | Should -Be "taeglich"
+        (Get-BackupInfo "foo").When | Should -Be ([DateTime]::MinValue)
+    }
+}
+
+# ==============================================================================
+# v4.6
+# ==============================================================================
+Describe "EMA and MACD (v4.6)" {
+    It "computes the EMA" {
+        $e = Compute-Ema -Prices @(1.0, 2.0, 3.0, 4.0, 5.0) -Period 3
+        [double]::IsNaN($e[1]) | Should -BeTrue
+        $e[2] | Should -Be 2
+        $e[3] | Should -Be 3
+        $e[4] | Should -Be 4
+        @(Compute-Ema -Prices @(1.0) -Period 3).Count | Should -Be 1
+    }
+    It "computes MACD, signal and histogram" {
+        $p = [double[]]@(1..60 | ForEach-Object { 100 + [math]::Sin($_ / 3.0) * 5 + $_ * 0.2 })
+        $m = Compute-Macd -Prices $p
+        [double]::IsNaN($m.Macd[24]) | Should -BeTrue
+        [double]::IsNaN($m.Macd[25]) | Should -BeFalse
+        [double]::IsNaN($m.Signal[32]) | Should -BeTrue
+        [double]::IsNaN($m.Signal[33]) | Should -BeFalse
+        [math]::Round($m.Hist[50], 10) | Should -Be ([math]::Round($m.Macd[50] - $m.Signal[50], 10))
+    }
+    It "is flat for a constant series" {
+        $m = Compute-Macd -Prices ([double[]]@(1..40 | ForEach-Object { 50.0 }))
+        $m.Macd[39] | Should -Be 0
+        $m.Hist[39] | Should -Be 0
+    }
+}
+
+Describe "Colours, hotkeys, layout helpers (v4.6)" {
+    It "converts hex colours" {
+        (ConvertFrom-HexColor "#3B82F6") -join "," | Should -Be "59,130,246"
+        (ConvertFrom-HexColor "ffffff") -join "," | Should -Be "255,255,255"
+        ConvertFrom-HexColor "#12" | Should -BeNullOrEmpty
+        ConvertTo-HexColor 59 130 246 | Should -Be "#3B82F6"
+    }
+    It "picks up/down colours" {
+        (Get-UpDownColors "Farbenblind").Up -join "," | Should -Be "59,130,246"
+        (Get-UpDownColors "Eigene" "#010203" "#040506").Down -join "," | Should -Be "4,5,6"
+        (Get-UpDownColors "Eigene" "kaputt" "").Up -join "," | Should -Be "16,185,129"
+        (Get-UpDownColors "Unbekannt").Down -join "," | Should -Be "244,63,94"
+    }
+    It "parses hotkey <T>" -TestCases @(
+        @{ T = "Ctrl+Alt+W"; M = 3; K = 87 }, @{ T = "Strg+Umschalt+F9"; M = 6; K = 0x78 }, @{ T = "Win+Space"; M = 8; K = 0x20 }, @{ T = "alt+1"; M = 1; K = 49 }
+    ) {
+        param($T, $M, $K)
+        $h = ConvertFrom-HotkeyText $T
+        $h.Mods | Should -Be $M
+        $h.Key | Should -Be $K
+    }
+    It "refuses hotkeys without modifier or with unknown parts" {
+        ConvertFrom-HotkeyText "W" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "Ctrl+Pfeil" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "Hyper+W" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "" | Should -BeNullOrEmpty
+    }
+    It "stores grid layouts" {
+        $cols = @([PSCustomObject]@{ Name = "Ticker"; DisplayIndex = 1; FillWeight = 80.0; Visible = $true }, [PSCustomObject]@{ Name = "Spark"; DisplayIndex = 0; FillWeight = 60.0; Visible = $false })
+        $l = @(ConvertTo-GridLayout $cols)
+        $l[1].Name | Should -Be "Spark"; $l[1].Visible | Should -BeFalse; $l[0].Index | Should -Be 1
+    }
+    It "snaps to screen edges" {
+        $r = Get-SnappedPosition -X 10 -Y 300 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040
+        $r.X | Should -Be 0; $r.Y | Should -Be 300; $r.Moved | Should -BeTrue
+        $r2 = Get-SnappedPosition -X 1510 -Y 735 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040
+        $r2.X | Should -Be 1520; $r2.Y | Should -Be 740
+        (Get-SnappedPosition -X 500 -Y 500 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040).Moved | Should -BeFalse
+    }
+    It "knows when an undo has expired" {
+        $now = Get-Date
+        Test-UndoValid -Undo @{ Until = $now.AddSeconds(5) } -Now $now | Should -BeTrue
+        Test-UndoValid -Undo @{ Until = $now.AddSeconds(-1) } -Now $now | Should -BeFalse
+        Test-UndoValid -Undo $null | Should -BeFalse
+    }
+}
+
+# ==============================================================================
+# v4.7: UI smoke test - starts the real widget (only when TW_RUN_UI_SMOKE=1, as in CI)
+# ==============================================================================
+Describe "UI smoke test (v4.7)" -Tag "UI" {
+    BeforeAll {
+        $script:SmokeOn = ($env:TW_RUN_UI_SMOKE -eq "1")
+    }
+    It "starts the widget, opens every dialog and closes again without programming errors" {
+        if (-not $script:SmokeOn) { Set-ItResult -Skipped -Because "set TW_RUN_UI_SMOKE=1 to run (opens windows)"; return }
+        $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
+        $dir = Join-Path ([IO.Path]::GetTempPath()) ("tw_smoke_" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText((Join-Path $dir "config.json"), '{"FirstRunDone": true, "Layout": "Standard", "Watchlist": ["NVDA", "MSFT", "SAP.DE"], "ActiveTicker": "NVDA"}', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "portfolio.json"), '{"NVDA": {"Ticker": "NVDA", "Shares": 10, "AvgPrice": 100, "Currency": "USD", "BuyAmount": 0, "TargetAvg": 0}, "MSFT": {"Ticker": "MSFT", "Shares": 5, "AvgPrice": 300, "Currency": "USD", "BuyAmount": 0, "TargetAvg": 0}}', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "transactions.json"), '[{"Id": "a", "Date": "2024-03-01", "Ticker": "NVDA", "Type": "Kauf", "Shares": 1, "Price": 800, "Fee": 1, "Currency": "USD", "Realized": 0, "Note": ""}, {"Id": "b", "Date": "2025-01-10", "Ticker": "MSFT", "Type": "Kauf", "Shares": 5, "Price": 300, "Fee": 1, "Currency": "USD", "Realized": 0, "Note": ""}, {"Id": "c", "Date": "2025-06-12", "Ticker": "MSFT", "Type": "Dividende", "Shares": 5, "Price": 4.15, "Fee": 0, "Currency": "USD", "Realized": 0, "Note": ""}]', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "alerts.json"), '[{"Id": "1", "Ticker": "NVDA", "Condition": ">=", "TargetPrice": 99999, "Currency": "EUR", "Triggered": false, "Note": "", "RearmMin": 0, "TriggeredAt": ""}]', $utf8)
+        $report = Join-Path $dir "smoke-report.json"
+        $env:TW_SMOKE_TEST = $report
+        $env:TW_SMOKE_DIR = $dir
+        try {
+            $exe = (Get-Process -Id $PID).Path
+            $p = Start-Process -FilePath $exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ui`"") -PassThru
+            $done = $p.WaitForExit(420000)
+            if (-not $done) { try { $p.Kill() } catch { } }
+        } finally {
+            Remove-Item Env:\TW_SMOKE_TEST -ErrorAction SilentlyContinue
+            Remove-Item Env:\TW_SMOKE_DIR -ErrorAction SilentlyContinue
+        }
+        $log = Join-Path $dir "widget.log"
+        if (Test-Path $log) { Write-Host "---- widget.log (last 60 lines) ----"; Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
+        $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
+        Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
+        $rep = Get-Content $report -Raw | ConvertFrom-Json
+        foreach ($st in @($rep.Steps)) { Write-Host ("{0,-28} {1,-5} {2,6} ms {3}" -f $st.Name, $(if ($st.Ok) { "ok" } else { "FAIL" }), $st.Ms, $st.Error) }
+        foreach ($n in @($rep.Notes)) { Write-Host "note: $n" }
+        (@($rep.Failures) -join "`n") | Should -BeNullOrEmpty
+        @($rep.Steps).Count | Should -BeGreaterThan 40
+        $p.ExitCode | Should -Be 0
     }
 }
