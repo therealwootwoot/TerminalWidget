@@ -1091,7 +1091,7 @@ function Get-DataMigrationAction {
 }
 
 function Get-DataFileNames {
-    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json")
+    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -1162,6 +1162,13 @@ function Get-GlossaryEntries {
     & $add "ALLOCATION" "Aufteilung" "Wie sich dein Depotwert verteilt." "Depotwert nach Position, Währung, Sektor oder Land. Sektor und Land kommen von Yahoo und lassen sich je Position überschreiben (Spalten rechts). ETFs und Fonds werden als eigene Gruppe gezählt, weil sie selbst gestreut sind."
     & $add "CONCENTRATION" "Klumpenrisiko" "Zu großer Anteil in einer Gruppe." "Eine Gruppe (eine Aktie, eine Währung, ein Sektor, ein Land) hat mehr Anteil am Depot als die eingestellte Schwelle (Standard 20 %). Kein Fehler, aber ein Hinweis: ein Rückschlag dort trifft das ganze Depot stark."
     & $add "SPLIT" "Aktiensplit" "Mehr Stück zum geringeren Kurs, Wert unverändert." "Bei einem Split (z. B. NVIDIA 10:1 im Juni 2024) wird jede Aktie in mehrere geteilt. Historische Kurse von Yahoo sind bereits angepasst; Buchungen vor dem Split rechnet das Widget automatisch mit dem Split-Verhältnis um."
+    # v4.2: dividends, events, buy dates
+    & $add "DIVYIELD" "Dividendenrendite" "Erwartete Jahresdividende / aktueller Kurs." "Erwartete Dividende der nächsten 12 Monate je Aktie geteilt durch den aktuellen Kurs. Brutto, also vor Quellensteuer und KESt. Eine hohe Rendite kann auch heißen, dass der Kurs stark gefallen ist oder eine Kürzung droht."
+    & $add "YOC" "Rendite auf Einstand" "Erwartete Jahresdividende / dein Kaufkurs." "Yield on Cost: erwartete Jahresdividende je Aktie geteilt durch deinen durchschnittlichen Einstandskurs. Steigt mit jeder Dividendenerhöhung, auch wenn der Kurs mitsteigt."
+    & $add "EXDATE" "Ex-Tag" "Ab diesem Tag ohne Dividende gehandelt." "Wer die Aktie am Tag vor dem Ex-Tag (Schluss) hält, bekommt die Dividende. Am Ex-Tag fällt der Kurs ungefähr um die Dividende. Die Auszahlung (Zahltag) folgt meist einige Tage bis Wochen später. Mit ~ markierte Tage sind aus dem Rhythmus der letzten Zahlungen geschätzt."
+    & $add "DIVFORECAST" "Dividendenprognose" "Erwartete Zahlungen der nächsten 12 Monate." "Die Zahlungen des letzten Jahres, um ein Jahr verschoben, mal deine Stückzahl, in der Basiswährung zum heutigen Wechselkurs. Nach Ex-Tag in Monate einsortiert. Eine Schätzung: Kürzungen, Erhöhungen und Sonderdividenden sind nicht enthalten, Steuern nicht abgezogen."
+    & $add "EARNINGS" "Quartalszahlen" "Termin der nächsten Geschäftszahlen." "An diesem Tag veröffentlicht das Unternehmen seine Quartals- oder Jahreszahlen, oft vor Börsenbeginn oder nach Börsenschluss. Der Kurs schwankt dann meist stärker als sonst. Termin von Yahoo, manchmal noch vorläufig (Zeitraum)."
+    & $add "OPENING" "Anfangsbestand" "Nachgetragener Kauf für Stück ohne Buchung." "Für Stück, die im Portfolio-Editor eingetragen, aber nie als Kauf gebucht wurden, wird mit deinem Kaufdatum ein Kauf nachgebucht. Der Kurs wird so gewählt, dass dein EK gleich bleibt. Die Position selbst ändert sich nicht; Wertentwicklung, XIRR und Jahresreport können sie dann mitrechnen."
     $script:GlossaryCache = $e.ToArray()
     return $script:GlossaryCache
 }
@@ -2025,4 +2032,223 @@ function Test-ProfileStale {
     $t = [DateTime]::MinValue
     if (-not [DateTime]::TryParse([string]$Entry.FetchedAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)) { return $true }
     return (($Now - $t).TotalDays -gt $MaxDays)
+}
+
+# ==============================================================================
+# v4.2 additions: buy dates, dividends, earnings
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Buy date of positions without bookings -> opening booking
+# ------------------------------------------------------------------------------
+function ConvertTo-IsoDate {
+    # "24.11.2025", "24.11.25", "2025-11-24", "24/11/2025" -> "2025-11-24"; "" if invalid
+    param([string]$Text)
+    $t = ([string]$Text).Trim()
+    if (-not $t) { return "" }
+    $formats = [string[]]@("dd.MM.yyyy", "d.M.yyyy", "dd.MM.yy", "d.M.yy", "yyyy-MM-dd", "dd/MM/yyyy", "d/M/yyyy")
+    $d = [DateTime]::MinValue
+    if ([DateTime]::TryParseExact($t, $formats, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) {
+        return $d.ToString("yyyy-MM-dd")
+    }
+    return ""
+}
+
+function Get-OpeningBooking {
+    # Buy that explains the shares a position has beyond its bookings. The
+    # price keeps the position's average as the editor shows it:
+    # (all shares x EK - booked shares x booked average) / missing shares.
+    # $null when nothing is missing.
+    param([double]$Shares, [double]$AvgPrice, [double]$BookedShares = 0, [double]$BookedAvg = 0)
+    $miss = $Shares - $BookedShares
+    if ($miss -le 0.000001) { return $null }
+    $px = (($Shares * $AvgPrice) - ($BookedShares * $BookedAvg)) / $miss
+    if ([double]::IsNaN($px) -or [double]::IsInfinity($px) -or $px -le 0) { $px = $AvgPrice }
+    return [PSCustomObject]@{ Shares = $miss; Price = $px }
+}
+
+# ------------------------------------------------------------------------------
+# Dividends: frequency, trailing 12 months, projection for the next 12 months
+# Dividends = @(@{ Date = "yyyy-MM-dd"; Amount = per share }) (from the chart events)
+# ------------------------------------------------------------------------------
+function Get-DividendStats {
+    param([array]$Dividends, [string]$AsOf = "")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $ev = @(@($Dividends) | Where-Object { $null -ne $_ -and [double]$_.Amount -gt 0 -and [string]::CompareOrdinal([string]$_.Date, $now.ToString("yyyy-MM-dd")) -le 0 } |
+        Sort-Object -Property @{ Expression = { [string]$_.Date } })
+    if ($ev.Count -eq 0) { return $null }
+    $dates = @($ev | ForEach-Object { [DateTime]::ParseExact([string]$_.Date, "yyyy-MM-dd", $inv) })
+    $last = $ev[$ev.Count - 1]
+    $lastD = $dates[$dates.Count - 1]
+
+    # frequency from the median gap of the last (up to) 8 payments
+    $freq = 1
+    $gaps = @()
+    $from = [math]::Max(1, $dates.Count - 8)
+    for ($i = $from; $i -lt $dates.Count; $i++) { $gaps += ($dates[$i] - $dates[$i - 1]).TotalDays }
+    if ($gaps.Count -gt 0) {
+        $sg = @($gaps | Sort-Object)
+        $med = $sg[[int][math]::Floor(($sg.Count - 1) / 2)]
+        $freq = if ($med -lt 45) { 12 } elseif ($med -lt 135) { 4 } elseif ($med -lt 250) { 2 } else { 1 }
+    }
+    $label = switch ($freq) { 12 { "monatlich" } 4 { "quartalsweise" } 2 { "halbjährlich" } default { "jährlich" } }
+
+    $yearAgo = $now.AddDays(-365)
+    $t12 = 0.0; $n12 = 0
+    for ($i = 0; $i -lt $ev.Count; $i++) { if ($dates[$i] -gt $yearAgo) { $t12 += [double]$ev[$i].Amount; $n12++ } }
+    # no payment for 1.5 cycles + a month: probably cut or suspended
+    $stopped = (($now - $lastD).TotalDays -gt ((365.0 / $freq) * 1.5 + 30))
+    $annual = if ($stopped) { 0.0 } elseif ($n12 -ge $freq) { $t12 } else { [double]$last.Amount * $freq }
+    $next = $lastD.AddMonths([int](12 / $freq))
+    $guard = 0
+    while ($next -le $now -and $guard -lt 48) { $next = $next.AddMonths([int](12 / $freq)); $guard++ }
+    return [PSCustomObject]@{
+        Frequency = $freq; FrequencyLabel = $label
+        Last = [double]$last.Amount; LastDate = [string]$last.Date
+        Trailing12 = $t12; Count12 = $n12; Annual = $annual
+        NextEx = $(if ($stopped) { "" } else { $next.ToString("yyyy-MM-dd") })
+        Stopped = $stopped
+    }
+}
+
+function Get-DividendProjection {
+    # Expected payments per share in the next 12 months (by ex-date): last
+    # year's payments moved forward by one year; when there were fewer than
+    # the usual number, the latest amount is continued at its frequency.
+    param([array]$Dividends, [string]$AsOf = "", $Stats = $null)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $st = if ($null -ne $Stats) { $Stats } else { Get-DividendStats -Dividends $Dividends -AsOf $now.ToString("yyyy-MM-dd") }
+    if ($null -eq $st -or $st.Stopped) { return @() }
+    $end = $now.AddDays(365)
+    $out = New-Object System.Collections.Generic.List[PSObject]
+    foreach ($e in @($Dividends)) {
+        if ($null -eq $e -or [double]$e.Amount -le 0) { continue }
+        $d = [DateTime]::ParseExact([string]$e.Date, "yyyy-MM-dd", $inv)
+        if ($d -le $now -and $d -gt $now.AddDays(-365)) {
+            $pd = $d.AddYears(1)
+            if ($pd -gt $now -and $pd -le $end) { $out.Add([PSCustomObject]@{ Date = $pd.ToString("yyyy-MM-dd"); Amount = [double]$e.Amount }) }
+        }
+    }
+    if ($out.Count -lt $st.Frequency) {
+        $step = [int](12 / $st.Frequency)
+        $d = [DateTime]::ParseExact($st.LastDate, "yyyy-MM-dd", $inv).AddMonths($step)
+        $guard = 0
+        while ($d -le $end -and $guard -lt 60) {
+            if ($d -gt $now) {
+                $dup = $false
+                foreach ($o in $out) { if ([math]::Abs(([DateTime]::ParseExact($o.Date, "yyyy-MM-dd", $inv) - $d).TotalDays) -lt 20) { $dup = $true; break } }
+                if (-not $dup) { $out.Add([PSCustomObject]@{ Date = $d.ToString("yyyy-MM-dd"); Amount = $st.Last }) }
+            }
+            $d = $d.AddMonths($step)
+            $guard++
+        }
+    }
+    return @($out | Sort-Object -Property @{ Expression = { [string]$_.Date } })
+}
+
+function Get-MonthlyBuckets {
+    # Items with Date and Value -> 12 calendar months from the month of AsOf
+    param([array]$Items, [string]$AsOf = "", [int]$Months = 12)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $names = @("Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez")
+    $first = New-Object DateTime($now.Year, $now.Month, 1)
+    $out = @()
+    $idx = @{}
+    for ($i = 0; $i -lt $Months; $i++) {
+        $m = $first.AddMonths($i)
+        $key = $m.ToString("yyyy-MM")
+        $idx[$key] = $i
+        $out += [PSCustomObject]@{ Month = $key; Label = ("{0} {1}" -f $names[$m.Month - 1], $m.ToString("yy")); Value = 0.0 }
+    }
+    foreach ($it in @($Items)) {
+        if ($null -eq $it -or -not $it.Date) { continue }
+        $k = ([string]$it.Date).Substring(0, 7)
+        if ($idx.ContainsKey($k)) { $out[$idx[$k]].Value += [double]$it.Value }
+    }
+    return $out
+}
+
+# ------------------------------------------------------------------------------
+# Earnings / dividend dates from Yahoo quoteSummary (calendarEvents,
+# summaryDetail) - needs the crumb; without it the dividend dates are estimated
+# ------------------------------------------------------------------------------
+function ConvertFrom-YahooCalendar {
+    param($Summary, [string]$AsOf = "")
+    $o = [PSCustomObject]@{
+        EarningsDate = ""; EarningsEnd = ""; ExDividendDate = ""; DividendDate = ""
+        DividendRate = [double]::NaN; DividendYield = [double]::NaN; TrailingRate = [double]::NaN
+    }
+    $r = $null
+    try { $r = $Summary.quoteSummary.result[0] } catch { $r = $null }
+    if ($null -eq $r) { return $o }
+    $today = if ($AsOf) { $AsOf } else { (Get-Date).ToString("yyyy-MM-dd") }
+    $num = {
+        param($V)
+        if ($null -eq $V) { return [double]::NaN }
+        if ($V -is [ValueType]) { return [double]$V }
+        if ($null -ne $V.raw) { return [double]$V.raw }
+        return [double]::NaN
+    }
+    $date = {
+        param($V)
+        $n = & $num $V
+        if ([double]::IsNaN($n) -or $n -le 0) { return "" }
+        return [DateTimeOffset]::FromUnixTimeSeconds([long]$n).UtcDateTime.ToString("yyyy-MM-dd")
+    }
+    $ce = $r.calendarEvents
+    if ($null -ne $ce) {
+        if ($null -ne $ce.earnings -and $null -ne $ce.earnings.earningsDate) {
+            $ed = @(@($ce.earnings.earningsDate) | ForEach-Object { & $date $_ } | Where-Object { $_ } | Sort-Object)
+            $fut = @($ed | Where-Object { [string]::CompareOrdinal($_, $today) -ge 0 })
+            if ($fut.Count -gt 0) { $o.EarningsDate = $fut[0]; if ($fut.Count -gt 1) { $o.EarningsEnd = $fut[$fut.Count - 1] } }
+            elseif ($ed.Count -gt 0) { $o.EarningsDate = $ed[$ed.Count - 1] }
+        }
+        $o.ExDividendDate = & $date $ce.exDividendDate
+        $o.DividendDate = & $date $ce.dividendDate
+    }
+    $sd = $r.summaryDetail
+    if ($null -ne $sd) {
+        $o.DividendRate = & $num $sd.dividendRate
+        $o.DividendYield = & $num $sd.dividendYield
+        $o.TrailingRate = & $num $sd.trailingAnnualDividendRate
+        if (-not $o.ExDividendDate) { $o.ExDividendDate = & $date $sd.exDividendDate }
+    }
+    return $o
+}
+
+function Get-EarningsBadge {
+    # Quarterly figures within WindowDays: @{ Days; Text; Date }, else $null
+    param([string]$EarningsDate, [string]$AsOf = "", [int]$WindowDays = 7)
+    if (-not $EarningsDate) { return $null }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $d = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($EarningsDate, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return $null }
+    $days = [int]($d - $now).TotalDays
+    if ($days -lt 0 -or $days -gt $WindowDays) { return $null }
+    $txt = if ($days -eq 0) { "heute" } elseif ($days -eq 1) { "morgen" } else { "in $days T" }
+    return [PSCustomObject]@{ Days = $days; Text = $txt; Date = $EarningsDate }
+}
+
+function Test-EventsStale {
+    # Earnings / dividend dates are refreshed about once a day
+    param($Entry, [int]$MaxHours = 20, [DateTime]$Now = (Get-Date))
+    if ($null -eq $Entry -or -not $Entry.FetchedAt) { return $true }
+    $t = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$Entry.FetchedAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)) { return $true }
+    return (($Now - $t).TotalHours -gt $MaxHours)
+}
+
+function Get-SplitFactorAfter {
+    # Product of all split ratios AFTER Date: a booking on Date for N of
+    # today's shares is N / factor shares at price x factor in its own time
+    param([hashtable]$Splits, [string]$Ticker, [string]$Date)
+    $f = 1.0
+    foreach ($sp in @(Get-SplitEvents -Splits $Splits -Ticker $Ticker)) {
+        if ([string]::CompareOrdinal([string]$sp.Date, $Date) -gt 0) { $f *= [double]$sp.Ratio }
+    }
+    return $f
 }

@@ -879,3 +879,156 @@ Describe "Allocation and profiles (v4.1)" {
         Test-ProfileStale -Entry ([PSCustomObject]@{ FetchedAt = "2026-10-01T12:00:00" }) -Now $now | Should -BeTrue
     }
 }
+
+# ==============================================================================
+# v4.2: buy dates, dividends, earnings
+# ==============================================================================
+Describe "Buy dates and opening bookings (v4.2)" {
+    It "parses '<Text>' as '<Iso>'" -TestCases @(
+        @{ Text = "24.11.2025"; Iso = "2025-11-24" }
+        @{ Text = " 1.2.25 ";   Iso = "2025-02-01" }
+        @{ Text = "2025-11-24"; Iso = "2025-11-24" }
+        @{ Text = "24/11/2025"; Iso = "2025-11-24" }
+        @{ Text = "31.02.2025"; Iso = "" }
+        @{ Text = "gestern";    Iso = "" }
+        @{ Text = "";           Iso = "" }
+    ) {
+        ConvertTo-IsoDate $Text | Should -Be $Iso
+    }
+    It "books the missing shares so that the average stays the same" {
+        $o = Get-OpeningBooking -Shares 10 -AvgPrice 100 -BookedShares 4 -BookedAvg 90
+        $o.Shares | Should -Be 6
+        [math]::Round($o.Price, 6) | Should -Be ([math]::Round(640 / 6, 6))
+        # replaying both buys gives the editor's average again
+        $b = Get-BuyResult -OldShares 4 -OldAvg 90 -Shares $o.Shares -Price $o.Price -Fee 0
+        [math]::Round($b.AvgPrice, 9) | Should -Be 100
+    }
+    It "uses the EK for a position without bookings and when the formula fails" {
+        $o = Get-OpeningBooking -Shares 5 -AvgPrice 50
+        $o.Shares | Should -Be 5
+        $o.Price | Should -Be 50
+        (Get-OpeningBooking -Shares 10 -AvgPrice 10 -BookedShares 5 -BookedAvg 30).Price | Should -Be 10
+        Get-OpeningBooking -Shares 5 -AvgPrice 50 -BookedShares 5 -BookedAvg 50 | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Dividends (v4.2)" {
+    BeforeAll {
+        $script:Quarterly = @(
+            [PSCustomObject]@{ Date = "2025-02-10"; Amount = 0.24 }
+            [PSCustomObject]@{ Date = "2025-05-12"; Amount = 0.24 }
+            [PSCustomObject]@{ Date = "2025-08-11"; Amount = 0.25 }
+            [PSCustomObject]@{ Date = "2025-11-10"; Amount = 0.25 }
+        )
+    }
+    It "detects a quarterly payer" {
+        $s = Get-DividendStats -Dividends $script:Quarterly -AsOf "2025-11-23"
+        $s.Frequency | Should -Be 4
+        $s.FrequencyLabel | Should -Be "quartalsweise"
+        [math]::Round($s.Trailing12, 6) | Should -Be 0.98
+        [math]::Round($s.Annual, 6) | Should -Be 0.98
+        $s.Last | Should -Be 0.25
+        $s.NextEx | Should -Be "2026-02-10"
+        $s.Stopped | Should -BeFalse
+    }
+    It "detects annual and monthly payers" {
+        $a = Get-DividendStats -Dividends @(@{ Date = "2024-05-02"; Amount = 2.0 }, @{ Date = "2025-05-05"; Amount = 2.2 }) -AsOf "2025-11-23"
+        $a.Frequency | Should -Be 1
+        $a.Annual | Should -Be 2.2
+        $a.NextEx | Should -Be "2026-05-05"
+        $m = Get-DividendStats -Dividends @(@{ Date = "2025-09-01"; Amount = 0.1 }, @{ Date = "2025-10-01"; Amount = 0.1 }, @{ Date = "2025-11-03"; Amount = 0.1 }) -AsOf "2025-11-23"
+        $m.Frequency | Should -Be 12
+        [math]::Round($m.Annual, 6) | Should -Be 1.2     # fewer than 12 payments seen: latest x 12
+    }
+    It "treats a long pause as stopped" {
+        $s = Get-DividendStats -Dividends @(@{ Date = "2022-05-02"; Amount = 1.0 }, @{ Date = "2023-05-02"; Amount = 1.0 }) -AsOf "2025-11-23"
+        $s.Stopped | Should -BeTrue
+        $s.Annual | Should -Be 0
+        $s.NextEx | Should -Be ""
+        @(Get-DividendProjection -Dividends @(@{ Date = "2023-05-02"; Amount = 1.0 }) -AsOf "2025-11-23").Count | Should -Be 0
+        Get-DividendStats -Dividends @() | Should -BeNullOrEmpty
+    }
+    It "moves last year's payments forward by one year" {
+        $p = @(Get-DividendProjection -Dividends $script:Quarterly -AsOf "2025-11-23")
+        $p.Count | Should -Be 4
+        ($p | ForEach-Object { $_.Date }) -join "," | Should -Be "2026-02-10,2026-05-12,2026-08-11,2026-11-10"
+        $p[0].Amount | Should -Be 0.24
+    }
+    It "fills gaps in the history at the usual frequency" {
+        $ev = @(
+            @{ Date = "2024-08-01"; Amount = 0.2 }, @{ Date = "2024-11-01"; Amount = 0.2 },
+            @{ Date = "2025-08-01"; Amount = 0.3 }, @{ Date = "2025-11-03"; Amount = 0.3 }
+        )
+        $p = @(Get-DividendProjection -Dividends $ev -AsOf "2025-11-23")
+        ($p | ForEach-Object { $_.Date }) -join "," | Should -Be "2026-02-03,2026-05-03,2026-08-01,2026-11-03"
+        $p[0].Amount | Should -Be 0.3
+    }
+    It "sorts amounts into 12 calendar months" {
+        $b = @(Get-MonthlyBuckets -AsOf "2025-11-23" -Items @(
+            @{ Date = "2025-11-30"; Value = 1 }, @{ Date = "2026-02-10"; Value = 2 }, @{ Date = "2026-02-20"; Value = 3 }, @{ Date = "2026-11-10"; Value = 9 }))
+        $b.Count | Should -Be 12
+        $b[0].Label | Should -Be "Nov 25"
+        $b[0].Value | Should -Be 1
+        $b[3].Month | Should -Be "2026-02"
+        $b[3].Value | Should -Be 5
+        $b[11].Label | Should -Be "Okt 26"
+        (($b | ForEach-Object { $_.Value }) | Measure-Object -Sum).Sum | Should -Be 6
+    }
+}
+
+Describe "Earnings and dividend dates (v4.2)" {
+    It "reads quoteSummary calendarEvents and summaryDetail" {
+        $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{
+            calendarEvents = [PSCustomObject]@{
+                earnings = [PSCustomObject]@{ earningsDate = @([PSCustomObject]@{ raw = 1764190800 }, [PSCustomObject]@{ raw = 1764622800 }) }
+                exDividendDate = [PSCustomObject]@{ raw = 1765497600 }
+                dividendDate = [PSCustomObject]@{ raw = 1765573200 }
+            }
+            summaryDetail = [PSCustomObject]@{ dividendRate = [PSCustomObject]@{ raw = 0.04 }; dividendYield = [PSCustomObject]@{ raw = 0.0002 }; trailingAnnualDividendRate = 0.04 }
+        }) } }
+        $c = ConvertFrom-YahooCalendar -Summary $sum -AsOf "2025-11-23"
+        $c.EarningsDate | Should -Be "2025-11-26"
+        $c.EarningsEnd | Should -Be "2025-12-01"
+        $c.ExDividendDate | Should -Be "2025-12-12"
+        $c.DividendDate | Should -Be "2025-12-12"
+        $c.DividendRate | Should -Be 0.04
+        $c.TrailingRate | Should -Be 0.04
+        (ConvertFrom-YahooCalendar -Summary $null).EarningsDate | Should -Be ""
+    }
+    It "keeps only future earnings dates when there are any" {
+        $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{
+            calendarEvents = [PSCustomObject]@{ earnings = [PSCustomObject]@{ earningsDate = @([PSCustomObject]@{ raw = 1755648000 }) } } }) } }
+        (ConvertFrom-YahooCalendar -Summary $sum -AsOf "2025-11-23").EarningsDate | Should -Be "2025-08-20"
+    }
+    It "shows a badge for <Date>: '<Text>'" -TestCases @(
+        @{ Date = "2025-11-23"; Text = "heute" }
+        @{ Date = "2025-11-24"; Text = "morgen" }
+        @{ Date = "2025-11-26"; Text = "in 3 T" }
+        @{ Date = "2025-12-10"; Text = "" }
+        @{ Date = "2025-11-20"; Text = "" }
+        @{ Date = "";           Text = "" }
+    ) {
+        $b = Get-EarningsBadge -EarningsDate $Date -AsOf "2025-11-23"
+        if ($Text) { $b.Text | Should -Be $Text } else { $b | Should -BeNullOrEmpty }
+    }
+    It "refreshes events after 20 hours" {
+        $now = Get-Date "2026-11-23T12:00:00"
+        Test-EventsStale -Entry ([PSCustomObject]@{ FetchedAt = "2026-11-23T08:00:00" }) -Now $now | Should -BeFalse
+        Test-EventsStale -Entry ([PSCustomObject]@{ FetchedAt = "2026-11-22T08:00:00" }) -Now $now | Should -BeTrue
+        Test-EventsStale -Entry $null -Now $now | Should -BeTrue
+    }
+}
+
+Describe "Opening bookings across splits (v4.2)" {
+    It "converts today's shares to the units of the booking date" {
+        $s = @{ "NVDA" = @([PSCustomObject]@{ Date = "2024-06-10"; Ratio = 10.0 }, [PSCustomObject]@{ Date = "2021-07-20"; Ratio = 4.0 }) }
+        Get-SplitFactorAfter -Splits $s -Ticker "nvda" -Date "2023-01-02" | Should -Be 10
+        Get-SplitFactorAfter -Splits $s -Ticker "NVDA" -Date "2020-01-02" | Should -Be 40
+        Get-SplitFactorAfter -Splits $s -Ticker "NVDA" -Date "2024-06-10" | Should -Be 1
+        # booked as 10 @ 150 in 2023 -> 100 @ 15 today
+        $tx = @([PSCustomObject]@{ Date = "2023-01-02"; Ticker = "NVDA"; Type = "Kauf"; Shares = (100 / 10); Price = (15 * 10); Fee = 0; Currency = "USD" })
+        $p = Get-PositionFromTransactions -Transactions $tx -Ticker "NVDA" -Splits $s
+        $p.Shares | Should -Be 100
+        $p.AvgPrice | Should -Be 15
+    }
+}
