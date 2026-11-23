@@ -723,10 +723,14 @@ function ConvertFrom-YahooSearch {
                 $name = if ($q.shortname) { $q.shortname } elseif ($q.longname) { $q.longname } else { $q.symbol }
                 $exch = if ($q.exchDisp) { $q.exchDisp } else { $q.exchange }
                 $items += [PSCustomObject]@{
-                    Symbol  = [string]$q.symbol.ToUpper()
-                    Name    = [string]$name
-                    Exch    = [string]$exch
-                    Display = ("{0,-10} | {1} ({2})" -f $q.symbol.ToUpper(), $name, $exch)
+                    Symbol    = [string]$q.symbol.ToUpper()
+                    Name      = [string]$name
+                    Exch      = [string]$exch
+                    Display   = ("{0,-10} | {1} ({2})" -f $q.symbol.ToUpper(), $name, $exch)
+                    # v4.1: profile data the search delivers without a crumb
+                    QuoteType = [string]$q.quoteType
+                    Sector    = $(if ($q.sectorDisp) { [string]$q.sectorDisp } else { [string]$q.sector })
+                    Industry  = $(if ($q.industryDisp) { [string]$q.industryDisp } else { [string]$q.industry })
                 }
             }
         }
@@ -776,7 +780,9 @@ function Get-PositionFromTransactions {
     # order). Bookings in a different currency than the first one, or with
     # non-positive shares/price, are skipped and counted; a sell larger than
     # the holding is clamped. $null when there is nothing to replay.
-    param([array]$Transactions, [string]$Ticker)
+    # v4.1: stock splits (Splits: ticker -> @(@{ Date; Ratio })) multiply the
+    # holding and divide the average from their ex-date on.
+    param([array]$Transactions, [string]$Ticker, [hashtable]$Splits = @{})
     $sym = ([string]$Ticker).Trim().ToUpper()
     $rows = New-Object System.Collections.Generic.List[PSObject]
     $i = 0
@@ -793,8 +799,14 @@ function Get-PositionFromTransactions {
     $cur = ""
     $sh = 0.0; $avg = 0.0; $real = 0.0
     $used = 0; $skipped = 0; $clamped = $false
+    $spl = @(Get-SplitEvents -Splits $Splits -Ticker $sym)
+    $k = 0; $splitN = 0
     foreach ($r in $ordered) {
         $tx = $r.Tx
+        while ($k -lt $spl.Count -and [string]::CompareOrdinal([string]$spl[$k].Date, [string]$tx.Date) -le 0) {
+            if ($sh -gt 0) { $sh *= [double]$spl[$k].Ratio; $avg /= [double]$spl[$k].Ratio; $splitN++ }
+            $k++
+        }
         $c = Get-NormalizedCurrencyCode ([string]$tx.Currency)
         if (-not $c) { $c = "EUR" }
         if (-not $cur) { $cur = $c }
@@ -814,7 +826,13 @@ function Get-PositionFromTransactions {
         }
         $used++
     }
+    # splits after the last booking change today's holding too
+    while ($k -lt $spl.Count) {
+        if ($sh -gt 0) { $sh *= [double]$spl[$k].Ratio; $avg /= [double]$spl[$k].Ratio; $splitN++ }
+        $k++
+    }
     return [PSCustomObject]@{
+        Splits   = $splitN
         Ticker   = $sym
         Shares   = $sh
         AvgPrice = $avg
@@ -1135,6 +1153,15 @@ function Get-GlossaryEntries {
     & $add "TOOLTIPS" "Erklärungen" "Wie ausführlich die Hinweise beim Darüberfahren sind." "Aus: keine Hinweise. Kurz: eine Zeile. Ausführlich: mit Erklärung des Begriffs. Die Verzögerung bestimmt, wie lange die Maus stillstehen muss. Taste G öffnet das Glossar."
     & $add "HOLIDAY" "Börsenfeiertag" "An diesem Tag wird nicht gehandelt." "Regelbasierte Feiertagskalender (inkl. Ostern) für NYSE/Nasdaq, Xetra, SIX, LSE und Wiener Börse. Verkürzte Handelstage kommen von Yahoo."
     & $add "BACKUP" "Backup" "Kopie deiner Daten." "Kopie von Einstellungen, Portfolio, Alarmen und Transaktionen im Datenordner unter backups. Die letzten 10 werden behalten."
+    # v4.1: portfolio analytics
+    & $add "XIRR" "Rendite p.a. (XIRR)" "Geldgewichtete Jahresrendite deiner Ein- und Auszahlungen." "Interner Zinsfuß: die Jahresrendite, die alle Käufe (Auszahlungen), Verkäufe und Dividenden (Einzahlungen) plus den heutigen Wert genau ausgleicht. Berücksichtigt, wann wie viel Geld investiert war. Bei weniger als 30 Tagen Haltedauer nicht aussagekräftig und daher ausgeblendet."
+    & $add "NETINVEST" "Netto investiert" "Käufe minus Verkaufserlöse, zum Kurs am Buchungstag." "Summe aller Käufe inklusive Gebühren minus aller Verkaufserlöse, jeweils mit dem Wechselkurs am Buchungstag in die Basiswährung umgerechnet. Liegt die Wertkurve darüber, bist du insgesamt im Plus."
+    & $add "BENCHMARK" "Benchmark (Schattendepot)" "Was dein Geld im Vergleichsindex gemacht hätte." "Jeder Kauf und Verkauf deines Depots wird zum selben Tag mit demselben Betrag im Vergleichs-ETF (Standard: iShares Core MSCI World, EUNL.DE) nachgespielt. So vergleichst du fair: gleiche Beträge, gleiche Zeitpunkte. Thesaurierende ETFs enthalten ihre Ausschüttungen im Kurs."
+    & $add "UNREALIZED" "Unrealisiert" "Buchgewinn/-verlust der offenen Stücke." "Heutiger Wert minus Einstand der noch gehaltenen Stücke, beides in der Basiswährung. Der Einstand ist der gleitende Durchschnitt zum Wechselkurs am Kauftag, Währungsgewinne sind also enthalten."
+    & $add "TOTALRET" "Gesamtergebnis" "Unrealisiert + realisiert + Dividenden." "Alles, was die Position bisher gebracht hat: Buchgewinn der offenen Stücke, realisierte Gewinne/Verluste aus Verkäufen und Dividenden nach Abzügen. Die Prozentzahl bezieht sich auf alle Käufe (inkl. Gebühren)."
+    & $add "ALLOCATION" "Aufteilung" "Wie sich dein Depotwert verteilt." "Depotwert nach Position, Währung, Sektor oder Land. Sektor und Land kommen von Yahoo und lassen sich je Position überschreiben (Spalten rechts). ETFs und Fonds werden als eigene Gruppe gezählt, weil sie selbst gestreut sind."
+    & $add "CONCENTRATION" "Klumpenrisiko" "Zu großer Anteil in einer Gruppe." "Eine Gruppe (eine Aktie, eine Währung, ein Sektor, ein Land) hat mehr Anteil am Depot als die eingestellte Schwelle (Standard 20 %). Kein Fehler, aber ein Hinweis: ein Rückschlag dort trifft das ganze Depot stark."
+    & $add "SPLIT" "Aktiensplit" "Mehr Stück zum geringeren Kurs, Wert unverändert." "Bei einem Split (z. B. NVIDIA 10:1 im Juni 2024) wird jede Aktie in mehrere geteilt. Historische Kurse von Yahoo sind bereits angepasst; Buchungen vor dem Split rechnet das Widget automatisch mit dem Split-Verhältnis um."
     $script:GlossaryCache = $e.ToArray()
     return $script:GlossaryCache
 }
@@ -1199,9 +1226,10 @@ function Get-FxRateOnDate {
     if ($c -eq "EUR") { return 1.0 }
     if ($null -eq $History -or -not $History.ContainsKey($c)) { return [double]::NaN }
     $h = $History[$c]
-    $dates = @($h.Dates)
-    $rates = @($h.Rates)
-    if ($dates.Count -eq 0) { return [double]::NaN }
+    # (no @() copy: this runs for every booking and every chart point)
+    $dates = $h.Dates
+    $rates = $h.Rates
+    if ($null -eq $dates -or $dates.Count -eq 0) { return [double]::NaN }
     $lo = 0; $hi = $dates.Count - 1; $found = -1
     while ($lo -le $hi) {
         $mid = [int][math]::Floor(($lo + $hi) / 2)
@@ -1235,7 +1263,8 @@ function Get-RealizedReport {
         [int]$Year,
         [string]$Base = "EUR",
         [hashtable]$History = @{},
-        [hashtable]$FallbackFromEur = @{}
+        [hashtable]$FallbackFromEur = @{},
+        [hashtable]$Splits = @{}
     )
     $base = Get-NormalizedCurrencyCode $Base
     if (-not $base) { $base = "EUR" }
@@ -1261,10 +1290,17 @@ function Get-RealizedReport {
         $sh = 0.0
         $cost = 0.0
         $posApprox = $false
+        # v4.1: stock splits multiply the holding (the cost stays the same)
+        $spl = @(Get-SplitEvents -Splits $Splits -Ticker $sym)
+        $k = 0
         foreach ($o in $ordered) {
             $tx = $o.Tx
             $date = [string]$tx.Date
             if ([string]::CompareOrdinal($date, $yearEnd) -gt 0) { break }
+            while ($k -lt $spl.Count -and [string]::CompareOrdinal([string]$spl[$k].Date, $date) -le 0) {
+                if ($sh -gt 0) { $sh *= [double]$spl[$k].Ratio }
+                $k++
+            }
             $inYear = $date.StartsWith($yearKey)
             $cur = Get-NormalizedCurrencyCode ([string]$tx.Currency)
             if (-not $cur) { $cur = "EUR" }
@@ -1372,4 +1408,620 @@ function Get-EarliestBookingDate {
         if ($d -match '^\d{4}-\d{2}-\d{2}' -and (-not $min -or [string]::CompareOrdinal($d, $min) -lt 0)) { $min = $d.Substring(0, 10) }
     }
     return $min
+}
+# ==============================================================================
+# v4.1 additions: portfolio analytics
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Daily history, splits, aligned series
+# ------------------------------------------------------------------------------
+function Get-SplitEvents {
+    # Splits of one ticker, sorted by date: @(@{ Date = "yyyy-MM-dd"; Ratio = 10.0 })
+    param([hashtable]$Splits, [string]$Ticker)
+    if ($null -eq $Splits) { return @() }
+    $u = ([string]$Ticker).ToUpper()
+    if (-not $Splits.ContainsKey($u)) { return @() }
+    return @(@($Splits[$u]) | Where-Object { $null -ne $_ -and [double]$_.Ratio -gt 0 } | Sort-Object -Property @{ Expression = { [string]$_.Date } })
+}
+
+function ConvertFrom-YahooDailyHistory {
+    # Yahoo chart JSON (interval=1d, events=div|split) ->
+    #   @{ Dates; Closes; Currency; Splits = @(@{Date;Ratio}); Dividends = @(@{Date;Amount}) }
+    # Pence quotes (GBp/GBX, ZAc, ILA) are converted to the main unit. Closes
+    # are split-adjusted by Yahoo; booked share counts are adjusted with Splits.
+    param($Json)
+    $r = Get-ChartResult $Json
+    if ($null -eq $r -or $null -eq $r.timestamp -or $null -eq $r.indicators) { return $null }
+    $off = if ($null -ne $r.meta -and $null -ne $r.meta.gmtoffset) { [int]$r.meta.gmtoffset } else { 0 }
+    $raw = if ($null -ne $r.meta) { [string]$r.meta.currency } else { "" }
+    $unit = Normalize-CurrencyAndPrice -Price 1.0 -RawCurrency $raw
+    $factor = [double]$unit.Price
+    $cur = Get-NormalizedCurrencyCode ([string]$unit.Currency)
+    if (-not $cur) { $cur = "USD" }
+    $toDate = { param($T) [DateTimeOffset]::FromUnixTimeSeconds([long]$T + $off).UtcDateTime.ToString("yyyy-MM-dd") }
+
+    $ts = @($r.timestamp)
+    $cl = @($r.indicators.quote[0].close)
+    $map = New-Object 'System.Collections.Generic.SortedDictionary[string,double]' ([System.StringComparer]::Ordinal)
+    $n = [math]::Min($ts.Count, $cl.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($null -eq $cl[$i] -or [double]$cl[$i] -le 0) { continue }
+        $map[(& $toDate $ts[$i])] = [double]$cl[$i] * $factor
+    }
+    if ($map.Count -eq 0) { return $null }
+    $dates = New-Object string[] $map.Count
+    $closes = New-Object double[] $map.Count
+    $k = 0
+    foreach ($kv in $map.GetEnumerator()) { $dates[$k] = $kv.Key; $closes[$k] = $kv.Value; $k++ }
+
+    $splits = @()
+    $divs = @()
+    if ($null -ne $r.events) {
+        if ($null -ne $r.events.splits) {
+            foreach ($prop in $r.events.splits.PSObject.Properties) {
+                $e = $prop.Value
+                $num = [double]$e.numerator; $den = [double]$e.denominator
+                if ($num -gt 0 -and $den -gt 0 -and $num -ne $den) {
+                    $splits += [PSCustomObject]@{ Date = (& $toDate $e.date); Ratio = ($num / $den) }
+                }
+            }
+        }
+        if ($null -ne $r.events.dividends) {
+            foreach ($prop in $r.events.dividends.PSObject.Properties) {
+                $e = $prop.Value
+                if ([double]$e.amount -gt 0) { $divs += [PSCustomObject]@{ Date = (& $toDate $e.date); Amount = ([double]$e.amount * $factor) } }
+            }
+        }
+    }
+    return @{
+        Dates     = $dates
+        Closes    = $closes
+        Currency  = $cur
+        Splits    = @($splits | Sort-Object -Property @{ Expression = { [string]$_.Date } })
+        Dividends = @($divs | Sort-Object -Property @{ Expression = { [string]$_.Date } })
+    }
+}
+
+function Get-HistoryValueOnDate {
+    # Last value on or before Date (binary search), else the first one; NaN if empty
+    param($Dates, $Values, [string]$Date)
+    if ($null -eq $Dates -or $Dates.Count -eq 0) { return [double]::NaN }
+    $lo = 0; $hi = $Dates.Count - 1; $found = -1
+    while ($lo -le $hi) {
+        $mid = [int][math]::Floor(($lo + $hi) / 2)
+        if ([string]::CompareOrdinal([string]$Dates[$mid], $Date) -le 0) { $found = $mid; $lo = $mid + 1 } else { $hi = $mid - 1 }
+    }
+    if ($found -lt 0) { $found = 0 }
+    return [double]$Values[$found]
+}
+
+function Get-AlignedSeries {
+    # Values of a history aligned to the ascending date list Target: the last
+    # value on or before each date (before the history starts: its first value).
+    # One pass, no lookups. All NaN when there is no history.
+    param([string[]]$Target, $Dates, $Values)
+    $n = $Target.Count
+    $out = New-Object double[] $n
+    $cnt = if ($null -eq $Dates) { 0 } else { $Dates.Count }
+    if ($cnt -eq 0) {
+        for ($i = 0; $i -lt $n; $i++) { $out[$i] = [double]::NaN }
+        return ,$out
+    }
+    $j = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        while (($j + 1) -lt $cnt -and [string]::CompareOrdinal([string]$Dates[$j + 1], $Target[$i]) -le 0) { $j++ }
+        $out[$i] = [double]$Values[$j]
+    }
+    return ,$out
+}
+
+function Get-AlignedFxToBase {
+    # Factor that turns an amount in Currency into Base, per target date
+    # (Rates are units per 1 EUR). Missing history: today's fallback rate.
+    param([string[]]$Target, [string]$Currency, [string]$Base, [hashtable]$History, [hashtable]$FallbackFromEur = @{})
+    $n = $Target.Count
+    $out = New-Object double[] $n
+    $approx = $false
+    $legs = @()
+    foreach ($c in @($Currency, $Base)) {
+        $nc = Get-NormalizedCurrencyCode $c
+        if ($nc -eq "EUR" -or -not $nc) {
+            $a = New-Object double[] $n
+            for ($i = 0; $i -lt $n; $i++) { $a[$i] = 1.0 }
+        } elseif ($null -ne $History -and $History.ContainsKey($nc) -and $History[$nc].Dates.Count -gt 0) {
+            $a = Get-AlignedSeries -Target $Target -Dates $History[$nc].Dates -Values $History[$nc].Rates
+        } else {
+            $approx = $true
+            $fb = if ($null -ne $FallbackFromEur -and $FallbackFromEur.ContainsKey($nc) -and [double]$FallbackFromEur[$nc] -gt 0) { [double]$FallbackFromEur[$nc] } else { 1.0 }
+            $a = New-Object double[] $n
+            for ($i = 0; $i -lt $n; $i++) { $a[$i] = $fb }
+        }
+        $legs += ,$a
+    }
+    for ($i = 0; $i -lt $n; $i++) { $out[$i] = $legs[1][$i] / $legs[0][$i] }
+    return @{ Factor = $out; Approx = $approx }
+}
+
+# ------------------------------------------------------------------------------
+# Ledger: every ticker's bookings replayed in the base currency (moving
+# average cost at the FX rate of each booking date, splits applied), plus the
+# cash flows for the money-weighted return.
+# ------------------------------------------------------------------------------
+function Get-PortfolioLedger {
+    param(
+        [array]$Transactions,
+        [string]$Base = "EUR",
+        [hashtable]$History = @{},
+        [hashtable]$FallbackFromEur = @{},
+        [hashtable]$Splits = @{},
+        [string]$AsOf = ""
+    )
+    $base = Get-NormalizedCurrencyCode $Base
+    if (-not $base) { $base = "EUR" }
+    $end = if ($AsOf) { $AsOf } else { (Get-Date).ToString("yyyy-MM-dd") }
+    $groups = @{}
+    $i = 0
+    foreach ($tx in @($Transactions)) {
+        $i++
+        if ($null -eq $tx -or -not $tx.Ticker) { continue }
+        if ([string]$tx.Type -notin @("Kauf", "Verkauf", "Dividende")) { continue }
+        if ([string]::CompareOrdinal([string]$tx.Date, $end) -gt 0) { continue }
+        $sym = ([string]$tx.Ticker).ToUpper()
+        if (-not $groups.ContainsKey($sym)) { $groups[$sym] = New-Object System.Collections.Generic.List[PSObject] }
+        $groups[$sym].Add([PSCustomObject]@{ Date = [string]$tx.Date; Idx = $i; Tx = $tx })
+    }
+    $out = @{}
+    foreach ($sym in @($groups.Keys)) {
+        $L = [PSCustomObject]@{
+            Ticker = $sym; Currency = ""; Shares = 0.0; Cost = 0.0; Realized = 0.0; Dividends = 0.0; Fees = 0.0
+            Bought = 0.0; FirstDate = ""; CfDates = (New-Object System.Collections.Generic.List[string])
+            CfAmounts = (New-Object System.Collections.Generic.List[double]); Approx = $false; Clamped = $false
+        }
+        $spl = @(Get-SplitEvents -Splits $Splits -Ticker $sym)
+        $k = 0
+        $ordered = @($groups[$sym] | Sort-Object -Property @{ Expression = { $_.Date } }, @{ Expression = { $_.Idx } })
+        foreach ($o in $ordered) {
+            $tx = $o.Tx
+            $date = [string]$tx.Date
+            while ($k -lt $spl.Count -and [string]::CompareOrdinal([string]$spl[$k].Date, $date) -le 0) {
+                if ($L.Shares -gt 0) { $L.Shares *= [double]$spl[$k].Ratio }
+                $k++
+            }
+            $cur = Get-NormalizedCurrencyCode ([string]$tx.Currency)
+            if (-not $cur) { $cur = "EUR" }
+            $q = [double]$tx.Shares; $px = [double]$tx.Price; $fee = [double]$tx.Fee
+            switch ([string]$tx.Type) {
+                "Kauf" {
+                    if ($q -le 0 -or $px -le 0) { continue }
+                    $cv = Convert-AmountOnDate -Amount (($q * $px) + $fee) -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+                    $fv = Convert-AmountOnDate -Amount $fee -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+                    $L.Cost += $cv.Value; $L.Bought += $cv.Value; $L.Shares += $q; $L.Fees += $fv.Value
+                    if (-not $L.FirstDate) { $L.FirstDate = $date }
+                    if (-not $L.Currency) { $L.Currency = $cur }
+                    $L.CfDates.Add($date); $L.CfAmounts.Add(-$cv.Value)
+                    if ($cv.Approx) { $L.Approx = $true }
+                }
+                "Verkauf" {
+                    if ($q -le 0 -or $px -le 0) { continue }
+                    if ($q -gt ($L.Shares + 0.000001)) { $q = $L.Shares; $L.Clamped = $true }
+                    if ($q -le 0) { continue }
+                    $costPart = ($L.Cost / $L.Shares) * $q
+                    $pr = Convert-AmountOnDate -Amount ($q * $px) -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+                    $fe = Convert-AmountOnDate -Amount $fee -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+                    $L.Realized += ($pr.Value - $costPart - $fe.Value)
+                    $L.Fees += $fe.Value
+                    $L.Cost -= $costPart
+                    $L.Shares -= $q
+                    if ($L.Shares -le 0.000001) { $L.Shares = 0.0; $L.Cost = 0.0 }
+                    $L.CfDates.Add($date); $L.CfAmounts.Add($pr.Value - $fe.Value)
+                    if ($pr.Approx -or $fe.Approx) { $L.Approx = $true }
+                }
+                "Dividende" {
+                    if ($px -le 0) { continue }
+                    $gr = Convert-AmountOnDate -Amount ($px - $fee) -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+                    $L.Dividends += $gr.Value
+                    $L.CfDates.Add($date); $L.CfAmounts.Add($gr.Value)
+                    if ($gr.Approx) { $L.Approx = $true }
+                }
+            }
+        }
+        while ($k -lt $spl.Count -and [string]::CompareOrdinal([string]$spl[$k].Date, $end) -le 0) {
+            if ($L.Shares -gt 0) { $L.Shares *= [double]$spl[$k].Ratio }
+            $k++
+        }
+        $out[$sym] = $L
+    }
+    return $out
+}
+
+function Get-UncoveredPositions {
+    # Positions whose share count is not (fully) explained by bookings: they
+    # cannot be part of the rebuilt history
+    param([hashtable]$Portfolio, [hashtable]$Ledger)
+    $out = @()
+    if ($null -eq $Portfolio) { return $out }
+    foreach ($sym in @($Portfolio.Keys | Sort-Object)) {
+        $pf = [double]$Portfolio[$sym].Shares
+        $bk = if ($null -ne $Ledger -and $Ledger.ContainsKey(([string]$sym).ToUpper())) { [double]$Ledger[([string]$sym).ToUpper()].Shares } else { 0.0 }
+        if ([math]::Abs($pf - $bk) -gt (0.0001 * [math]::Max(1.0, [math]::Abs($pf)))) {
+            $out += [PSCustomObject]@{ Ticker = ([string]$sym).ToUpper(); Shares = $pf; Booked = $bk; Missing = ($pf - $bk) }
+        }
+    }
+    return $out
+}
+
+# ------------------------------------------------------------------------------
+# Money-weighted return (XIRR, annualized, days / 365)
+# ------------------------------------------------------------------------------
+function Get-XirrNpv {
+    param([double[]]$T, [double[]]$A, [double]$Rate)
+    $f = 0.0; $df = 0.0
+    for ($i = 0; $i -lt $A.Count; $i++) {
+        $v = [math]::Pow(1.0 + $Rate, $T[$i])
+        $f += $A[$i] / $v
+        $df += -$T[$i] * $A[$i] / ($v * (1.0 + $Rate))
+    }
+    return @($f, $df)
+}
+
+function Get-Xirr {
+    # NaN when it cannot be computed (needs money in AND out, >= 2 dates)
+    param([string[]]$Dates, [double[]]$Amounts)
+    $n = [math]::Min(@($Dates).Count, @($Amounts).Count)
+    if ($n -lt 2) { return [double]::NaN }
+    $hasNeg = $false; $hasPos = $false
+    $dt = New-Object DateTime[] $n
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($Amounts[$i] -lt 0) { $hasNeg = $true } elseif ($Amounts[$i] -gt 0) { $hasPos = $true }
+        $dt[$i] = [DateTime]::ParseExact(([string]$Dates[$i]).Substring(0, 10), "yyyy-MM-dd", $inv)
+    }
+    if (-not ($hasNeg -and $hasPos)) { return [double]::NaN }
+    # (no Measure-Object: Windows PowerShell 5.1 cannot take the minimum of dates)
+    $d0 = $dt[0]
+    for ($i = 1; $i -lt $n; $i++) { if ($dt[$i] -lt $d0) { $d0 = $dt[$i] } }
+    $t = New-Object double[] $n
+    $a = New-Object double[] $n
+    $tMax = 0.0
+    for ($i = 0; $i -lt $n; $i++) {
+        $t[$i] = ($dt[$i] - $d0).TotalDays / 365.0
+        $a[$i] = [double]$Amounts[$i]
+        if ($t[$i] -gt $tMax) { $tMax = $t[$i] }
+    }
+    if ($tMax -le 0) { return [double]::NaN }
+
+    # Newton from 10 %
+    $r = 0.1
+    for ($it = 0; $it -lt 60; $it++) {
+        $fd = Get-XirrNpv -T $t -A $a -Rate $r
+        if ([math]::Abs($fd[0]) -lt 1e-9) { return $r }
+        if ($fd[1] -eq 0 -or [double]::IsNaN($fd[1])) { break }
+        $next = $r - ($fd[0] / $fd[1])
+        if ([double]::IsNaN($next) -or [double]::IsInfinity($next) -or $next -le -0.9999) { break }
+        if ([math]::Abs($next - $r) -lt 1e-12) { return $next }
+        $r = $next
+    }
+    # Bisection fallback
+    $lo = -0.9999; $hi = 1.0
+    $flo = (Get-XirrNpv -T $t -A $a -Rate $lo)[0]
+    $fhi = (Get-XirrNpv -T $t -A $a -Rate $hi)[0]
+    $g = 0
+    while (($flo * $fhi) -gt 0 -and $g -lt 40) { $hi *= 2.0; $fhi = (Get-XirrNpv -T $t -A $a -Rate $hi)[0]; $g++ }
+    if (($flo * $fhi) -gt 0) { return [double]::NaN }
+    for ($it = 0; $it -lt 300; $it++) {
+        $mid = ($lo + $hi) / 2.0
+        $fm = (Get-XirrNpv -T $t -A $a -Rate $mid)[0]
+        if ([math]::Abs($fm) -lt 1e-9 -or ($hi - $lo) -lt 1e-12) { return $mid }
+        if (($flo * $fm) -lt 0) { $hi = $mid; $fhi = $fm } else { $lo = $mid; $flo = $fm }
+    }
+    return (($lo + $hi) / 2.0)
+}
+
+# ------------------------------------------------------------------------------
+# Value history rebuilt from the bookings, and a benchmark "shadow" portfolio:
+# every buy / sell of the real portfolio is done in the benchmark instead.
+# Prices: ticker -> @{ Dates; Closes; Currency; Splits } (ConvertFrom-YahooDailyHistory)
+# ------------------------------------------------------------------------------
+function Get-PortfolioValueSeries {
+    param(
+        [array]$Transactions,
+        [hashtable]$Prices,
+        [string]$Base = "EUR",
+        [hashtable]$History = @{},
+        [hashtable]$FallbackFromEur = @{},
+        $Benchmark = $null,
+        [string]$EndDate = "",
+        [int]$MaxPoints = 1500
+    )
+    $base = Get-NormalizedCurrencyCode $Base
+    if (-not $base) { $base = "EUR" }
+    $end = if ($EndDate) { $EndDate } else { (Get-Date).ToString("yyyy-MM-dd") }
+
+    $bk = New-Object System.Collections.Generic.List[PSObject]
+    $i = 0
+    foreach ($tx in @($Transactions)) {
+        $i++
+        if ($null -eq $tx -or -not $tx.Ticker -or [string]$tx.Type -notin @("Kauf", "Verkauf", "Dividende")) { continue }
+        if ([string]::CompareOrdinal([string]$tx.Date, $end) -gt 0) { continue }
+        $bk.Add([PSCustomObject]@{ Date = [string]$tx.Date; Idx = $i; Tx = $tx; Sym = ([string]$tx.Ticker).ToUpper() })
+    }
+    if ($bk.Count -eq 0) { return $null }
+    $books = @($bk | Sort-Object -Property @{ Expression = { $_.Date } }, @{ Expression = { $_.Idx } })
+    $start = [string]$books[0].Date
+    $syms = @($books | Where-Object { $_.Tx.Type -ne "Dividende" } | ForEach-Object { $_.Sym } | Sort-Object -Unique)
+
+    # Date axis: every trading day of any held ticker between start and end
+    $axisSet = New-Object 'System.Collections.Generic.SortedSet[string]' ([System.StringComparer]::Ordinal)
+    $missing = @()
+    foreach ($s in $syms) {
+        if ($null -eq $Prices -or -not $Prices.ContainsKey($s) -or $null -eq $Prices[$s]) { $missing += $s; continue }
+        foreach ($d in $Prices[$s].Dates) {
+            if ([string]::CompareOrdinal($d, $start) -ge 0 -and [string]::CompareOrdinal($d, $end) -le 0) { [void]$axisSet.Add($d) }
+        }
+    }
+    if ($axisSet.Count -eq 0) { return $null }
+    $axisAll = New-Object string[] $axisSet.Count
+    $axisSet.CopyTo($axisAll)
+    if ($axisAll.Count -gt $MaxPoints) {
+        $step = [math]::Ceiling($axisAll.Count / $MaxPoints)
+        $keep = New-Object System.Collections.Generic.List[string]
+        for ($j = 0; $j -lt $axisAll.Count; $j += $step) { $keep.Add($axisAll[$j]) }
+        if ($keep[$keep.Count - 1] -ne $axisAll[$axisAll.Count - 1]) { $keep.Add($axisAll[$axisAll.Count - 1]) }
+        $axis = $keep.ToArray()
+    } else {
+        $axis = $axisAll
+    }
+    $n = $axis.Count
+
+    # Aligned price x FX per ticker
+    $approx = $false
+    $valBase = @{}
+    $splitList = @{}
+    $shares = @{}
+    foreach ($s in $syms) {
+        $shares[$s] = 0.0
+        if ($missing -contains $s) { $splitList[$s] = @(); continue }
+        $p = $Prices[$s]
+        $cl = Get-AlignedSeries -Target $axis -Dates $p.Dates -Values $p.Closes
+        $fx = Get-AlignedFxToBase -Target $axis -Currency ([string]$p.Currency) -Base $base -History $History -FallbackFromEur $FallbackFromEur
+        if ($fx.Approx) { $approx = $true }
+        $v = New-Object double[] $n
+        for ($j = 0; $j -lt $n; $j++) { $v[$j] = $cl[$j] * $fx.Factor[$j] }
+        $valBase[$s] = $v
+        $splitList[$s] = @(@($p.Splits) | Where-Object { $null -ne $_ -and [double]$_.Ratio -gt 0 } | Sort-Object -Property @{ Expression = { [string]$_.Date } })
+    }
+
+    # Benchmark in the base currency (aligned) + lookups on booking dates
+    $bench = $null
+    $benchBase = $null
+    if ($null -ne $Benchmark -and $null -ne $Benchmark.Dates -and $Benchmark.Dates.Count -gt 0) {
+        $bcl = Get-AlignedSeries -Target $axis -Dates $Benchmark.Dates -Values $Benchmark.Closes
+        $bfx = Get-AlignedFxToBase -Target $axis -Currency ([string]$Benchmark.Currency) -Base $base -History $History -FallbackFromEur $FallbackFromEur
+        $benchBase = New-Object double[] $n
+        for ($j = 0; $j -lt $n; $j++) { $benchBase[$j] = $bcl[$j] * $bfx.Factor[$j] }
+        $bench = New-Object double[] $n
+    }
+    $benchOnDate = {
+        param([string]$D)
+        $px = Get-HistoryValueOnDate -Dates $Benchmark.Dates -Values $Benchmark.Closes -Date $D
+        $cv = Convert-AmountOnDate -Amount $px -From ([string]$Benchmark.Currency) -To $base -Date $D -History $History -FallbackFromEur $FallbackFromEur
+        return $cv.Value
+    }
+
+    # Yahoo's closes are adjusted for every split up to today, so booked shares
+    # are converted to today's units: x every split AFTER the booking date
+    # (a booking on the ex-date is already in post-split units)
+    $laterSplitFactor = {
+        param([string]$S, [string]$D)
+        $f = 1.0
+        foreach ($sp in @($splitList[$S])) { if ([string]::CompareOrdinal([string]$sp.Date, $D) -gt 0) { $f *= [double]$sp.Ratio } }
+        return $f
+    }
+
+    $value = New-Object double[] $n
+    $invested = New-Object double[] $n
+    $divCum = New-Object double[] $n
+    $net = 0.0; $dv = 0.0; $units = 0.0; $clampedBench = $false
+    $b = 0
+    for ($j = 0; $j -lt $n; $j++) {
+        $d = $axis[$j]
+        while ($b -lt $books.Count -and [string]::CompareOrdinal([string]$books[$b].Date, $d) -le 0) {
+            $o = $books[$b]; $tx = $o.Tx; $s = $o.Sym; $bd = [string]$o.Date
+            $cur = Get-NormalizedCurrencyCode ([string]$tx.Currency)
+            if (-not $cur) { $cur = "EUR" }
+            $q = [double]$tx.Shares; $px = [double]$tx.Price; $fee = [double]$tx.Fee
+            $sf = if ($shares.ContainsKey($s)) { & $laterSplitFactor $s $bd } else { 1.0 }
+            switch ([string]$tx.Type) {
+                "Kauf" {
+                    if ($q -gt 0 -and $px -gt 0) {
+                        $cv = Convert-AmountOnDate -Amount (($q * $px) + $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
+                        $shares[$s] = $shares[$s] + ($q * $sf)
+                        $net += $cv.Value
+                        if ($null -ne $bench) { $bp = & $benchOnDate $bd; if ($bp -gt 0) { $units += $cv.Value / $bp } }
+                    }
+                }
+                "Verkauf" {
+                    if ($q -gt 0 -and $px -gt 0) {
+                        # clamp in today's units, proceeds in the booked units
+                        $qa = [math]::Min($q * $sf, $shares[$s])
+                        $q = $qa / $sf
+                        $pr = Convert-AmountOnDate -Amount (($q * $px) - $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
+                        $shares[$s] = $shares[$s] - $qa
+                        $net -= $pr.Value
+                        if ($null -ne $bench) {
+                            $bp = & $benchOnDate $bd
+                            if ($bp -gt 0) { $units -= $pr.Value / $bp }
+                            if ($units -lt 0) { $units = 0.0; $clampedBench = $true }
+                        }
+                    }
+                }
+                "Dividende" {
+                    if ($px -gt 0) {
+                        $gr = Convert-AmountOnDate -Amount ($px - $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
+                        $dv += $gr.Value
+                    }
+                }
+            }
+            $b++
+        }
+        $tot = 0.0
+        foreach ($s in $syms) {
+            if ($shares[$s] -gt 0 -and $valBase.ContainsKey($s)) {
+                $px = $valBase[$s][$j]
+                if (-not [double]::IsNaN($px)) { $tot += $shares[$s] * $px }
+            }
+        }
+        $value[$j] = $tot
+        $invested[$j] = $net
+        $divCum[$j] = $dv
+        if ($null -ne $bench) { $bench[$j] = $units * $benchBase[$j] }
+    }
+    return [PSCustomObject]@{
+        Dates        = $axis
+        Value        = $value
+        Invested     = $invested
+        Dividends    = $divCum
+        Bench        = $bench
+        Missing      = $missing
+        Approx       = $approx
+        BenchClamped = $clampedBench
+    }
+}
+
+function Get-SeriesWindowStart {
+    # Index of the first point of a window (6M / 1Y / 3Y / Max) on a date axis
+    param([string[]]$Dates, [string]$Range, [string]$EndDate = "")
+    if ($null -eq $Dates -or $Dates.Count -eq 0) { return 0 }
+    $last = if ($EndDate) { $EndDate } else { $Dates[$Dates.Count - 1] }
+    $ld = [DateTime]::ParseExact($last, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    $from = switch ($Range) {
+        "6M" { $ld.AddMonths(-6) }
+        "1Y" { $ld.AddYears(-1) }
+        "3Y" { $ld.AddYears(-3) }
+        default { $null }
+    }
+    if ($null -eq $from) { return 0 }
+    $f = $from.ToString("yyyy-MM-dd")
+    for ($i = 0; $i -lt $Dates.Count; $i++) { if ([string]::CompareOrdinal($Dates[$i], $f) -ge 0) { return $i } }
+    return ($Dates.Count - 1)
+}
+
+# ------------------------------------------------------------------------------
+# Breakdown (allocation) and concentration
+# ------------------------------------------------------------------------------
+function Get-AllocationBreakdown {
+    # Items: objects with Key and Value -> groups sorted by value, with Pct
+    param([array]$Items)
+    $sum = @{}
+    $total = 0.0
+    foreach ($it in @($Items)) {
+        if ($null -eq $it) { continue }
+        $v = [double]$it.Value
+        if ($v -le 0 -or [double]::IsNaN($v)) { continue }
+        $k = if ([string]::IsNullOrWhiteSpace([string]$it.Key)) { "Unbekannt" } else { [string]$it.Key }
+        if (-not $sum.ContainsKey($k)) { $sum[$k] = 0.0 }
+        $sum[$k] += $v
+        $total += $v
+    }
+    $out = @()
+    foreach ($k in $sum.Keys) {
+        $out += [PSCustomObject]@{ Key = $k; Value = $sum[$k]; Pct = $(if ($total -gt 0) { $sum[$k] / $total * 100.0 } else { 0.0 }) }
+    }
+    return @($out | Sort-Object -Property @{ Expression = { $_.Value }; Descending = $true }, @{ Expression = { $_.Key } })
+}
+
+function Get-ConcentrationWarnings {
+    param([array]$Groups, [double]$ThresholdPct = 20)
+    return @(@($Groups) | Where-Object { $null -ne $_ -and [double]$_.Pct -gt $ThresholdPct })
+}
+
+# ------------------------------------------------------------------------------
+# Company profile (sector / country). Yahoo's quoteSummary needs a cookie +
+# crumb; the search API delivers at least the sector without one.
+# ------------------------------------------------------------------------------
+function ConvertFrom-YahooProfile {
+    param($Summary, $Search, [string]$Symbol)
+    $o = [PSCustomObject]@{ Sector = ""; Industry = ""; Country = ""; QuoteType = ""; Name = "" }
+    try {
+        $r = $Summary.quoteSummary.result[0]
+        if ($null -ne $r.assetProfile) {
+            $o.Sector = [string]$r.assetProfile.sector
+            $o.Industry = [string]$r.assetProfile.industry
+            $o.Country = [string]$r.assetProfile.country
+        }
+        if ($null -ne $r.quoteType) {
+            $o.QuoteType = [string]$r.quoteType.quoteType
+            $o.Name = if ($r.quoteType.longName) { [string]$r.quoteType.longName } else { [string]$r.quoteType.shortName }
+        }
+    } catch { }
+    if ($null -ne $Search -and $null -ne $Search.quotes) {
+        $hit = $null
+        foreach ($q in @($Search.quotes)) { if (([string]$q.symbol).ToUpper() -eq ([string]$Symbol).ToUpper()) { $hit = $q; break } }
+        if ($null -ne $hit) {
+            if (-not $o.Sector)    { $o.Sector = if ($hit.sectorDisp) { [string]$hit.sectorDisp } else { [string]$hit.sector } }
+            if (-not $o.Industry)  { $o.Industry = if ($hit.industryDisp) { [string]$hit.industryDisp } else { [string]$hit.industry } }
+            if (-not $o.QuoteType) { $o.QuoteType = [string]$hit.quoteType }
+            if (-not $o.Name)      { $o.Name = if ($hit.longname) { [string]$hit.longname } else { [string]$hit.shortname } }
+        }
+    }
+    return $o
+}
+
+function Get-SectorLabel {
+    param([string]$Sector)
+    $map = @{
+        "Technology" = "Technologie"; "Financial Services" = "Finanzen"; "Healthcare" = "Gesundheit"
+        "Consumer Cyclical" = "Zyklischer Konsum"; "Consumer Defensive" = "Basiskonsum"
+        "Communication Services" = "Kommunikation"; "Industrials" = "Industrie"; "Energy" = "Energie"
+        "Basic Materials" = "Grundstoffe"; "Real Estate" = "Immobilien"; "Utilities" = "Versorger"
+    }
+    if ($map.ContainsKey($Sector)) { return $map[$Sector] }
+    return $Sector
+}
+
+function Get-CountryLabel {
+    param([string]$Country)
+    $map = @{
+        "United States" = "USA"; "Germany" = "Deutschland"; "Switzerland" = "Schweiz"; "Austria" = "Österreich"
+        "United Kingdom" = "Großbritannien"; "Netherlands" = "Niederlande"; "France" = "Frankreich"; "Ireland" = "Irland"
+        "Italy" = "Italien"; "Spain" = "Spanien"; "Sweden" = "Schweden"; "Denmark" = "Dänemark"; "Norway" = "Norwegen"
+        "Finland" = "Finnland"; "Belgium" = "Belgien"; "Canada" = "Kanada"; "Japan" = "Japan"; "China" = "China"
+        "Taiwan" = "Taiwan"; "South Korea" = "Südkorea"; "Hong Kong" = "Hongkong"; "India" = "Indien"
+        "Australia" = "Australien"; "Brazil" = "Brasilien"; "Luxembourg" = "Luxemburg"; "Israel" = "Israel"
+    }
+    if ($map.ContainsKey($Country)) { return $map[$Country] }
+    return $Country
+}
+
+function Get-EffectiveProfile {
+    # Manual value > Yahoo value > by instrument type > "Unbekannt"
+    param($Entry)
+    $qt = if ($null -ne $Entry) { ([string]$Entry.QuoteType).ToUpper() } else { "" }
+    $byType = switch ($qt) {
+        "ETF"            { @{ Sector = "ETF / Fonds"; Country = "Fonds (gemischt)" } }
+        "MUTUALFUND"     { @{ Sector = "ETF / Fonds"; Country = "Fonds (gemischt)" } }
+        "CRYPTOCURRENCY" { @{ Sector = "Krypto"; Country = "Ohne Land" } }
+        "INDEX"          { @{ Sector = "Index"; Country = "Ohne Land" } }
+        "CURRENCY"       { @{ Sector = "Devisen"; Country = "Ohne Land" } }
+        "FUTURE"         { @{ Sector = "Rohstoffe / Futures"; Country = "Ohne Land" } }
+        default          { @{ Sector = ""; Country = "" } }
+    }
+    $res = [PSCustomObject]@{ Sector = "Unbekannt"; Country = "Unbekannt"; SectorSource = ""; CountrySource = "" }
+    if ($null -ne $Entry -and $Entry.ManualSector) { $res.Sector = [string]$Entry.ManualSector; $res.SectorSource = "manuell" }
+    elseif ($null -ne $Entry -and $Entry.Sector) { $res.Sector = Get-SectorLabel ([string]$Entry.Sector); $res.SectorSource = "Yahoo" }
+    elseif ($byType.Sector) { $res.Sector = $byType.Sector; $res.SectorSource = "Typ" }
+    if ($null -ne $Entry -and $Entry.ManualCountry) { $res.Country = [string]$Entry.ManualCountry; $res.CountrySource = "manuell" }
+    elseif ($null -ne $Entry -and $Entry.Country) { $res.Country = Get-CountryLabel ([string]$Entry.Country); $res.CountrySource = "Yahoo" }
+    elseif ($byType.Country) { $res.Country = $byType.Country; $res.CountrySource = "Typ" }
+    return $res
+}
+
+function Test-ProfileStale {
+    # Fetched profile older than MaxDays (or never fetched)?
+    param($Entry, [int]$MaxDays = 30, [DateTime]$Now = (Get-Date))
+    if ($null -eq $Entry -or -not $Entry.FetchedAt) { return $true }
+    $t = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse([string]$Entry.FetchedAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)) { return $true }
+    return (($Now - $t).TotalDays -gt $MaxDays)
 }
