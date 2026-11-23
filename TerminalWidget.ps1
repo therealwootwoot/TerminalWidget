@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.6"
+$script:AppVersion    = "4.7"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -256,6 +256,8 @@ $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 # v4.5: portable.txt next to the script = data in <program folder>\data
 $script:IsPortable    = Test-Path (Join-Path $script:ScriptDir "portable.txt")
 $script:DataDir       = if ($script:IsPortable) { Join-Path $script:ScriptDir "data" } else { Join-Path $env:LOCALAPPDATA "TerminalWidget" }
+# v4.7: the CI smoke test runs on its own data folder
+if ($env:TW_SMOKE_TEST -and $env:TW_SMOKE_DIR) { $script:DataDir = $env:TW_SMOKE_DIR }
 $script:OldDataDir    = Join-Path $env:LOCALAPPDATA "NvidiaWidgetV2"   # v2.x / v3.x
 $script:ConfigPath    = Join-Path $script:DataDir "config.json"
 $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
@@ -506,6 +508,8 @@ $defaultConfig = [PSCustomObject]@{
     GridLayouts           = [PSCustomObject]@{}
     UserLayouts           = @()
     FirstRunDone          = $false
+    # v4.7
+    Language              = "DE"
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -1529,6 +1533,7 @@ function Resolve-BestSymbol {
 
 function Confirm-Action {
     param([string]$Text, [string]$Title = "Bestätigen")
+    if ($env:TW_SMOKE_TEST) { return $true }
     # Pass the form as owner so the box never hides behind the TopMost widget
     $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
     $ans = [System.Windows.Forms.MessageBox]::Show(
@@ -3507,9 +3512,105 @@ $script:TipReg = @{}
 
 function Get-TipModeNow { return [string]$script:Config.TooltipMode }
 
+# ==============================================================================
+# v4.7: English user interface (Settings > Sprache). Static texts of windows,
+# buttons, column headers, menus and the command list are translated when a
+# window is built; messages, explanations and the glossary stay German.
+# ==============================================================================
+$script:EnText = @{
+    "Vergleichen mit" = "Compare with"; "Ticker (Kursentwicklung in % ab Chartbeginn):" = "Ticker (performance in % from chart start):"; "Vergleichen" = "Compare"
+    "Abbrechen" = "Cancel"; "Kerzen" = "Candles"; "Volumen" = "Volume"; "Vollbild" = "Fullscreen"; "EK-Währ.:" = "Cost ccy:"
+    "Position speichern" = "Save position"; "Löschen" = "Delete"; "Transaktion..." = "Transaction..."; "Historie" = "History"; "Analyse" = "Analysis"
+    "Position wählen oder Ticker, Stück & EK eintragen für Live-Nachkauf-Simulation." = "Pick a position or enter ticker, shares & cost for a live top-up simulation."
+    "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" = "Watchlist (drag = order | Del = remove)"; "+ Aktiven Ticker" = "+ Active ticker"; "+ Suchen / Add" = "+ Search / add"
+    "Entfernen" = "Remove"; "Alarme (Doppelklick = Reset)" = "Alerts (double-click = reset)"; "Verlauf" = "History"; "Leeren" = "Clear"; "Schließen" = "Close"
+    "Bei Alarmen" = "On alerts"; "Quartalszahlen (Vortag)" = "Earnings (day before)"; "Buchen" = "Book"; "Eintrag löschen" = "Delete entry"; "CSV export" = "CSV export"
+    "Position neu berechnen" = "Recalculate position"; "Jahresreport..." = "Yearly report..."; "Berechnen" = "Calculate"; "Basis:" = "Base:"; "Netto investiert" = "Net invested"
+    "Hinweis ab (%):" = "Warn from (%):"; "Sektor/Land per Klick überschreiben (blau = manuell). Leer = wieder automatisch." = "Click to override sector/country (blue = manual). Empty = automatic again."
+    "Übernehmen" = "Apply"; "Währung, wenn leer:" = "Currency if empty:"; "ISIN bevorzugt an Börse:" = "Preferred exchange for ISINs:"; "ISINs auflösen" = "Resolve ISINs"
+    "Positionen danach aus Buchungen berechnen" = "Recalculate positions from bookings"; "Importieren" = "Import"; "Überspringen" = "Skip"
+    "Ruhezeit (kein Ton / Push) von - bis" = "Quiet hours (no sound / push) from - to"; "Handy-Push einrichten ..." = "Phone push setup ..."
+    "Globales Tastenkürzel (zeigen / verstecken)" = "Global hotkey (show / hide)"; "Glossar öffnen (G)" = "Open glossary (G)"; "Datenordner öffnen" = "Open data folder"
+    "Backup jetzt" = "Backup now"; "Log öffnen" = "Open log"; "Suchen:" = "Search:"; "Kein Begriff gefunden." = "No term found."
+    "Alarm hier setzen (Rechtsklick im Kursbereich)" = "Set alert here (right-click in the price area)"; "Stück" = "Shares"; "Kurs" = "Price"; "Wert" = "Value"; "Anteil" = "Weight"
+    "G/V Gesamt" = "Total P/L"; "Tag %" = "Day %"; "Markt" = "Market"; "Anzeigen / Wiederherstellen" = "Show / restore"; "Jetzt aktualisieren (F5)" = "Refresh now (F5)"; "Beenden" = "Exit"
+    "Aktuellen Kurs kopieren" = "Copy current price"; "Aktiven Ticker zur Watchlist hinzufügen" = "Add active ticker to watchlist"; "Chartdaten als CSV exportieren" = "Export chart data as CSV"
+    "Chart im Vollbild (F11)" = "Fullscreen chart (F11)"; "Vergleichen mit ... (X)" = "Compare with ... (X)"; "Vergleich entfernen" = "Remove comparison"; "Zoom zurücksetzen (Z)" = "Reset zoom (Z)"
+    "Durchklicken (Maus geht durch)" = "Click-through (mouse passes through)"
+    "Noch keine Alarme." = "No alerts yet."; "Ticker, Bedingung, Wert -> '+'" = "Ticker, condition, value -> '+'"; "oder Rechtsklick in den Chart." = "or right-click into the chart."
+    "Alle Ticker" = "All tickers"; "(keine)" = "(none)"; "Aktualisierung" = "Refresh"; "Intervall (Sekunden)" = "Interval (seconds)"; "Nur-Watchlist-Ticker (Sekunden)" = "Watchlist-only tickers (seconds)"
+    "HTTP-Timeout (Sekunden, ab Neustart)" = "HTTP timeout (seconds, after restart)"; "Alle Börsen zu: nur alle X Minuten (0 = aus)" = "All markets closed: every X minutes (0 = off)"
+    "Indikatoren" = "Indicators"; "SMA schnell (auch Bollinger-Periode)" = "Fast SMA (also Bollinger period)"; "SMA langsam" = "Slow SMA"; "RSI-Periode" = "RSI period"
+    "RSI überkauft ab" = "RSI overbought from"; "RSI überverkauft bis" = "RSI oversold up to"; "Gleitender Durchschnitt" = "Moving average"; "Unteres Feld im Chart" = "Lower chart panel"
+    "Darstellung" = "Appearance"; "Akzentfarbe" = "Accent colour"; "Immer im Vordergrund" = "Always on top"; "Laufleiste (Watchlist) im Compact-Layout" = "Ticker tape (watchlist) in Compact layout"
+    "Benachrichtigungen" = "Notifications"; "Tray-Hinweis + Ton bei Alarmen" = "Tray notice + sound on alerts"; "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" = "Notice when trading starts (portfolio exchanges / active ticker)"
+    "Hinweis am Vortag von Quartalszahlen (Portfolio)" = "Notice the day before earnings (portfolio)"; "Mit Windows starten (Verknüpfung im Autostart-Ordner)" = "Start with Windows (shortcut in the startup folder)"
+    "Layout und Fenster" = "Layout and window"; "Deckkraft (%)" = "Opacity (%)"; "Terminal: Watchlist und Alarme anzeigen" = "Terminal: show watchlist and alerts"; "Terminal: Portfolio anzeigen" = "Terminal: show portfolio"
+    "Terminal: Chart-Höhe (%)" = "Terminal: chart height (%)"; "Farben und Fenster" = "Colours and window"; "Farben für Plus / Minus" = "Colours for up / down"
+    "Pfeile vor Veränderungen anzeigen" = "Show arrows before changes"; "Kurs kurz einfärben, wenn er sich ändert" = "Flash the price when it changes"; "Fenster am Bildschirmrand einrasten" = "Snap the window to screen edges"
+    "Erklärungen (Maus darüber)" = "Explanations (hover)"; "Ausführlichkeit" = "Detail"; "Verzögerung (Millisekunden)" = "Delay (milliseconds)"; "Zufällig" = "Random"; "Chat-ID holen" = "Get chat ID"
+    "Test senden" = "Send test"; "Wertentwicklung" = "Performance"; "Rendite" = "Returns"; "Aufteilung" = "Allocation"; "Dividenden" = "Dividends"; "Neu laden" = "Reload"; "Kaufdaten ..." = "Buy dates ..."
+    "Zeit" = "Time"; "Bedingung" = "Condition"; "Notiz" = "Note"; "Verkauf" = "Sell"; "Kauf" = "Buy"; "Datum" = "Date"; "Typ" = "Type"; "Kurs/Betrag" = "Price/amount"; "Gebühr" = "Fee"; "Whg" = "Ccy"
+    "Realisiert" = "Realized"; "Dividende" = "Dividend"; "Betrag (Whg)" = "Amount (ccy)"; "Erlös" = "Proceeds"; "Einstand" = "Cost"; "Gebühr/Steuer" = "Fee/tax"; "Ergebnis" = "Result"
+    "Seit" = "Since"; "Unrealisiert" = "Unrealized"; "Gesamt" = "Total"; "Gesamt %" = "Total %"; "Währung" = "Currency"; "Sektor" = "Sector"; "Land" = "Country"; "Quelle" = "Source"
+    "Rhythmus" = "Frequency"; "Letzte" = "Last"; "Pro Jahr" = "Per year"; "auf EK" = "on cost"; "Erwartet 12M" = "Expected 12M"; "Nächster Ex-Tag" = "Next ex-date"; "Zahltag" = "Pay date"
+    "Quartalszahlen" = "Earnings"; "Art" = "Kind"; "Kaufdatum" = "Buy date"; "Wann" = "When"; "Anlass" = "Reason"; "Hinweis" = "Note"; "Kurs / Betrag" = "Price / amount"
+    "Einstellungen" = "Settings"; "Sprache" = "Language"; "Wiederherstellen ..." = "Restore ..."; "Daten exportieren ..." = "Export data ..."; "Daten importieren ..." = "Import data ..."
+    "Portabel machen ..." = "Make portable ..."; "Portabel beenden ..." = "End portable mode ..."; "Weiter" = "Next"; "Los geht's" = "Let's go"; "Feld" = "Field"; "Titel" = "Title"
+    "Ereignis" = "Event"; "Inhalt" = "Content"; "Zeitpunkt" = "Time"; "Betrag je Aktie" = "Amount per share"; "Summe Jahr" = "Year total"; "Ex-Tag" = "Ex-date"
+    "1 EUR =" = "1 EUR ="; "1 Einheit = EUR" = "1 unit = EUR"; "zum 52W-Hoch" = "to 52W high"; "Dienst" = "Service"; "ntfy-Server" = "ntfy server"; "ntfy-Thema" = "ntfy topic"
+    "Telegram-Token" = "Telegram token"; "Telegram-Chat-ID" = "Telegram chat ID"; "Stück:" = "Shares:"; "Kurs:" = "Price:"; "Gebühr:" = "Fee:"; "Datum:" = "Date:"; "Ticker:" = "Ticker:"
+    # command list
+    "Chart (optional Zeitraum: GP 1Y)" = "Chart (optional range: GP 1Y)"; "Beschreibung: Profil, Kennzahlen, Termine, Position" = "Description: profile, figures, dates, position"; "Nachrichten" = "News"
+    "Dividenden (ohne Ticker: Depot-Dividenden)" = "Dividends (without ticker: portfolio dividends)"; "Termine: Quartalszahlen, Ex-Tag, Zahltag" = "Dates: earnings, ex-date, pay date"
+    "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" = "Create alert: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (without ticker: alert list)"
+    "Zur Watchlist hinzufügen" = "Add to watchlist"; "Vergleich im Chart (CMP ohne Ticker = aus)" = "Compare in chart (CMP without ticker = off)"; "Transaktion erfassen / Historie" = "Book transaction / history"
+    "Portfolio-Analyse" = "Portfolio analysis"; "Terminkalender (Portfolio + Watchlist)" = "Event calendar (portfolio + watchlist)"; "Gewinner / Verlierer heute" = "Today's winners / losers"
+    "Wechselkurse" = "Exchange rates"; "Alarm-Verlauf" = "Alert history"; "Jahresreport" = "Yearly report"; "Zeitraum: TF 1D / 5D / 1M / 3M / 6M / 1Y" = "Range: TF 1D / 5D / 1M / 3M / 6M / 1Y"
+    "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <Name>, LAYOUT DEL <Name>" = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <name>, LAYOUT DEL <name>"
+    "Theme wechseln (THEME <Name>)" = "Change theme (THEME <name>)"; "Handy-Push einrichten" = "Phone push setup"; "Glossar" = "Glossary"; "Tastenkürzel und Befehle" = "Shortcuts and commands"
+    "Version, Pfade, Update-Prüfung" = "Version, paths, update check"; "Depot wechseln: PF <Name> (ohne Name: neues Depot)" = "Switch depot: PF <name> (without name: new depot)"
+    "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
+    "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
+}
+
+function Tr {
+    param([string]$Text)
+    if ([string]$script:Config.Language -ne "EN" -or -not $Text) { return $Text }
+    $t = $script:EnText[$Text]
+    if ($null -ne $t) { return $t }
+    return $Text
+}
+
+function Apply-Language {
+    # Translates the static texts of a window and its menus (English mode only)
+    param($Root)
+    if ([string]$script:Config.Language -ne "EN" -or $null -eq $Root) { return }
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.DataGridView]) {
+            foreach ($col in $c.Columns) { $col.HeaderText = Tr $col.HeaderText }
+        } elseif ($c -is [System.Windows.Forms.Control] -and -not ($c -is [System.Windows.Forms.TextBox]) -and -not ($c -is [System.Windows.Forms.ComboBox])) {
+            if ($c.Text) { $c.Text = Tr $c.Text }
+        }
+        if ($c -is [System.Windows.Forms.Control]) {
+            if ($null -ne $c.ContextMenuStrip) { $stack.Push($c.ContextMenuStrip) }
+            foreach ($ch in $c.Controls) { $stack.Push($ch) }
+        }
+        if ($c -is [System.Windows.Forms.ToolStrip]) { foreach ($it in $c.Items) { $stack.Push($it) } }
+        if ($c -is [System.Windows.Forms.ToolStripItem]) {
+            if ($c.Text) { $c.Text = Tr $c.Text }
+            if ($c -is [System.Windows.Forms.ToolStripDropDownItem]) { foreach ($it in $c.DropDownItems) { $stack.Push($it) } }
+        }
+    }
+}
+
 function Set-Tip {
     param([System.Windows.Forms.Control]$Ctl, [string]$Text, [string]$Key = "")
     if ($null -eq $Ctl) { return }
+    $Text = Tr $Text
     $script:TipReg[$Ctl] = @{ Text = $Text; Key = $Key }
     $toolTip.SetToolTip($Ctl, (Get-TooltipText -Text $Text -Key $Key -Mode (Get-TipModeNow)))
 }
@@ -3517,6 +3618,7 @@ function Set-Tip {
 function Set-DynTip {
     param([System.Windows.Forms.Control]$Ctl, [string]$Text, [string]$Key = "")
     if ($null -eq $Ctl -or $Ctl.IsDisposed) { return }
+    $Text = Tr $Text
     $toolTip.SetToolTip($Ctl, (Get-TooltipText -Text $Text -Key $Key -Mode (Get-TipModeNow)))
 }
 
@@ -6834,6 +6936,9 @@ function New-DialogForm {
     $d.BackColor = $p.BodyBg; $d.ForeColor = $p.Text; $d.Font = $fontUi
     $d.TopMost = $form.TopMost
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
+    # v4.7: English mode translates the static texts once the dialog is built
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
+    $d.Text = Tr $Title
     return $d
 }
 
@@ -9110,7 +9215,7 @@ function Update-PaletteSuggestions {
     $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }) -Layouts @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name }))
     $pc.List.BeginUpdate()
     $pc.List.Items.Clear()
-    foreach ($it in $pc.Items) { [void]$pc.List.Items.Add($it.Text) }
+    foreach ($it in $pc.Items) { $it.Desc = Tr ([string]$it.Desc); [void]$pc.List.Items.Add($it.Text) }
     $pc.List.EndUpdate()
     $pc.List.SelectedIndex = -1
     $pc.Err.Text = ""
@@ -9287,6 +9392,7 @@ function Get-PrioMarketStates {
 
 function Show-InfoBox {
     param([string]$Text, [string]$Title = "Hinweis")
+    if ($env:TW_SMOKE_TEST) { Write-WidgetLog "InfoBox: $Text"; return }
     $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
     [void][System.Windows.Forms.MessageBox]::Show($owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 }
@@ -10305,6 +10411,7 @@ function Show-SettingsDialog {
     & $addSection "Darstellung"
     $cbTheme  = & $addCombo "Theme" @(Get-ThemeNames) ([string]$cfg.Theme) "" "THEME"
     $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen"
+    $cbLang   = & $addCombo "Sprache" @("Deutsch", "English") $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart."
     $chkTop   = & $addCheck "Immer im Vordergrund" ([bool]$cfg.TopMost) "" "PIN"
     $chkTape  = & $addCheck "Laufleiste (Watchlist) im Compact-Layout" ([bool]$cfg.CompactTape)
 
@@ -10513,6 +10620,7 @@ function Show-SettingsDialog {
     $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 78)))
 
     $script:SettingsAfter = $null
+    Apply-Language $dlg
     $res = $dlg.ShowDialog($form)
     $script:SettingsCtl = $null
     # v4.5: data actions run after the settings window is gone (changes there are discarded)
@@ -10548,6 +10656,9 @@ function Show-SettingsDialog {
     $cfg.TerminalChartPct      = [int]$nTChart.Value
     foreach ($mk in $modes.Keys) { if ($modes[$mk] -eq [string]$cbTip.SelectedItem) { $cfg.TooltipMode = $mk } }
     $cfg.TooltipDelayMs        = [int]$nTipDelay.Value
+    $newLang = if ([string]$cbLang.SelectedItem -eq "English") { "EN" } else { "DE" }
+    $langChanged = ($newLang -ne [string]$cfg.Language)
+    $cfg.Language              = $newLang
     # v4.6
     if ([string]$cbMa.SelectedItem -ne [string]$cfg.MaType -or [string]$cbLow.SelectedItem -ne [string]$cfg.LowerPanel) { $needRefresh = $true }
     $cfg.MaType                = [string]$cbMa.SelectedItem
@@ -10592,6 +10703,10 @@ function Show-SettingsDialog {
     Apply-Layout $newLayout
     if ($needRefresh) { Refresh-AllMarketData -Force }
     Set-TransientStatus "Einstellungen gespeichert" 3
+    if ($langChanged -and (Confirm-Action -Text "Die Sprache wirkt nach einem Neustart. Jetzt neu starten? / Restart now to switch the language?" -Title "Sprache / Language")) {
+        Restart-Widget
+        return
+    }
     if ($hkChanged) {
         $hm = Register-GlobalHotkey
         if ($hm -and $hm -ne "aus") { Set-TransientStatus "Tastenkürzel: $hm" 6 }
@@ -10663,6 +10778,41 @@ function Show-GlossaryDialog {
 }
 
 function Show-ShortcutHelp {
+    if ([string]$script:Config.Language -eq "EN") {
+        $txtEn = @"
+Keyboard shortcuts
+
+F1 / F2 / F3    Chart / Portfolio / Watch & alerts
+F5              Refresh now
+Ctrl+F          Search ticker
+Ctrl+K          Command line (also numpad /)
+Ctrl+Z          Undo the last deletion (10 seconds)
+Ctrl+Alt+W      Show / hide the widget from anywhere
+Left / Right    Previous / next watchlist ticker
+1 - 6           Range 1D / 5D / 1M / 3M / 6M / 1Y
+F11             Fullscreen chart
+
+K  line / candles      V  volume
+M  SMA/EMA             A  VWAP
+B  Bollinger           R  RSI / MACD
+E  pre/post market     W  currency
+T  theme               C  compact on/off
+L  next layout         G  glossary
+P  portfolio analysis  S  settings
+H  this help           Z  reset zoom   X  compare
+
+Command line: NVDA, NVDA GP 1Y, NVDA DES, NVDA N, NVDA DVD,
+NVDA EE, NVDA ALRT TRAIL 8, NVDA WL, PORT, ANA, DVD, CAL, TOP,
+FX, LOG, REP, TF 3M, LAYOUT TERMINAL, LAYOUT SAVE <name>,
+IND MACD, PF <depot>, IMP, BAK, SET, PUSH, ABOUT, TOUR
+
+Right-click a column header = choose columns, drag = reorder.
+Hover over controls for explanations (glossary is German).
+"@
+        [System.Windows.Forms.MessageBox]::Show($form, $txtEn, "Help - $($script:AppTitle)",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        return
+    }
     $txt = @"
 Tastenkürzel
 
@@ -11787,7 +11937,7 @@ $uiTimer.Add_Tick({
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
         if ($script:PushPending.Count -gt 0) { Pump-PushTasks }
-        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown) {
+        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown -and -not $script:SmokeMode) {
             $script:TourShown = $true
             Show-WelcomeTour
         }
@@ -11871,6 +12021,149 @@ $form.Add_FormClosing({
     # be on the call stack (inside DoEvents) and must not hit disposed objects.
 })
 
+# ==============================================================================
+# v4.7: UI smoke test (CI). TW_SMOKE_TEST = report path. Starts the real
+# window, opens every dialog (closed again by a timer), runs commands and
+# layout switches, then writes a JSON report and exits with the error count.
+# ==============================================================================
+$script:SmokeMode = [bool]$env:TW_SMOKE_TEST
+$script:SmokeSteps = New-Object System.Collections.Generic.List[PSObject]
+$script:SmokeFailures = New-Object System.Collections.Generic.List[string]
+$script:SmokeNotes = New-Object System.Collections.Generic.List[string]
+$script:SmokeProgErrors = @("CommandNotFoundException", "ParameterBindingFailed", "ParameterArgumentTransformationError", "NamedParameterNotFound",
+    "PositionalParameterNotFound", "MethodNotFound", "MethodCountCouldNotFindBest", "InvokeMethodOnNull", "NullArray", "PropertyAssignmentException",
+    "PropertyNotFound", "InvalidCastFromStringToInteger", "ArgumentTransformationError", "RuntimeException", "IndexOutOfRangeException", "NullReferenceException", "VariableIsUndefined")
+
+function Get-SmokeErrors {
+    # Errors since the last call: programming errors fail the step, the rest are notes
+    param([string]$Step)
+    $fails = @()
+    if ($global:Error.Count -gt 0) {
+        $errs = @($global:Error)
+        $global:Error.Clear()
+        [array]::Reverse($errs)
+        foreach ($er in $errs) {
+            $id = [string]$er.FullyQualifiedErrorId
+            $ln = if ($er.InvocationInfo) { $er.InvocationInfo.ScriptLineNumber } else { 0 }
+            $msg = "{0} @ line {1}: {2} [{3}]" -f $Step, $ln, $er.ToString(), $id
+            $isProg = $false
+            foreach ($p in $script:SmokeProgErrors) { if ($id -like "$p*") { $isProg = $true; break } }
+            if ($isProg) { $fails += $msg } else { $script:SmokeNotes.Add($msg) }
+        }
+    }
+    return $fails
+}
+
+function Invoke-SmokeStep {
+    param([string]$Name, [scriptblock]$Action, [int]$CloseAfterMs = 1200)
+    [void](Get-SmokeErrors -Step "before $Name")
+    $script:SmokeCloser.Interval = $CloseAfterMs
+    $script:SmokeCloser.Start()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ok = $true; $err = ""
+    try { & $Action } catch { $ok = $false; $err = "{0} @ line {1}" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber }
+    $script:SmokeCloser.Stop()
+    foreach ($f in @(Get-SmokeErrors -Step $Name)) { $ok = $false; $script:SmokeFailures.Add($f) }
+    if ($err) { $script:SmokeFailures.Add("$Name : $err") }
+    $script:SmokeSteps.Add([PSCustomObject]@{ Name = $Name; Ok = $ok; Ms = $sw.ElapsedMilliseconds; Error = $err })
+}
+
+$script:SmokeCloser = New-Object System.Windows.Forms.Timer
+$script:SmokeCloser.Add_Tick({
+    # closes every window except the main window (and the fullscreen chart)
+    foreach ($f in @([System.Windows.Forms.Application]::OpenForms)) {
+        if ([object]::ReferenceEquals($f, $form) -or ($null -ne $script:FsForm -and [object]::ReferenceEquals($f, $script:FsForm))) { continue }
+        try { $f.Close() } catch { }
+    }
+})
+
+function Invoke-SmokeTest {
+    $pump = { [System.Windows.Forms.Application]::DoEvents() }
+    Invoke-SmokeStep "Refresh" { Refresh-AllMarketData -Force; for ($i = 0; $i -lt 60 -and $script:IsRefreshing; $i++) { Start-Sleep -Milliseconds 250; & $pump }; Evaluate-GlobalAlerts; Update-AllUiViews }
+    foreach ($lay in @("Terminal", "Standard", "Compact", "Ticker", "Standard")) { Invoke-SmokeStep "Layout $lay" { Apply-Layout $lay; & $pump } }
+    foreach ($tab in @("Chart", "Portfolio", "Watchlist", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
+    foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
+    foreach ($cmd in @("TF 1Y", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
+        Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
+    }
+    Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
+    $dialogs = [ordered]@{
+        "Settings" = { Show-SettingsDialog }
+        "Glossary" = { Show-GlossaryDialog }
+        "Analysis Perf" = { Show-AnalysisDialog -Page "Perf" }
+        "Analysis Ret" = { Show-AnalysisDialog -Page "Ret" }
+        "Analysis Alloc" = { Show-AnalysisDialog -Page "Alloc" }
+        "Analysis Div" = { Show-AnalysisDialog -Page "Div" }
+        "Transaction history" = { Show-TransactionHistory }
+        "Transaction dialog" = { Show-TransactionDialog -Ticker "NVDA" }
+        "Year report" = { Show-YearReport }
+        "Buy dates" = { [void](Show-BuyDatesDialog) }
+        "Alert log" = { Show-AlertLogDialog }
+        "Push" = { [void](Show-PushDialog) }
+        "News" = { Show-NewsDialog "NVDA" }
+        "Description" = { Show-DescriptionDialog "NVDA" }
+        "Ticker dividends" = { Show-TickerDividendsDialog "MSFT" }
+        "Calendar" = { Show-CalendarDialog }
+        "Movers" = { Show-MoversDialog }
+        "FX" = { Show-FxDialog }
+        "About" = { Show-AboutDialog }
+        "Restore" = { Show-RestoreDialog }
+        "Compare" = { Show-CompareDialog }
+        "Command palette" = { Show-CommandPalette -Initial "NV" }
+        "Welcome tour" = { Show-WelcomeTour }
+    }
+    foreach ($k in $dialogs.Keys) { Invoke-SmokeStep "Dialog $k" $dialogs[$k] 2500 }
+    Invoke-SmokeStep "Depot switch" {
+        $script:Config.Depots = @([PSCustomObject]@{ Id = "smoke"; Name = "Smoke" })
+        Switch-Depot "smoke"; & $pump
+        Switch-Depot ""; & $pump
+    }
+    Invoke-SmokeStep "Undo" {
+        $script:Alerts.Add([PSCustomObject]@{ Id = "x"; Ticker = "AAPL"; Condition = ">="; TargetPrice = 1.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
+        Update-AllUiViews
+        $lstAlerts.SelectedIndex = $script:Alerts.Count - 1
+        $btnDelAlert.PerformClick()
+        [void](Invoke-Undo)
+    }
+    Invoke-SmokeStep "Click-through" { Set-ClickThrough $true; Set-ClickThrough $false }
+    Invoke-SmokeStep "Backup" { [void](Backup-DataFiles -Reason "smoke"); Invoke-DailyBackup }
+    Invoke-SmokeStep "English main window" { $script:Config.Language = "EN"; Apply-Language $form; Apply-Language $trayMenu; Apply-Language $chartContextMenu; Update-AllUiViews; & $pump }
+    Invoke-SmokeStep "English settings" { Show-SettingsDialog } 2500
+    Invoke-SmokeStep "English analysis" { Show-AnalysisDialog -Page "Div" } 2500
+    Invoke-SmokeStep "English palette" { Show-CommandPalette -Initial "NVDA " } 2000
+    Invoke-SmokeStep "English help text" { if (-not (Get-Command Show-ShortcutHelp -ErrorAction SilentlyContinue)) { throw "help missing" } }
+    $script:Config.Language = "DE"
+    Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
+
+    $rep = [PSCustomObject]@{
+        PowerShell = $PSVersionTable.PSVersion.ToString(); Version = $script:AppVersion
+        Steps = $script:SmokeSteps.ToArray(); Failures = $script:SmokeFailures.ToArray(); Notes = $script:SmokeNotes.ToArray()
+    }
+    try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, ($rep | ConvertTo-Json -Depth 5), [System.Text.Encoding]::UTF8) } catch { }
+    $script:SmokeExit = $script:SmokeFailures.Count
+    $trayIcon.Visible = $false
+    $form.Close()
+}
+
+$script:SmokeExit = 99
+if ($script:SmokeMode) {
+    $script:SmokeStarter = New-Object System.Windows.Forms.Timer
+    $script:SmokeStarter.Interval = 3000
+    $script:SmokeStarter.Add_Tick({
+        $script:SmokeStarter.Stop()
+        try { Invoke-SmokeTest } catch {
+            $script:SmokeFailures.Add("Smoke runner: $($_.Exception.Message) @ line $($_.InvocationInfo.ScriptLineNumber)")
+            try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, (@{ Failures = $script:SmokeFailures.ToArray(); Steps = $script:SmokeSteps.ToArray() } | ConvertTo-Json -Depth 5)) } catch { }
+            $script:SmokeExit = 98
+            $form.Close()
+        }
+    })
+    $form.Add_Shown({ $script:SmokeStarter.Start() })
+}
+
+# v4.7: English mode for the main window and its menus
+try { Apply-Language $form; Apply-Language $trayMenu; Apply-Language $chartContextMenu } catch { Write-WidgetLog "Language: $($_.Exception.Message)" "WARN" }
+
 Write-WidgetLog "Starting message loop"
 try {
     [void][System.Windows.Forms.Application]::Run($form)
@@ -11897,3 +12190,4 @@ try {
         $script:AppMutex.Dispose()
     }
 }
+if ($script:SmokeMode) { exit ([int]$script:SmokeExit) }
