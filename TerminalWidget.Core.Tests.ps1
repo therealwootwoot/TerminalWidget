@@ -665,3 +665,217 @@ Describe "FX history and yearly report (v4.0)" {
         Get-EarliestBookingDate -Transactions $tx | Should -Be "2025-01-02"
     }
 }
+
+# ==============================================================================
+# v4.1: portfolio analytics
+# ==============================================================================
+Describe "Stock splits (v4.1)" {
+    BeforeAll {
+        $script:Spl = @{ "NVDA" = @([PSCustomObject]@{ Date = "2024-06-10"; Ratio = 10.0 }) }
+        $script:SplTx = @(
+            [PSCustomObject]@{ Date = "2024-01-02"; Ticker = "NVDA"; Type = "Kauf";    Shares = 10; Price = 1000; Fee = 0; Currency = "EUR" }
+            [PSCustomObject]@{ Date = "2026-02-02"; Ticker = "NVDA"; Type = "Verkauf"; Shares = 50; Price = 130;  Fee = 0; Currency = "EUR" }
+        )
+    }
+    It "rebuilds a position across a split" {
+        $p = Get-PositionFromTransactions -Transactions $script:SplTx -Ticker "NVDA" -Splits $script:Spl
+        $p.Shares | Should -Be 50
+        $p.AvgPrice | Should -Be 100
+        $p.Realized | Should -Be 1500
+        $p.Clamped | Should -BeFalse
+        $p.Splits | Should -Be 1
+    }
+    It "applies a split after the last booking to today's holding" {
+        $tx = @([PSCustomObject]@{ Date = "2024-01-02"; Ticker = "NVDA"; Type = "Kauf"; Shares = 3; Price = 500; Fee = 0; Currency = "EUR" })
+        $p = Get-PositionFromTransactions -Transactions $tx -Ticker "NVDA" -Splits $script:Spl
+        $p.Shares | Should -Be 30
+        $p.AvgPrice | Should -Be 50
+    }
+    It "does not clamp a post-split sale in the yearly report" {
+        $rep = Get-RealizedReport -Transactions $script:SplTx -Year 2026 -Splits $script:Spl
+        @($rep.Warnings).Count | Should -Be 0
+        $rep.Rows[0].Shares | Should -Be 50
+        $rep.Totals.Gains | Should -Be 1500    # 50 x 130 - 50 x (10000 / 100)
+    }
+    It "sorts split events and ignores invalid ones" {
+        $s = @{ "X" = @(@{ Date = "2025-01-01"; Ratio = 2.0 }, @{ Date = "2020-01-01"; Ratio = 4.0 }, @{ Date = "2021-01-01"; Ratio = 0 }) }
+        $ev = @(Get-SplitEvents -Splits $s -Ticker "x")
+        $ev.Count | Should -Be 2
+        $ev[0].Date | Should -Be "2020-01-01"
+        @(Get-SplitEvents -Splits $s -Ticker "Y").Count | Should -Be 0
+    }
+}
+
+Describe "Daily history and alignment (v4.1)" {
+    It "parses closes, pence, splits and dividends" {
+        $json = [PSCustomObject]@{ chart = [PSCustomObject]@{ result = @([PSCustomObject]@{
+            meta = [PSCustomObject]@{ gmtoffset = 0; currency = "GBp" }
+            timestamp = @(1767225600, 1767312000, 1767398400)
+            indicators = [PSCustomObject]@{ quote = @([PSCustomObject]@{ close = @(1000.0, $null, 1010.0) }) }
+            events = [PSCustomObject]@{
+                splits = [PSCustomObject]@{ "1767312000" = [PSCustomObject]@{ date = 1767312000; numerator = 4; denominator = 1 } }
+                dividends = [PSCustomObject]@{ "1767225600" = [PSCustomObject]@{ date = 1767225600; amount = 25.0 } }
+            }
+        }) } }
+        $h = ConvertFrom-YahooDailyHistory -Json $json
+        $h.Currency | Should -Be "GBP"
+        $h.Dates | Should -Be @("2026-01-01", "2026-01-03")
+        $h.Closes | Should -Be @(10.0, 10.1)
+        $h.Splits[0].Date | Should -Be "2026-01-02"
+        $h.Splits[0].Ratio | Should -Be 4
+        $h.Dividends[0].Amount | Should -Be 0.25
+        ConvertFrom-YahooDailyHistory -Json $null | Should -BeNullOrEmpty
+    }
+    It "aligns a history to a date axis (last value on or before)" {
+        $a = Get-AlignedSeries -Target @("2026-01-01", "2026-01-03", "2026-01-04", "2026-01-09") -Dates @("2026-01-02", "2026-01-04", "2026-01-08") -Values @(1.0, 2.0, 3.0)
+        $a | Should -Be @(1.0, 1.0, 2.0, 3.0)
+        [double]::IsNaN((Get-AlignedSeries -Target @("2026-01-01") -Dates @() -Values @())[0]) | Should -BeTrue
+    }
+    It "looks up a single date" {
+        Get-HistoryValueOnDate -Dates @("2026-01-02", "2026-01-05") -Values @(5.0, 6.0) -Date "2026-01-04" | Should -Be 5
+        Get-HistoryValueOnDate -Dates @("2026-01-02", "2026-01-05") -Values @(5.0, 6.0) -Date "2026-01-01" | Should -Be 5
+    }
+    It "builds FX factors to the base currency, with fallback" {
+        $hist = @{ "USD" = @{ Dates = @("2026-01-01", "2026-01-02"); Rates = @(1.25, 1.20) } }
+        $f = Get-AlignedFxToBase -Target @("2026-01-01", "2026-01-02") -Currency "USD" -Base "EUR" -History $hist
+        $f.Factor | Should -Be @(0.8, (1 / 1.2))
+        $f.Approx | Should -BeFalse
+        $g = Get-AlignedFxToBase -Target @("2026-01-01") -Currency "JPY" -Base "EUR" -History $hist -FallbackFromEur @{ JPY = 160.0 }
+        $g.Factor[0] | Should -Be 0.00625
+        $g.Approx | Should -BeTrue
+    }
+}
+
+Describe "Ledger and XIRR (v4.1)" {
+    BeforeAll {
+        $script:H41 = @{ "USD" = @{ Dates = @("2025-03-03", "2025-06-02", "2026-02-02"); Rates = @(1.25, 1.10, 1.20) } }
+    }
+    It "replays all bookings in the base currency with cash flows" {
+        $tx = @(
+            [PSCustomObject]@{ Date = "2025-03-03"; Ticker = "X"; Type = "Kauf";      Shares = 10; Price = 100; Fee = 5;  Currency = "USD" }
+            [PSCustomObject]@{ Date = "2025-06-02"; Ticker = "X"; Type = "Kauf";      Shares = 10; Price = 110; Fee = 0;  Currency = "USD" }
+            [PSCustomObject]@{ Date = "2026-02-02"; Ticker = "X"; Type = "Verkauf";   Shares = 5;  Price = 120; Fee = 12; Currency = "USD" }
+            [PSCustomObject]@{ Date = "2026-02-02"; Ticker = "X"; Type = "Dividende"; Shares = 0;  Price = 24;  Fee = 6;  Currency = "USD" }
+        )
+        $l = (Get-PortfolioLedger -Transactions $tx -Base "EUR" -History $script:H41 -AsOf "2026-03-01")["X"]
+        $l.Shares | Should -Be 15
+        [math]::Round($l.Cost, 6) | Should -Be 1353         # 1804 - 451
+        [math]::Round($l.Realized, 6) | Should -Be 39
+        [math]::Round($l.Dividends, 6) | Should -Be 15      # 18 / 1.20
+        [math]::Round($l.Bought, 6) | Should -Be 1804
+        $l.FirstDate | Should -Be "2025-03-03"
+        $l.CfAmounts.Count | Should -Be 4
+        ($l.CfKinds -join "") | Should -Be "BBSD"
+        [math]::Round(($l.CfAmounts | Measure-Object -Sum).Sum, 6) | Should -Be (-1804 + 490 + 15)
+    }
+    It "scales today's shares by splits after the last booking" {
+        $tx = @([PSCustomObject]@{ Date = "2024-01-02"; Ticker = "NVDA"; Type = "Kauf"; Shares = 3; Price = 500; Fee = 0; Currency = "EUR" })
+        $l = (Get-PortfolioLedger -Transactions $tx -Splits @{ "NVDA" = @([PSCustomObject]@{ Date = "2024-06-10"; Ratio = 10.0 }) } -AsOf "2026-01-01")["NVDA"]
+        $l.Shares | Should -Be 30
+        $l.Cost | Should -Be 1500
+    }
+    It "lists positions not covered by bookings" {
+        $pf = @{ "A" = [PSCustomObject]@{ Shares = 10 }; "B" = [PSCustomObject]@{ Shares = 5 } }
+        $lg = @{ "A" = [PSCustomObject]@{ Shares = 10.0 } }
+        $u = @(Get-UncoveredPositions -Portfolio $pf -Ledger $lg)
+        $u.Count | Should -Be 1
+        $u[0].Ticker | Should -Be "B"
+        $u[0].Missing | Should -Be 5
+    }
+    It "computes XIRR <Expected>" -TestCases @(
+        @{ D = @("2025-01-01", "2026-01-01"); A = @(-1000.0, 1100.0); Expected = 0.1 }
+        @{ D = @("2025-01-01", "2025-07-02", "2026-01-01"); A = @(-1000.0, -1000.0, 2200.0); Expected = 0.134627 }
+        @{ D = @("2024-01-01", "2024-06-01", "2026-01-01"); A = @(-1000.0, 50.0, 800.0); Expected = -0.08136 }
+    ) {
+        [math]::Round((Get-Xirr -Dates $D -Amounts $A), 5) | Should -Be ([math]::Round($Expected, 5))
+    }
+    It "returns NaN without money in and out" {
+        [double]::IsNaN((Get-Xirr -Dates @("2025-01-01", "2026-01-01") -Amounts @(-1.0, -2.0))) | Should -BeTrue
+        [double]::IsNaN((Get-Xirr -Dates @("2025-01-01") -Amounts @(-1.0))) | Should -BeTrue
+    }
+}
+
+Describe "Value history and benchmark (v4.1)" {
+    It "rebuilds the value curve and the benchmark shadow portfolio" {
+        $d = @("2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07")
+        $prices = @{ "X" = @{ Dates = $d; Closes = @(10.0, 11.0, 12.0, 13.0); Currency = "EUR"; Splits = @() } }
+        $bench = @{ Dates = $d; Closes = @(100.0, 100.0, 110.0, 120.0); Currency = "EUR" }
+        $tx = @(
+            [PSCustomObject]@{ Date = "2026-01-02"; Ticker = "X"; Type = "Kauf";      Shares = 10; Price = 10; Fee = 0; Currency = "EUR" }
+            [PSCustomObject]@{ Date = "2026-01-06"; Ticker = "X"; Type = "Verkauf";   Shares = 5;  Price = 12; Fee = 0; Currency = "EUR" }
+            [PSCustomObject]@{ Date = "2026-01-07"; Ticker = "X"; Type = "Dividende"; Shares = 0;  Price = 3;  Fee = 1; Currency = "EUR" }
+        )
+        $v = Get-PortfolioValueSeries -Transactions $tx -Prices $prices -Benchmark $bench -EndDate "2026-01-07"
+        $v.Dates | Should -Be $d
+        $v.Value | Should -Be @(100.0, 110.0, 60.0, 65.0)
+        $v.Invested | Should -Be @(100.0, 100.0, 40.0, 40.0)
+        $v.Dividends | Should -Be @(0.0, 0.0, 0.0, 2.0)
+        [math]::Round($v.Bench[2], 6) | Should -Be 50
+        [math]::Round($v.Bench[3], 6) | Should -Be ([math]::Round(120 * (1 - 60 / 110), 6))
+        @($v.Missing).Count | Should -Be 0
+    }
+    It "values pre-split bookings with split-adjusted closes" {
+        $prices = @{ "S" = @{ Dates = @("2024-06-03", "2024-06-10", "2024-06-11"); Closes = @(10.0, 11.0, 12.0); Currency = "EUR"; Splits = @([PSCustomObject]@{ Date = "2024-06-10"; Ratio = 10.0 }) } }
+        $tx = @(
+            [PSCustomObject]@{ Date = "2024-06-03"; Ticker = "S"; Type = "Kauf";    Shares = 10; Price = 100; Fee = 0; Currency = "EUR" }
+            [PSCustomObject]@{ Date = "2024-06-11"; Ticker = "S"; Type = "Verkauf"; Shares = 50; Price = 12;  Fee = 0; Currency = "EUR" }
+        )
+        $v = Get-PortfolioValueSeries -Transactions $tx -Prices $prices -EndDate "2024-06-11"
+        $v.Value | Should -Be @(1000.0, 1100.0, 600.0)
+        $v.Bench | Should -BeNullOrEmpty
+    }
+    It "reports tickers without price history" {
+        $tx = @([PSCustomObject]@{ Date = "2026-01-02"; Ticker = "Y"; Type = "Kauf"; Shares = 1; Price = 1; Fee = 0; Currency = "EUR" })
+        Get-PortfolioValueSeries -Transactions $tx -Prices @{} -EndDate "2026-01-07" | Should -BeNullOrEmpty
+        Get-PortfolioValueSeries -Transactions @() -Prices @{} | Should -BeNullOrEmpty
+    }
+    It "finds the start of a time window" {
+        $d = @("2023-01-02", "2025-06-30", "2025-07-05", "2026-01-02")
+        Get-SeriesWindowStart -Dates $d -Range "6M" | Should -Be 2
+        Get-SeriesWindowStart -Dates $d -Range "1Y" | Should -Be 1
+        Get-SeriesWindowStart -Dates $d -Range "Max" | Should -Be 0
+    }
+}
+
+Describe "Allocation and profiles (v4.1)" {
+    It "groups values and computes shares" {
+        $g = @(Get-AllocationBreakdown -Items @(
+            [PSCustomObject]@{ Key = "USD"; Value = 600 }, [PSCustomObject]@{ Key = "EUR"; Value = 300 },
+            [PSCustomObject]@{ Key = "USD"; Value = 100 }, [PSCustomObject]@{ Key = ""; Value = 0 }, [PSCustomObject]@{ Key = ""; Value = 0.0001 }))
+        $g[0].Key | Should -Be "USD"
+        [math]::Round($g[0].Pct, 4) | Should -Be ([math]::Round(700 / 1000.0001 * 100, 4))
+        $g.Count | Should -Be 3
+        $g[2].Key | Should -Be "Unbekannt"
+        @(Get-ConcentrationWarnings -Groups $g -ThresholdPct 20).Count | Should -Be 2
+    }
+    It "reads sector and country from quoteSummary and falls back to the search" {
+        $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{
+            assetProfile = [PSCustomObject]@{ sector = "Technology"; industry = "Semiconductors"; country = "United States" }
+            quoteType = [PSCustomObject]@{ quoteType = "EQUITY"; longName = "NVIDIA Corporation" } }) } }
+        $p = ConvertFrom-YahooProfile -Summary $sum -Search $null -Symbol "NVDA"
+        $p.Sector | Should -Be "Technology"
+        $p.Country | Should -Be "United States"
+        $srch = [PSCustomObject]@{ quotes = @([PSCustomObject]@{ symbol = "abbn.sw"; quoteType = "EQUITY"; sectorDisp = "Industrials"; industryDisp = "Electrical Equipment"; longname = "ABB Ltd" }) }
+        $q = ConvertFrom-YahooProfile -Summary $null -Search $srch -Symbol "ABBN.SW"
+        $q.Sector | Should -Be "Industrials"
+        $q.Country | Should -Be ""
+        $q.Name | Should -Be "ABB Ltd"
+    }
+    It "prefers manual values, then Yahoo, then the instrument type" {
+        $e = Get-EffectiveProfile ([PSCustomObject]@{ Sector = "Technology"; Country = "United States"; ManualCountry = "Taiwan"; QuoteType = "EQUITY" })
+        $e.Sector | Should -Be "Technologie"
+        $e.SectorSource | Should -Be "Yahoo"
+        $e.Country | Should -Be "Taiwan"
+        $e.CountrySource | Should -Be "manuell"
+        $f = Get-EffectiveProfile ([PSCustomObject]@{ QuoteType = "ETF" })
+        $f.Sector | Should -Be "ETF / Fonds"
+        (Get-EffectiveProfile $null).Country | Should -Be "Unbekannt"
+        Get-CountryLabel "Austria" | Should -Be "Österreich"
+    }
+    It "refreshes profiles older than 30 days" {
+        $now = Get-Date "2026-11-23T12:00:00"
+        Test-ProfileStale -Entry $null -Now $now | Should -BeTrue
+        Test-ProfileStale -Entry ([PSCustomObject]@{ FetchedAt = "2026-11-01T12:00:00" }) -Now $now | Should -BeFalse
+        Test-ProfileStale -Entry ([PSCustomObject]@{ FetchedAt = "2026-10-01T12:00:00" }) -Now $now | Should -BeTrue
+    }
+}
