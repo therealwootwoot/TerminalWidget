@@ -1390,3 +1390,78 @@ Describe "Depots and backups (v4.5)" {
         (Get-BackupInfo "foo").When | Should -Be ([DateTime]::MinValue)
     }
 }
+
+# ==============================================================================
+# v4.6
+# ==============================================================================
+Describe "EMA and MACD (v4.6)" {
+    It "computes the EMA" {
+        $e = Compute-Ema -Prices @(1.0, 2.0, 3.0, 4.0, 5.0) -Period 3
+        [double]::IsNaN($e[1]) | Should -BeTrue
+        $e[2] | Should -Be 2
+        $e[3] | Should -Be 3
+        $e[4] | Should -Be 4
+        @(Compute-Ema -Prices @(1.0) -Period 3).Count | Should -Be 1
+    }
+    It "computes MACD, signal and histogram" {
+        $p = [double[]]@(1..60 | ForEach-Object { 100 + [math]::Sin($_ / 3.0) * 5 + $_ * 0.2 })
+        $m = Compute-Macd -Prices $p
+        [double]::IsNaN($m.Macd[24]) | Should -BeTrue
+        [double]::IsNaN($m.Macd[25]) | Should -BeFalse
+        [double]::IsNaN($m.Signal[32]) | Should -BeTrue
+        [double]::IsNaN($m.Signal[33]) | Should -BeFalse
+        [math]::Round($m.Hist[50], 10) | Should -Be ([math]::Round($m.Macd[50] - $m.Signal[50], 10))
+    }
+    It "is flat for a constant series" {
+        $m = Compute-Macd -Prices ([double[]]@(1..40 | ForEach-Object { 50.0 }))
+        $m.Macd[39] | Should -Be 0
+        $m.Hist[39] | Should -Be 0
+    }
+}
+
+Describe "Colours, hotkeys, layout helpers (v4.6)" {
+    It "converts hex colours" {
+        (ConvertFrom-HexColor "#3B82F6") -join "," | Should -Be "59,130,246"
+        (ConvertFrom-HexColor "ffffff") -join "," | Should -Be "255,255,255"
+        ConvertFrom-HexColor "#12" | Should -BeNullOrEmpty
+        ConvertTo-HexColor 59 130 246 | Should -Be "#3B82F6"
+    }
+    It "picks up/down colours" {
+        (Get-UpDownColors "Farbenblind").Up -join "," | Should -Be "59,130,246"
+        (Get-UpDownColors "Eigene" "#010203" "#040506").Down -join "," | Should -Be "4,5,6"
+        (Get-UpDownColors "Eigene" "kaputt" "").Up -join "," | Should -Be "16,185,129"
+        (Get-UpDownColors "Unbekannt").Down -join "," | Should -Be "244,63,94"
+    }
+    It "parses hotkey <T>" -TestCases @(
+        @{ T = "Ctrl+Alt+W"; M = 3; K = 87 }, @{ T = "Strg+Umschalt+F9"; M = 6; K = 0x78 }, @{ T = "Win+Space"; M = 8; K = 0x20 }, @{ T = "alt+1"; M = 1; K = 49 }
+    ) {
+        param($T, $M, $K)
+        $h = ConvertFrom-HotkeyText $T
+        $h.Mods | Should -Be $M
+        $h.Key | Should -Be $K
+    }
+    It "refuses hotkeys without modifier or with unknown parts" {
+        ConvertFrom-HotkeyText "W" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "Ctrl+Pfeil" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "Hyper+W" | Should -BeNullOrEmpty
+        ConvertFrom-HotkeyText "" | Should -BeNullOrEmpty
+    }
+    It "stores grid layouts" {
+        $cols = @([PSCustomObject]@{ Name = "Ticker"; DisplayIndex = 1; FillWeight = 80.0; Visible = $true }, [PSCustomObject]@{ Name = "Spark"; DisplayIndex = 0; FillWeight = 60.0; Visible = $false })
+        $l = @(ConvertTo-GridLayout $cols)
+        $l[1].Name | Should -Be "Spark"; $l[1].Visible | Should -BeFalse; $l[0].Index | Should -Be 1
+    }
+    It "snaps to screen edges" {
+        $r = Get-SnappedPosition -X 10 -Y 300 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040
+        $r.X | Should -Be 0; $r.Y | Should -Be 300; $r.Moved | Should -BeTrue
+        $r2 = Get-SnappedPosition -X 1510 -Y 735 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040
+        $r2.X | Should -Be 1520; $r2.Y | Should -Be 740
+        (Get-SnappedPosition -X 500 -Y 500 -W 400 -H 300 -AreaLeft 0 -AreaTop 0 -AreaRight 1920 -AreaBottom 1040).Moved | Should -BeFalse
+    }
+    It "knows when an undo has expired" {
+        $now = Get-Date
+        Test-UndoValid -Undo @{ Until = $now.AddSeconds(5) } -Now $now | Should -BeTrue
+        Test-UndoValid -Undo @{ Until = $now.AddSeconds(-1) } -Now $now | Should -BeFalse
+        Test-UndoValid -Undo $null | Should -BeFalse
+    }
+}

@@ -1162,6 +1162,10 @@ function Get-GlossaryEntries {
     & $add "QUIET" "Ruhezeit" "In dieser Zeit kein Ton und kein Handy-Push." "Alarme werden weiter geprüft und im Verlauf protokolliert, aber zwischen Beginn und Ende gibt es keinen Ton und keine Push-Nachricht (die Sprechblase am PC erscheint still). Über Mitternacht möglich, z. B. 22:00 bis 07:00. Gleiche Zeiten = keine Ruhezeit."
     & $add "PUSH" "Handy-Push" "Alarme aufs Handy schicken (ntfy oder Telegram)." "ntfy: kostenlose App ntfy installieren, dasselbe Thema (Topic) abonnieren wie hier eingetragen - fertig, kein Konto nötig. Das Thema ist wie ein Passwort: wer es kennt, liest mit, darum ein zufälliges nehmen. Telegram: bei @BotFather einen Bot anlegen, den Token hier eintragen, dem Bot eine Nachricht schreiben und 'Chat-ID holen' klicken. Der Token wird mit Windows (DPAPI) verschlüsselt gespeichert."
     & $add "ALERTLOG" "Alarm-Verlauf" "Liste aller ausgelösten Alarme." "Jeder Treffer wird mit Zeit, Ticker, Wert und Notiz gespeichert (die letzten 500), auch während der Ruhezeit. Ob ein Push verschickt wurde, steht in der letzten Spalte."
+    & $add "EMA" "EMA" "Exponentieller gleitender Durchschnitt." "Wie der SMA ein Durchschnitt der letzten Kurse, aber neuere Kurse zählen stärker. Reagiert dadurch schneller auf Trendwechsel, schwankt aber auch mehr. Umschalten SMA/EMA in den Einstellungen (Indikatoren)."
+    & $add "MACD" "MACD" "Trendfolge-Indikator aus zwei EMAs (12 / 26) und Signallinie (9)." "MACD-Linie = EMA12 minus EMA26 (blau), Signallinie = EMA9 der MACD-Linie (orange), Balken = Abstand beider. Kreuzt die MACD-Linie die Signallinie von unten, gilt das als Kaufsignal, von oben als Verkaufssignal. Über null = Aufwärtstrend. Statt RSI im unteren Feld: Einstellungen oder Befehl IND MACD."
+    & $add "COLORS" "Farben Plus / Minus" "Farben für steigende und fallende Werte." "Standard: Grün / Rot. Farbenblind: Blau / Orange - gut unterscheidbar bei Rot-Grün-Schwäche. Pfeile ▲▼ zeigen die Richtung zusätzlich ohne Farbe."
+    & $add "HOTKEY" "Globales Tastenkürzel" "Holt das Widget aus jedem Programm nach vorne." "Funktioniert systemweit, auch wenn ein anderes Fenster aktiv ist: einmal drücken = Widget zeigen, nochmal = verstecken. Schaltet auch 'Durchklicken' wieder aus. Format: Ctrl+Alt+W, Strg+Umschalt+F9, Win+Space."
     & $add "OPENING" "Anfangsbestand" "Nachgetragener Kauf für Stück ohne Buchung." "Für Stück, die im Portfolio-Editor eingetragen, aber nie als Kauf gebucht wurden, wird mit deinem Kaufdatum ein Kauf nachgebucht. Der Kurs wird so gewählt, dass dein EK gleich bleibt. Die Position selbst ändert sich nicht; Wertentwicklung, XIRR und Jahresreport können sie dann mitrechnen."
     $script:GlossaryCache = $e.ToArray()
     return $script:GlossaryCache
@@ -2529,7 +2533,7 @@ function Get-TerminalFunctions {
         "LOG"    = @{ Scope = "G";  Desc = "Alarm-Verlauf" }
         "REP"    = @{ Scope = "G";  Desc = "Jahresreport" }
         "TF"     = @{ Scope = "G";  Desc = "Zeitraum: TF 1D / 5D / 1M / 3M / 6M / 1Y" }
-        "LAYOUT" = @{ Scope = "G";  Desc = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER" }
+        "LAYOUT" = @{ Scope = "G";  Desc = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <Name>, LAYOUT DEL <Name>" }
         "THEME"  = @{ Scope = "G";  Desc = "Theme wechseln (THEME <Name>)" }
         "SET"    = @{ Scope = "G";  Desc = "Einstellungen" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
@@ -2539,6 +2543,9 @@ function Get-TerminalFunctions {
         "PF"     = @{ Scope = "G";  Desc = "Depot wechseln: PF <Name> (ohne Name: neues Depot)" }
         "IMP"    = @{ Scope = "G";  Desc = "Broker-CSV importieren" }
         "BAK"    = @{ Scope = "G";  Desc = "Backup wiederherstellen" }
+        "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
+        "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
+        "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
     }
 }
 
@@ -2602,7 +2609,7 @@ function ConvertFrom-AlertShorthand {
 
 function Get-CommandSuggestions {
     # Autocomplete: @(@{ Text; Desc }) for what has been typed so far
-    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12, [string[]]$Depots = @())
+    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12, [string[]]$Depots = @(), [string[]]$Layouts = @())
     $out = New-Object System.Collections.Generic.List[PSObject]
     $seen = New-Object System.Collections.Generic.HashSet[string]
     $add = {
@@ -2629,7 +2636,8 @@ function Get-CommandSuggestions {
     if ($fn.Contains($first) -and $fn[$first].Scope -like "*G*") {
         $opts = switch ($first) {
             "TF"     { @("1D", "5D", "1M", "3M", "6M", "1Y") }
-            "LAYOUT" { @("TERMINAL", "STANDARD", "COMPACT", "TICKER") }
+            "LAYOUT" { @("TERMINAL", "STANDARD", "COMPACT", "TICKER") + @($Layouts | ForEach-Object { ([string]$_).ToUpperInvariant() }) + @("SAVE") }
+            "IND"    { @("MACD", "RSI", "EMA", "SMA") }
             "PF"     { @($Depots | ForEach-Object { ([string]$_).ToUpperInvariant() }) }
             default  { @() }
         }
@@ -2966,4 +2974,131 @@ function Get-BackupInfo {
         $o.Reason = ([string]$Matches[2]).Replace('_', ' ')
     }
     return $o
+}
+
+# ==============================================================================
+# v4.6: EMA / MACD, colour schemes, hotkeys, grid layouts, window snapping
+# ==============================================================================
+function Compute-Ema {
+    # Exponential moving average; starts with the SMA of the first Period values (NaN before)
+    param([double[]]$Prices, [int]$Period)
+    $n = @($Prices).Count
+    $out = New-Object double[] $n
+    for ($i = 0; $i -lt $n; $i++) { $out[$i] = [double]::NaN }
+    if ($Period -lt 1 -or $n -lt $Period) { return ,$out }
+    $sum = 0.0
+    for ($i = 0; $i -lt $Period; $i++) { $sum += $Prices[$i] }
+    $out[$Period - 1] = $sum / $Period
+    $k = 2.0 / ($Period + 1)
+    for ($i = $Period; $i -lt $n; $i++) { $out[$i] = $Prices[$i] * $k + $out[$i - 1] * (1 - $k) }
+    return ,$out
+}
+
+function Compute-Macd {
+    # MACD line (EMA fast - EMA slow), signal (EMA of MACD), histogram
+    param([double[]]$Prices, [int]$Fast = 12, [int]$Slow = 26, [int]$Signal = 9)
+    $n = @($Prices).Count
+    $ef = Compute-Ema -Prices $Prices -Period $Fast
+    $es = Compute-Ema -Prices $Prices -Period $Slow
+    $macd = New-Object double[] $n
+    $sig = New-Object double[] $n
+    $hist = New-Object double[] $n
+    for ($i = 0; $i -lt $n; $i++) { $macd[$i] = $ef[$i] - $es[$i]; $sig[$i] = [double]::NaN; $hist[$i] = [double]::NaN }
+    $first = -1
+    for ($i = 0; $i -lt $n; $i++) { if (-not [double]::IsNaN($macd[$i])) { $first = $i; break } }
+    if ($first -ge 0 -and ($n - $first) -ge $Signal) {
+        $tail = New-Object double[] ($n - $first)
+        [Array]::Copy($macd, $first, $tail, 0, $n - $first)
+        $se = Compute-Ema -Prices $tail -Period $Signal
+        for ($i = 0; $i -lt $se.Count; $i++) {
+            $sig[$first + $i] = $se[$i]
+            if (-not [double]::IsNaN($se[$i])) { $hist[$first + $i] = $macd[$first + $i] - $se[$i] }
+        }
+    }
+    return @{ Macd = $macd; Signal = $sig; Hist = $hist }
+}
+
+function ConvertFrom-HexColor {
+    # "#3B82F6" / "3b82f6" -> @(r, g, b), $null if invalid
+    param([string]$Hex)
+    $h = ([string]$Hex).Trim().TrimStart('#')
+    if ($h -notmatch '^[0-9A-Fa-f]{6}$') { return $null }
+    return @([Convert]::ToInt32($h.Substring(0, 2), 16), [Convert]::ToInt32($h.Substring(2, 2), 16), [Convert]::ToInt32($h.Substring(4, 2), 16))
+}
+
+function ConvertTo-HexColor {
+    param([int]$R, [int]$G, [int]$B)
+    return ("#{0:X2}{1:X2}{2:X2}" -f $R, $G, $B)
+}
+
+function Get-UpDownSchemes {
+    # Up / down colours; "Farbenblind" = blue / orange (deuteranopia-safe)
+    return [ordered]@{
+        "Standard"    = @{ Up = "#10B981"; Down = "#F43F5E" }
+        "Farbenblind" = @{ Up = "#3B82F6"; Down = "#F97316" }
+        "Klassisch"   = @{ Up = "#22C55E"; Down = "#EF4444" }
+        "Terminal"    = @{ Up = "#00E676"; Down = "#FF5252" }
+    }
+}
+
+function Get-UpDownColors {
+    # Scheme name (or "Eigene" with hex values) -> @{ Up = @(r,g,b); Down = @(r,g,b) }
+    param([string]$Scheme, [string]$UpHex = "", [string]$DownHex = "")
+    $all = Get-UpDownSchemes
+    $u = $null; $d = $null
+    if ($Scheme -eq "Eigene") { $u = ConvertFrom-HexColor $UpHex; $d = ConvertFrom-HexColor $DownHex }
+    if ($null -eq $u -or $null -eq $d) {
+        $sc = if ($all.Contains($Scheme)) { $all[$Scheme] } else { $all["Standard"] }
+        $u = ConvertFrom-HexColor $sc.Up; $d = ConvertFrom-HexColor $sc.Down
+    }
+    return @{ Up = $u; Down = $d }
+}
+
+function ConvertFrom-HotkeyText {
+    # "Ctrl+Alt+W" -> @{ Mods = MOD_* bits; Key = virtual key code; Text } or $null
+    # MOD_ALT 1, MOD_CONTROL 2, MOD_SHIFT 4, MOD_WIN 8
+    param([string]$Text)
+    $parts = @(([string]$Text) -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($parts.Count -lt 2) { return $null }
+    $mods = 0
+    $names = @()
+    for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+        switch ($parts[$i].ToUpperInvariant()) {
+            { $_ -in @("CTRL", "STRG", "CONTROL") } { $mods = $mods -bor 2; $names += "Strg" }
+            "ALT" { $mods = $mods -bor 1; $names += "Alt" }
+            { $_ -in @("SHIFT", "UMSCHALT") } { $mods = $mods -bor 4; $names += "Umschalt" }
+            { $_ -in @("WIN", "WINDOWS") } { $mods = $mods -bor 8; $names += "Win" }
+            default { return $null }
+        }
+    }
+    if ($mods -eq 0) { return $null }
+    $k = $parts[$parts.Count - 1].ToUpperInvariant()
+    $vk = 0
+    if ($k -match '^[A-Z0-9]$') { $vk = [int][char]$k }
+    elseif ($k -match '^F([1-9]|1[0-2])$') { $vk = 0x6F + [int]$Matches[1] }
+    elseif ($k -eq "SPACE" -or $k -eq "LEERTASTE") { $vk = 0x20 }
+    else { return $null }
+    return @{ Mods = $mods; Key = $vk; Text = (($names + $k) -join "+") }
+}
+
+function ConvertTo-GridLayout {
+    # Columns (Name, DisplayIndex, FillWeight, Visible) -> storable list
+    param([array]$Columns)
+    return @($Columns | ForEach-Object { [PSCustomObject]@{ Name = [string]$_.Name; Index = [int]$_.DisplayIndex; Weight = [double]$_.FillWeight; Visible = [bool]$_.Visible } })
+}
+
+function Get-SnappedPosition {
+    # Snaps a window rectangle to the edges of the working area within $Dist pixels
+    param([int]$X, [int]$Y, [int]$W, [int]$H, [int]$AreaLeft, [int]$AreaTop, [int]$AreaRight, [int]$AreaBottom, [int]$Dist = 16)
+    $nx = $X; $ny = $Y
+    if ([math]::Abs($X - $AreaLeft) -le $Dist) { $nx = $AreaLeft }
+    elseif ([math]::Abs(($X + $W) - $AreaRight) -le $Dist) { $nx = $AreaRight - $W }
+    if ([math]::Abs($Y - $AreaTop) -le $Dist) { $ny = $AreaTop }
+    elseif ([math]::Abs(($Y + $H) - $AreaBottom) -le $Dist) { $ny = $AreaBottom - $H }
+    return @{ X = $nx; Y = $ny; Moved = ($nx -ne $X -or $ny -ne $Y) }
+}
+
+function Test-UndoValid {
+    param($Undo, [DateTime]$Now = (Get-Date))
+    return ($null -ne $Undo -and $null -ne $Undo.Until -and $Now -le [DateTime]$Undo.Until)
 }
