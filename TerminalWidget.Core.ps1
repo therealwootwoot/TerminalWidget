@@ -1091,7 +1091,7 @@ function Get-DataMigrationAction {
 }
 
 function Get-DataFileNames {
-    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json")
+    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -1576,7 +1576,8 @@ function Get-PortfolioLedger {
         $L = [PSCustomObject]@{
             Ticker = $sym; Currency = ""; Shares = 0.0; Cost = 0.0; Realized = 0.0; Dividends = 0.0; Fees = 0.0
             Bought = 0.0; FirstDate = ""; CfDates = (New-Object System.Collections.Generic.List[string])
-            CfAmounts = (New-Object System.Collections.Generic.List[double]); Approx = $false; Clamped = $false
+            CfAmounts = (New-Object System.Collections.Generic.List[double])
+            CfKinds = (New-Object System.Collections.Generic.List[string]); Approx = $false; Clamped = $false
         }
         $spl = @(Get-SplitEvents -Splits $Splits -Ticker $sym)
         $k = 0
@@ -1599,7 +1600,7 @@ function Get-PortfolioLedger {
                     $L.Cost += $cv.Value; $L.Bought += $cv.Value; $L.Shares += $q; $L.Fees += $fv.Value
                     if (-not $L.FirstDate) { $L.FirstDate = $date }
                     if (-not $L.Currency) { $L.Currency = $cur }
-                    $L.CfDates.Add($date); $L.CfAmounts.Add(-$cv.Value)
+                    $L.CfDates.Add($date); $L.CfAmounts.Add(-$cv.Value); $L.CfKinds.Add("B")
                     if ($cv.Approx) { $L.Approx = $true }
                 }
                 "Verkauf" {
@@ -1614,14 +1615,14 @@ function Get-PortfolioLedger {
                     $L.Cost -= $costPart
                     $L.Shares -= $q
                     if ($L.Shares -le 0.000001) { $L.Shares = 0.0; $L.Cost = 0.0 }
-                    $L.CfDates.Add($date); $L.CfAmounts.Add($pr.Value - $fe.Value)
+                    $L.CfDates.Add($date); $L.CfAmounts.Add($pr.Value - $fe.Value); $L.CfKinds.Add("S")
                     if ($pr.Approx -or $fe.Approx) { $L.Approx = $true }
                 }
                 "Dividende" {
                     if ($px -le 0) { continue }
                     $gr = Convert-AmountOnDate -Amount ($px - $fee) -From $cur -To $base -Date $date -History $History -FallbackFromEur $FallbackFromEur
                     $L.Dividends += $gr.Value
-                    $L.CfDates.Add($date); $L.CfAmounts.Add($gr.Value)
+                    $L.CfDates.Add($date); $L.CfAmounts.Add($gr.Value); $L.CfKinds.Add("D")
                     if ($gr.Approx) { $L.Approx = $true }
                 }
             }

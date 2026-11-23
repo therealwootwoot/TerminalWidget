@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.0.1"
+$script:AppVersion    = "4.1"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -431,7 +431,7 @@ function Backup-DataFiles {
     # Returns the backup folder, or "" when there was nothing to copy / it failed.
     param([string]$Reason = "manuell")
     try {
-        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json") |
+        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json") |
             ForEach-Object { Join-Path $script:DataDir $_ } | Where-Object { Test-Path $_ })
         if ($files.Count -eq 0) { return "" }
         $safe = ($Reason -replace '[^A-Za-z0-9_.-]', '_')
@@ -501,6 +501,13 @@ $defaultConfig = [PSCustomObject]@{
     TooltipMode           = "Short"           # Off / Short / Long
     TooltipDelayMs        = 400
     ReportBase            = "EUR"
+    # v4.1: portfolio analytics
+    AnalysisBenchmark     = "EUNL.DE"         # iShares Core MSCI World (Xetra, EUR); "" = none
+    AnalysisBase          = ""                # "" = display currency
+    AnalysisRange         = "Max"             # 6M / 1Y / 3Y / Max
+    AnalysisShowBench     = $true
+    AnalysisShowInvested  = $true
+    ConcentrationWarnPct  = 20
     Watchlist            = @("NVDA", "ABBN.SW", "MSFT", "AAPL", "AMD", "AMZN", "AVGO")
 }
 
@@ -552,6 +559,9 @@ if ([string]$script:Config.TooltipMode -notin @((Get-TooltipModes).Keys)) { $scr
 $script:Config.TooltipDelayMs   = [math]::Max(0, [math]::Min(5000, [int]$script:Config.TooltipDelayMs))
 $script:Config.Opacity          = [math]::Max(30, [math]::Min(100, [int]$script:Config.Opacity))
 $script:Config.TerminalChartPct = [math]::Max(25, [math]::Min(80, [int]$script:Config.TerminalChartPct))
+$script:Config.AnalysisBenchmark = ([string]$script:Config.AnalysisBenchmark).Trim().ToUpper()
+if ([string]$script:Config.AnalysisRange -notin @("6M", "1Y", "3Y", "Max")) { $script:Config.AnalysisRange = "Max" }
+$script:Config.ConcentrationWarnPct = [math]::Max(5, [math]::Min(90, [int]$script:Config.ConcentrationWarnPct))
 if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio")) { $script:Config.TerminalBottom = "Watchlist" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
 if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet")) { $script:Config.AccentColor = "Sky" }
@@ -620,6 +630,37 @@ foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @()
             Note     = [string]$t.Note
         })
     }
+}
+
+# Company profiles (v4.1): sector / country from Yahoo plus manual overrides,
+# kept apart from portfolio.json so editing a position never loses them
+$script:ProfilesPath = Join-Path $script:DataDir "profiles.json"
+$script:Profiles = @{}
+$rawProfiles = Load-JsonState -Path $script:ProfilesPath -DefaultValue $null
+if ($null -ne $rawProfiles) {
+    foreach ($prop in $rawProfiles.PSObject.Properties) {
+        if ($null -eq $prop.Value) { continue }
+        $v = $prop.Value
+        $script:Profiles[$prop.Name.ToUpper()] = [PSCustomObject]@{
+            Sector = [string]$v.Sector; Industry = [string]$v.Industry; Country = [string]$v.Country
+            QuoteType = [string]$v.QuoteType; Name = [string]$v.Name; FetchedAt = [string]$v.FetchedAt
+            ManualSector = [string]$v.ManualSector; ManualCountry = [string]$v.ManualCountry
+        }
+    }
+}
+
+function Save-Profiles {
+    Save-JsonState -Path $script:ProfilesPath -Data $script:Profiles
+}
+
+function Get-ProfileEntry {
+    # Entry of a ticker; created (empty) when missing
+    param([string]$Ticker)
+    $u = ([string]$Ticker).ToUpper()
+    if (-not $script:Profiles.ContainsKey($u)) {
+        $script:Profiles[$u] = [PSCustomObject]@{ Sector = ""; Industry = ""; Country = ""; QuoteType = ""; Name = ""; FetchedAt = ""; ManualSector = ""; ManualCountry = "" }
+    }
+    return $script:Profiles[$u]
 }
 
 # Persistent Intraday Cache
@@ -1099,6 +1140,103 @@ function Start-FetchJob {
     [void]$ps.AddArgument($Fallbacks)
     [void]$ps.AddArgument([string[]]$KnownFx)
     [void]$ps.AddArgument([bool]$AutoFx)
+    [void]$ps.AddArgument($box)
+    [void]$ps.AddArgument($script:WorkerShared)
+    $job.PS = $ps
+    $job.Async = $ps.BeginInvoke()
+    $script:FetchJobs.Add($job)
+    if (-not $script:JobTimer.Enabled) { $script:JobTimer.Start() }
+}
+
+# ------------------------------------------------------------------------------
+# Company profiles (v4.1). quoteSummary (sector, industry, country) needs a
+# Yahoo cookie (fc.yahoo.com) + crumb; the shared HttpClientHandler keeps the
+# cookie. Without a crumb only the search API is used (sector, no country).
+# ------------------------------------------------------------------------------
+$script:ProfileWorkerScript = {
+    param($Client, [string[]]$Symbols, $Box, $Shared)
+    $logs = New-Object System.Collections.Generic.List[string]
+    $res = @{}
+    $get = {
+        param([string]$U)
+        try {
+            $t = $Client.GetAsync($U)
+            while (-not $t.Wait(100)) { if ($Shared.Cancel) { return $null } }
+            $r = $t.Result
+            try { return @{ Code = [int]$r.StatusCode; Body = $r.Content.ReadAsStringAsync().Result } } finally { $r.Dispose() }
+        } catch { return $null }
+    }
+    $crumb = [string]$Shared.Crumb
+    if (-not $crumb -and -not $Shared.CrumbFailed) {
+        [void](& $get "https://fc.yahoo.com")
+        $c = & $get "https://query1.finance.yahoo.com/v1/test/getcrumb"
+        $body = if ($null -ne $c) { ([string]$c.Body).Trim() } else { "" }
+        if ($null -ne $c -and $c.Code -eq 200 -and $body.Length -gt 0 -and $body.Length -lt 40 -and $body -notmatch '[<{\s]') {
+            $crumb = $body
+            $Shared.Crumb = $crumb
+            $logs.Add("INFO|Yahoo crumb obtained")
+        } else {
+            $Shared.CrumbFailed = $true
+            $code = if ($null -ne $c) { $c.Code } else { "n/a" }
+            $logs.Add("WARN|Yahoo crumb not available (HTTP $code): sector from the search only, country must be set by hand")
+        }
+    }
+    foreach ($sym in $Symbols) {
+        if ($Shared.Cancel) { break }
+        $e = [Uri]::EscapeDataString($sym)
+        $sum = $null; $srch = $null
+        if ($crumb) {
+            $r = & $get ("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{0}?modules=assetProfile%2CquoteType&crumb={1}" -f $e, [Uri]::EscapeDataString($crumb))
+            if ($null -ne $r -and $r.Code -eq 200) { try { $sum = $r.Body | ConvertFrom-Json } catch { } }
+            elseif ($null -ne $r -and $r.Code -eq 401) { $Shared.Crumb = ""; $crumb = ""; $logs.Add("WARN|Yahoo crumb rejected (401), continuing with the search") }
+        }
+        $r2 = & $get ("https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=5&newsCount=0" -f $e)
+        if ($null -ne $r2 -and $r2.Code -eq 200) { try { $srch = $r2.Body | ConvertFrom-Json } catch { } }
+        $res[$sym] = @{ Summary = $sum; Search = $srch }
+    }
+    $Box.Results = $res
+    $Box.Logs = $logs.ToArray()
+    $Box.RateLimited = $false
+    $Box.ExtraFx = @{}
+}
+$script:WorkerShared.Crumb = ""
+$script:WorkerShared.CrumbFailed = $false
+$script:ProfileJobRunning = $false
+
+function Start-ProfileJob {
+    # Fetches the profiles of $Symbols in the background; $OnComplete runs on
+    # the UI thread after the store was updated and saved
+    param([string[]]$Symbols, [scriptblock]$OnComplete = $null)
+    $syms = @($Symbols | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpper() } | Sort-Object -Unique)
+    if ($syms.Count -eq 0 -or $script:IsClosing -or $script:ProfileJobRunning) { return }
+    $script:ProfileJobRunning = $true
+    $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
+    $done = {
+        param($Box, $Ctx)
+        $script:ProfileJobRunning = $false
+        $n = 0
+        foreach ($sym in @($Box.Results.Keys)) {
+            $rr = $Box.Results[$sym]
+            $pr = ConvertFrom-YahooProfile -Summary $rr.Summary -Search $rr.Search -Symbol $sym
+            $en = Get-ProfileEntry $sym
+            foreach ($f in @("Sector", "Industry", "Country", "QuoteType", "Name")) { if ($pr.$f) { $en.$f = [string]$pr.$f } }
+            $en.FetchedAt = (Get-Date).ToString("o")
+            $n++
+        }
+        if ($n -gt 0) { Save-Profiles; Write-WidgetLog "Profiles updated: $n" }
+        if ($null -ne $Ctx.Then) { & $Ctx.Then }
+    }
+    $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = @{ Then = $OnComplete }; OnComplete = $done }
+    if ($null -eq $script:WorkerPool) {
+        try { & $script:ProfileWorkerScript $script:HttpClient $syms $box $script:WorkerShared } catch { Write-WidgetLog "Profile fetch failed: $($_.Exception.Message)" "WARN" }
+        Complete-FetchJob -Job $job
+        return
+    }
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $script:WorkerPool
+    [void]$ps.AddScript($script:ProfileWorkerScript.ToString())
+    [void]$ps.AddArgument($script:HttpClient)
+    [void]$ps.AddArgument([string[]]$syms)
     [void]$ps.AddArgument($box)
     [void]$ps.AddArgument($script:WorkerShared)
     $job.PS = $ps
@@ -4223,12 +4361,23 @@ Set-Tip $btnPortTx "Kauf / Verkauf / Dividende buchen (realisierter G/V wird ges
 
 $btnPortHist = New-Object System.Windows.Forms.Button
 $btnPortHist.Location = New-Object System.Drawing.Point((S 610), (S 88))
-$btnPortHist.Size = New-Object System.Drawing.Size((S 120), (S 26))
+$btnPortHist.Size = New-Object System.Drawing.Size((S 58), (S 26))
 Style-FlatButton -Btn $btnPortHist -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnPortHist.Font = $fontUi
-$btnPortHist.Text = "Historie..."
+$btnPortHist.Text = "Historie"
 $pnlPortBottom.Controls.Add($btnPortHist)
 Set-Tip $btnPortHist "Alle Transaktionen, realisierter G/V, CSV-Export, Jahresreport" "REALIZED"
+
+# v4.1: portfolio analysis (value history, returns, allocation)
+$btnPortAna = New-Object System.Windows.Forms.Button
+$btnPortAna.Location = New-Object System.Drawing.Point((S 672), (S 88))
+$btnPortAna.Size = New-Object System.Drawing.Size((S 58), (S 26))
+Style-FlatButton -Btn $btnPortAna -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnPortAna.Font = $fontUi
+$btnPortAna.Text = "Analyse"
+$pnlPortBottom.Controls.Add($btnPortAna)
+Set-Tip $btnPortAna "Wertentwicklung mit Benchmark, Rendite je Position, Aufteilung nach Sektor/Land/Währung (Taste P)" "XIRR"
+$btnPortAna.Add_Click({ Show-AnalysisDialog })
 
 $lblNachkaufOut = New-Object System.Windows.Forms.Label
 $lblNachkaufOut.Location = New-Object System.Drawing.Point((S 8), (S 54))
@@ -4461,6 +4610,7 @@ $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
 $lblNachkaufOut.Anchor = $aT -bor $aL -bor $aR
 $btnPortTx.Anchor   = $aT -bor $aR
 $btnPortHist.Anchor = $aT -bor $aR
+$btnPortAna.Anchor  = $aT -bor $aR
 
 # Watchlist view: list grows, alarm column keeps its width on the right
 $dgvWatchlist.Anchor = $anchorAll
@@ -4642,6 +4792,7 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnPortDel  -BgColor $p.Input -FgColor $colRed   -BorderColor $p.Border
     Style-FlatButton -Btn $btnPortTx   -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     Style-FlatButton -Btn $btnPortHist -BgColor $p.Input -FgColor $p.Muted  -BorderColor $p.Border
+    Style-FlatButton -Btn $btnPortAna  -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     $lblNachkaufOut.ForeColor = $p.Text
 
     $viewWatch.BackColor = $p.Card
@@ -6164,7 +6315,14 @@ function Invoke-PositionRebuild {
     if (-not $sym) { return $false }
     $own = if ($null -ne $Owner) { $Owner } else { $form }
     $title = "Position neu berechnen"
-    $r = Get-PositionFromTransactions -Transactions $script:Transactions.ToArray() -Ticker $sym
+    # v4.1: split events (bounded synchronous lookup, once per session)
+    if (-not $script:SplitCache.ContainsKey($sym)) {
+        $su = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1mo&range=max&events=split" -f [Uri]::EscapeDataString($sym)
+        $sr = Invoke-ParallelFetch -Urls @($su)
+        $sh = ConvertFrom-YahooDailyHistory -Json $sr[$su]
+        if ($null -ne $sh) { $script:SplitCache[$sym] = @{ Splits = @($sh.Splits); ToYear = (Get-Date).Year } }
+    }
+    $r = Get-PositionFromTransactions -Transactions $script:Transactions.ToArray() -Ticker $sym -Splits (Get-SplitMap)
     if ($null -eq $r) {
         [System.Windows.Forms.MessageBox]::Show($own, "Für $sym gibt es keine Kauf-/Verkaufsbuchungen.", $title,
             [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -6176,6 +6334,7 @@ function Invoke-PositionRebuild {
     $notes = ""
     if ($r.Skipped -gt 0) { $notes += "`r`n- {0} Buchung(en) übersprungen (andere Währung als {1} oder Stück/Kurs = 0)" -f $r.Skipped, $r.Currency }
     if ($r.Clamped) { $notes += "`r`n- Ein Verkauf war größer als der Bestand und wurde begrenzt" }
+    if ($r.Splits -gt 0) { $notes += "`r`n- {0} Aktiensplit(s) berücksichtigt (Stück und EK umgerechnet)" -f $r.Splits }
     $msg = ("{0}: aus {1} Buchung(en) neu berechnen (Durchschnittskosten)?`r`n`r`nAktuell:  {2}`r`nNeu:      {3}{4}`r`n`r`nHinweis: Werte, die im Portfolio-Editor direkt überschrieben wurden, sind nicht als Buchung erfasst und gehen dabei verloren." -f $sym, $r.Used, $oldTxt, $newTxt, $notes)
     $ans = [System.Windows.Forms.MessageBox]::Show($own, $msg, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
@@ -6203,6 +6362,21 @@ function Invoke-PositionRebuild {
 # session and currency; the calculation itself is Get-RealizedReport (Core).
 # ------------------------------------------------------------------------------
 $script:FxHistCache = @{}
+# v4.1: split events per ticker (from the report's monthly or the analysis'
+# daily history), shared by the yearly report, the rebuild and the analysis
+$script:SplitCache = @{}
+
+function Get-FxHistoryMap {
+    $hist = @{}
+    foreach ($k in $script:FxHistCache.Keys) { if ($null -ne $script:FxHistCache[$k].Hist) { $hist[$k] = $script:FxHistCache[$k].Hist } }
+    return $hist
+}
+
+function Get-SplitMap {
+    $m = @{}
+    foreach ($k in $script:SplitCache.Keys) { $m[$k] = @($script:SplitCache[$k].Splits) }
+    return $m
+}
 
 function Get-ReportYears {
     # Years with bookings (newest first) + the current year; default = newest
@@ -6356,17 +6530,18 @@ function Show-YearReport {
         Save-JsonState -Path $script:ConfigPath -Data $script:Config
         $txs = $script:Transactions.ToArray()
         $need = @(Get-ReportCurrencies -Transactions $txs -Year $year -Base $base | Where-Object { -not $script:FxHistCache.ContainsKey($_) -or [int]$script:FxHistCache[$_].ToYear -lt $year })
+        # v4.1: split events of every ticker with buys/sells (NVDA 10:1 etc.)
+        $needSplit = @($txs | Where-Object { [string]$_.Type -in @("Kauf", "Verkauf") } | ForEach-Object { ([string]$_.Ticker).ToUpper() } | Sort-Object -Unique |
+            Where-Object { -not $script:SplitCache.ContainsKey($_) -or [int]$script:SplitCache[$_].ToYear -lt $year })
         $fallback = @{}
         foreach ($k in $script:FxFromEur.Keys) { $fallback[$k] = [double]$script:FxFromEur[$k] }
         $compute = {
             param([int]$Y, [string]$B, $Txs, $Fb)
-            $hist = @{}
-            foreach ($k in $script:FxHistCache.Keys) { if ($null -ne $script:FxHistCache[$k].Hist) { $hist[$k] = $script:FxHistCache[$k].Hist } }
-            $rep = Get-RealizedReport -Transactions $Txs -Year $Y -Base $B -History $hist -FallbackFromEur $Fb
+            $rep = Get-RealizedReport -Transactions $Txs -Year $Y -Base $B -History (Get-FxHistoryMap) -FallbackFromEur $Fb -Splits (Get-SplitMap)
             & $script:RepCtl.Render $rep
         }
         $script:RepCtl.Compute = $compute
-        if ($need.Count -eq 0) { & $compute $year $base $txs $fallback; return }
+        if ($need.Count -eq 0 -and $needSplit.Count -eq 0) { & $compute $year $base $txs $fallback; return }
 
         # Daily FX history from the earliest booking up to the end of the year
         $first = Get-EarliestBookingDate -Transactions $txs
@@ -6377,15 +6552,21 @@ function Show-YearReport {
         $p2 = ([DateTimeOffset]$to).ToUnixTimeSeconds()
         $urls = @{}
         foreach ($c in $need) { $urls[$c] = "https://query1.finance.yahoo.com/v8/finance/chart/EUR${c}=X?interval=1d&period1=$p1&period2=$p2" }
+        $splitUrls = @{}
+        foreach ($t in $needSplit) { $splitUrls[$t] = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1mo&period1={1}&period2={2}&events=split" -f [Uri]::EscapeDataString($t), $p1, ([DateTimeOffset](Get-Date)).ToUnixTimeSeconds() }
         $rc.Calc.Enabled = $false
         $rc.Info.ForeColor = $script:Pal.Muted
-        $rc.Info.Text = "Lade Wechselkursverlauf: " + ($need -join ", ") + " ..."
-        Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 3 -Context @{ Urls = $urls; Year = $year; Base = $base; Txs = $txs; Fb = $fallback } -OnComplete {
+        $rc.Info.Text = "Lade Wechselkurse und Splits: " + (@($need) + @($needSplit) -join ", ") + " ..."
+        Start-FetchJob -Urls (@($urls.Values) + @($splitUrls.Values)) -MaxConcurrency 3 -Context @{ Urls = $urls; SplitUrls = $splitUrls; Year = $year; Base = $base; Txs = $txs; Fb = $fallback; From = $from.ToString("yyyy-MM-dd") } -OnComplete {
             param($Box, $Ctx)
             foreach ($c in @($Ctx.Urls.Keys)) {
                 $h = ConvertFrom-YahooFxHistory -Json $Box.Results[$Ctx.Urls[$c]]
-                if ($null -ne $h) { $script:FxHistCache[$c] = @{ Hist = $h; ToYear = $Ctx.Year } }
+                if ($null -ne $h) { $script:FxHistCache[$c] = @{ Hist = $h; ToYear = $Ctx.Year; FromDate = $Ctx.From } }
                 else { Write-WidgetLog "FX history for $c not available" "WARN" }
+            }
+            foreach ($t in @($Ctx.SplitUrls.Keys)) {
+                $h = ConvertFrom-YahooDailyHistory -Json $Box.Results[$Ctx.SplitUrls[$t]]
+                if ($null -ne $h) { $script:SplitCache[$t] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year } }
             }
             if ($null -eq $script:RepCtl) { return }
             & $script:RepCtl.Compute $Ctx.Year $Ctx.Base $Ctx.Txs $Ctx.Fb
@@ -6426,6 +6607,829 @@ function Show-YearReport {
     [void]$dlg.ShowDialog($own)
     $script:RepCtl = $null
     $dlg.Dispose()
+}
+
+# ==============================================================================
+# Portfolio analysis (v4.1): value history rebuilt from the bookings with a
+# benchmark shadow portfolio, returns per position (XIRR), and the breakdown
+# by position / currency / sector / country. Window: P key or Portfolio >
+# "Analyse". Data: daily closes since the first booking, daily FX, profiles.
+# ==============================================================================
+$script:AnaHist = @{}     # symbol -> @{ Hist; At; From }
+$script:AnaCtl  = $null   # controls + model while the window is open
+
+function Get-AnalysisBase {
+    $b = Get-NormalizedCurrencyCode ([string]$script:Config.AnalysisBase)
+    if (-not $b) { $b = [string]$script:Config.Currency }
+    return $b
+}
+
+function Get-AnalysisSymbols {
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($k in $script:Portfolio.Keys) { [void]$set.Add(([string]$k).ToUpper()) }
+    foreach ($t in $script:Transactions) { if ([string]$t.Type -in @("Kauf", "Verkauf")) { [void]$set.Add(([string]$t.Ticker).ToUpper()) } }
+    return @($set | Sort-Object)
+}
+
+function Get-AnalysisPriceNow {
+    # Current price in Base: live quote, else the last daily close; NaN if unknown
+    param([string]$Sym, [string]$Base)
+    $q = $script:QuoteStore[$Sym]
+    if ($null -ne $q -and [double]$q.Price -gt 0) { return (Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $Base) }
+    $h = $script:AnaHist[$Sym]
+    if ($null -ne $h -and $null -ne $h.Hist -and $h.Hist.Closes.Count -gt 0) {
+        return (Convert-CurrencyValue -Amount ([double]$h.Hist.Closes[$h.Hist.Closes.Count - 1]) -FromCurrency ([string]$h.Hist.Currency) -ToCurrency $Base)
+    }
+    return [double]::NaN
+}
+
+function Get-InstrumentCurrency {
+    param([string]$Sym)
+    $q = $script:QuoteStore[$Sym]
+    if ($null -ne $q -and $q.Currency) { return (Get-NormalizedCurrencyCode ([string]$q.Currency)) }
+    $h = $script:AnaHist[$Sym]
+    if ($null -ne $h -and $null -ne $h.Hist) { return [string]$h.Hist.Currency }
+    if ($script:Portfolio.ContainsKey($Sym)) { return [string]$script:Portfolio[$Sym].Currency }
+    return ""
+}
+
+function Test-FxHistFresh {
+    param([string]$Cur, [string]$From)
+    if (-not $script:FxHistCache.ContainsKey($Cur)) { return $false }
+    $e = $script:FxHistCache[$Cur]
+    if ($null -eq $e.Hist -or [int]$e.ToYear -lt (Get-Date).Year -or -not $e.FromDate) { return $false }
+    return ([string]::CompareOrdinal([string]$e.FromDate, $From) -le 0)
+}
+
+function Get-AnalysisFxUrls {
+    param([string[]]$Currencies, [string]$From, [long]$P1, [long]$P2, [bool]$Force = $false)
+    $u = @{}
+    foreach ($c0 in @($Currencies)) {
+        $c = Get-NormalizedCurrencyCode ([string]$c0)
+        if (-not $c -or $c -eq "EUR" -or $u.ContainsKey($c)) { continue }
+        if ($Force -or -not (Test-FxHistFresh -Cur $c -From $From)) {
+            $u[$c] = "https://query1.finance.yahoo.com/v8/finance/chart/EUR${c}=X?interval=1d&period1=$P1&period2=$P2"
+        }
+    }
+    return $u
+}
+
+function Save-FxHistResults {
+    param($Box, [hashtable]$FxUrls, [string]$From)
+    foreach ($c in @($FxUrls.Keys)) {
+        $h = ConvertFrom-YahooFxHistory -Json $Box.Results[$FxUrls[$c]]
+        if ($null -ne $h) { $script:FxHistCache[$c] = @{ Hist = $h; ToYear = (Get-Date).Year; FromDate = $From } }
+        else { Write-WidgetLog "FX history for $c not available" "WARN" }
+    }
+}
+
+function Start-AnalysisLoad {
+    param([bool]$Force = $false)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac) { return }
+    $txs = $script:Transactions.ToArray()
+    $first = Get-EarliestBookingDate -Transactions @($txs | Where-Object { [string]$_.Type -in @("Kauf", "Verkauf", "Dividende") })
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $fromD = if ($first) { [DateTime]::ParseExact($first, "yyyy-MM-dd", $inv).AddDays(-10) } else { (Get-Date).Date.AddYears(-1) }
+    $from = $fromD.ToString("yyyy-MM-dd")
+    $p1 = ([DateTimeOffset]$fromD).ToUnixTimeSeconds()
+    $p2 = ([DateTimeOffset]((Get-Date).AddDays(1))).ToUnixTimeSeconds()
+    $base = Get-AnalysisBase
+    $bench = [string]$script:Config.AnalysisBenchmark
+    $syms = @(Get-AnalysisSymbols)
+    if ($bench -and $syms -notcontains $bench) { $syms += $bench }
+
+    $urls = @{}
+    foreach ($s in $syms) {
+        $h = $script:AnaHist[$s]
+        $fresh = ($null -ne $h -and ((Get-Date) - $h.At).TotalMinutes -lt 30 -and [string]::CompareOrdinal([string]$h.From, $from) -le 0)
+        if ($Force -or -not $fresh) {
+            $urls[$s] = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1d&period1={1}&period2={2}&events=div%7Csplit" -f [Uri]::EscapeDataString($s), $p1, $p2
+        }
+    }
+    # currencies known now; price currencies seen for the first time follow in step 2
+    $curs = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($t in $txs) { $c = Get-NormalizedCurrencyCode ([string]$t.Currency); if ($c) { [void]$curs.Add($c) } }
+    [void]$curs.Add($base)
+    foreach ($k in $script:Portfolio.Keys) { $c = Get-InstrumentCurrency ([string]$k); if ($c) { [void]$curs.Add($c) } }
+    $fxUrls = Get-AnalysisFxUrls -Currencies @($curs) -From $from -P1 $p1 -P2 $p2 -Force $Force
+
+    if (($urls.Count + $fxUrls.Count) -eq 0) {
+        Update-AnalysisModel
+    } else {
+        $ac.Status.ForeColor = $script:Pal.Muted
+        $ac.Status.Text = "Lade Kursverläufe ({0}) und Wechselkurse ({1}) seit {2} ..." -f $urls.Count, $fxUrls.Count, $fromD.ToString("dd.MM.yyyy")
+        $ac.Reload.Enabled = $false
+        Start-FetchJob -Urls (@($urls.Values) + @($fxUrls.Values)) -MaxConcurrency 4 -Context @{ Urls = $urls; Fx = $fxUrls; From = $from; P1 = $p1; P2 = $p2 } -OnComplete {
+            param($Box, $Ctx)
+            $failed = @()
+            foreach ($s in @($Ctx.Urls.Keys)) {
+                $h = ConvertFrom-YahooDailyHistory -Json $Box.Results[$Ctx.Urls[$s]]
+                if ($null -ne $h) {
+                    $script:AnaHist[$s] = @{ Hist = $h; At = (Get-Date); From = $Ctx.From }
+                    $script:SplitCache[$s] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year }
+                } else {
+                    $failed += $s
+                }
+            }
+            Save-FxHistResults -Box $Box -FxUrls $Ctx.Fx -From $Ctx.From
+            if ($null -eq $script:AnaCtl) { return }
+            $script:AnaCtl.Failed = $failed
+            $curs2 = @()
+            foreach ($s in @($script:AnaHist.Keys)) { $curs2 += [string]$script:AnaHist[$s].Hist.Currency }
+            $more = Get-AnalysisFxUrls -Currencies $curs2 -From $Ctx.From -P1 $Ctx.P1 -P2 $Ctx.P2
+            if ($more.Count -eq 0) { Update-AnalysisModel; return }
+            Start-FetchJob -Urls @($more.Values) -MaxConcurrency 3 -Context @{ Fx = $more; From = $Ctx.From } -OnComplete {
+                param($Box2, $Ctx2)
+                Save-FxHistResults -Box $Box2 -FxUrls $Ctx2.Fx -From $Ctx2.From
+                if ($null -ne $script:AnaCtl) { Update-AnalysisModel }
+            }
+        }
+    }
+
+    # Profiles (sector / country) in parallel, at most every 30 days
+    $stale = @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() } | Where-Object { $Force -or (Test-ProfileStale -Entry $script:Profiles[$_]) })
+    if ($stale.Count -gt 0) {
+        Start-ProfileJob -Symbols $stale -OnComplete { if ($null -ne $script:AnaCtl) { Update-AnalysisAllocation } }
+    }
+}
+
+function Update-AnalysisModel {
+    $ac = $script:AnaCtl
+    if ($null -eq $ac) { return }
+    $ac.Reload.Enabled = $true
+    $base = Get-AnalysisBase
+    $txs = $script:Transactions.ToArray()
+    $hist = Get-FxHistoryMap
+    $fb = @{}
+    foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
+    $splits = Get-SplitMap
+    $bsym = [string]$script:Config.AnalysisBenchmark
+    $prices = @{}
+    foreach ($s in @($script:AnaHist.Keys)) { if ($s -ne $bsym -or $script:Portfolio.ContainsKey($s)) { $prices[$s] = $script:AnaHist[$s].Hist } }
+    $bench = if ($bsym -and $null -ne $script:AnaHist[$bsym]) { $script:AnaHist[$bsym].Hist } else { $null }
+
+    $ledger = Get-PortfolioLedger -Transactions $txs -Base $base -History $hist -FallbackFromEur $fb -Splits $splits
+    $series = $null
+    try { $series = Get-PortfolioValueSeries -Transactions $txs -Prices $prices -Base $base -History $hist -FallbackFromEur $fb -Benchmark $bench }
+    catch { Write-WidgetLog "Value history failed: $($_.Exception.Message)" "ERROR" }
+    $uncovered = @(Get-UncoveredPositions -Portfolio $script:Portfolio -Ledger $ledger)
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+
+    $rows = New-Object System.Collections.Generic.List[PSObject]
+    $allD = New-Object System.Collections.Generic.List[string]
+    $allA = New-Object System.Collections.Generic.List[double]
+    $benchD = New-Object System.Collections.Generic.List[string]
+    $benchA = New-Object System.Collections.Generic.List[double]
+    $tot = @{ Value = 0.0; Cost = 0.0; Unreal = 0.0; Real = 0.0; Div = 0.0; Bought = 0.0; Booked = 0.0 }
+    $symSet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($k in $ledger.Keys) { [void]$symSet.Add($k) }
+    foreach ($k in $script:Portfolio.Keys) { [void]$symSet.Add(([string]$k).ToUpper()) }
+    foreach ($sym in @($symSet | Sort-Object)) {
+        $L = $ledger[$sym]
+        $pf = $script:Portfolio[$sym]
+        $pfSh = if ($null -ne $pf) { [double]$pf.Shares } else { 0.0 }
+        $px = Get-AnalysisPriceNow -Sym $sym -Base $base
+        $hasPx = -not [double]::IsNaN($px)
+        $value = if ($hasPx) { $pfSh * $px } else { 0.0 }
+        $r = [PSCustomObject]@{ Ticker = $sym; Since = ""; Shares = $pfSh; Value = $value; Cost = 0.0; Unreal = 0.0; Real = 0.0; Div = 0.0; Total = 0.0; Pct = [double]::NaN; Xirr = [double]::NaN; NoPrice = (-not $hasPx); NoBookings = ($null -eq $L) }
+        if ($null -ne $L) {
+            $bookedVal = if ($hasPx) { $L.Shares * $px } else { 0.0 }
+            $r.Since = $L.FirstDate
+            $r.Cost = $L.Cost
+            $r.Unreal = if ($L.Shares -gt 0 -and $hasPx) { $bookedVal - $L.Cost } else { 0.0 }
+            $r.Real = $L.Realized
+            $r.Div = $L.Dividends
+            $r.Total = $r.Unreal + $r.Real + $r.Div
+            if ($L.Bought -gt 0) { $r.Pct = $r.Total / $L.Bought * 100.0 }
+            $cd = @($L.CfDates); $ca = @($L.CfAmounts); $ck = @($L.CfKinds)
+            for ($i = 0; $i -lt $cd.Count; $i++) {
+                $allD.Add($cd[$i]); $allA.Add($ca[$i])
+                if ($ck[$i] -ne "D") { $benchD.Add($cd[$i]); $benchA.Add($ca[$i]) }
+            }
+            if ($bookedVal -gt 0) { $cd += $today; $ca += $bookedVal }
+            $span = ([DateTime]::ParseExact($today, "yyyy-MM-dd", $inv) - [DateTime]::ParseExact($L.FirstDate, "yyyy-MM-dd", $inv)).TotalDays
+            if ($span -ge 30) { $r.Xirr = Get-Xirr -Dates ([string[]]$cd) -Amounts ([double[]]$ca) }
+            $tot.Bought += $L.Bought
+            $tot.Booked += $bookedVal
+        } elseif ($null -ne $pf) {
+            # no bookings: cost from the portfolio editor at today's FX
+            $r.Cost = Convert-CurrencyValue -Amount ($pfSh * [double]$pf.AvgPrice) -FromCurrency ([string]$pf.Currency) -ToCurrency $base
+            $r.Unreal = if ($hasPx) { $value - $r.Cost } else { 0.0 }
+            $r.Total = $r.Unreal
+            if ($r.Cost -gt 0) { $r.Pct = $r.Total / $r.Cost * 100.0 }
+        }
+        $tot.Value += $r.Value; $tot.Cost += $r.Cost; $tot.Unreal += $r.Unreal; $tot.Real += $r.Real; $tot.Div += $r.Div
+        $rows.Add($r)
+    }
+    $totXirr = [double]::NaN
+    if ($allD.Count -gt 0 -and $tot.Booked -gt 0) {
+        $d = @($allD.ToArray()) + $today
+        $a = @($allA.ToArray()) + $tot.Booked
+        $minD = ($d | Sort-Object)[0]
+        if (([DateTime]::ParseExact($today, "yyyy-MM-dd", $inv) - [DateTime]::ParseExact($minD, "yyyy-MM-dd", $inv)).TotalDays -ge 30) {
+            $totXirr = Get-Xirr -Dates ([string[]]$d) -Amounts ([double[]]$a)
+        }
+    }
+    $benchXirr = [double]::NaN
+    $benchVal = [double]::NaN
+    if ($null -ne $series -and $null -ne $series.Bench -and $benchD.Count -gt 0) {
+        $last = $series.Dates.Count - 1
+        $benchVal = $series.Bench[$last]
+        $d = @($benchD.ToArray()) + $series.Dates[$last]
+        $a = @($benchA.ToArray()) + $benchVal
+        $minD = ($d | Sort-Object)[0]
+        if ($benchVal -gt 0 -and ([DateTime]::ParseExact($series.Dates[$last], "yyyy-MM-dd", $inv) - [DateTime]::ParseExact($minD, "yyyy-MM-dd", $inv)).TotalDays -ge 30) {
+            $benchXirr = Get-Xirr -Dates ([string[]]$d) -Amounts ([double[]]$a)
+        }
+    }
+    $tot.Total = $tot.Unreal + $tot.Real + $tot.Div
+    $tot.Pct = if ($tot.Bought -gt 0) { $tot.Total / $tot.Bought * 100.0 } else { [double]::NaN }
+    $ac.Model = [PSCustomObject]@{
+        Base = $base; Series = $series; Rows = $rows.ToArray(); Total = $tot; TotalXirr = $totXirr
+        BenchXirr = $benchXirr; BenchValue = $benchVal; Uncovered = $uncovered
+    }
+    Update-AnalysisPerf
+    Update-AnalysisReturns
+    Update-AnalysisAllocation
+}
+
+function Format-Signed {
+    param([double]$V, [string]$Fmt = "N2")
+    if ([double]::IsNaN($V)) { return "-" }
+    $s = $V.ToString($Fmt)
+    if ($V -gt 0) { return "+" + $s }
+    return $s
+}
+
+function Update-AnalysisPerf {
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.Model) { return }
+    $m = $ac.Model
+    $b = $m.Base
+    $notes = New-Object System.Collections.Generic.List[string]
+    if (@($m.Uncovered).Count -gt 0) {
+        $notes.Add("Ohne (vollständige) Buchungen, nicht in der Kurve: " + ((@($m.Uncovered) | ForEach-Object { "{0} ({1:N4} von {2:N4} Stk)" -f $_.Ticker, $_.Missing, $_.Shares }) -join ", ") + " - Käufe über 'Transaktion...' buchen.")
+    }
+    if (@($ac.Failed).Count -gt 0) { $notes.Add("Kein Kursverlauf von Yahoo: " + (@($ac.Failed) -join ", ")) }
+    $sr = $m.Series
+    if ($null -eq $sr) {
+        $ac.Sum.Text = if ($script:Transactions.Count -eq 0) { "Noch keine Buchungen. Die Wertentwicklung wird aus deinen Käufen und Verkäufen berechnet: Portfolio > 'Transaktion...'." } else { "Keine Kursverläufe für die gebuchten Ticker verfügbar." }
+        $ac.Sum.ForeColor = $script:Pal.Muted
+    } else {
+        $last = $sr.Dates.Count - 1
+        $v = $sr.Value[$last]; $i = $sr.Invested[$last]; $d = $sr.Dividends[$last]
+        $res = $v + $d - $i
+        $i0 = Get-SeriesWindowStart -Dates $sr.Dates -Range ([string]$script:Config.AnalysisRange)
+        $win = ($sr.Value[$last] - $sr.Value[$i0]) - ($sr.Invested[$last] - $sr.Invested[$i0]) + ($sr.Dividends[$last] - $sr.Dividends[$i0])
+        $ld = [DateTime]::ParseExact($sr.Dates[$last], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("dd.MM.yyyy")
+        $lines = @(
+            ("Depotwert {0:N2} {1}   Netto investiert {2:N2}   Dividenden {3:N2}   (Schlusskurse vom {4})" -f $v, $b, $i, $d, $ld)
+            ("Ergebnis {0} {1}   Rendite p.a. (XIRR) {2} %   Im Zeitraum {3}: {4} {1}" -f (Format-Signed $res), $b, (Format-Signed ($m.TotalXirr * 100) "N1"), (Get-RangeLabel ([string]$script:Config.AnalysisRange)), (Format-Signed $win))
+        )
+        if (-not [double]::IsNaN($m.BenchValue)) {
+            $diff = ($m.TotalXirr - $m.BenchXirr) * 100
+            $verdict = if ([double]::IsNaN($diff)) { "" } elseif ($diff -ge 0) { "   -> Depot {0:N1} Prozentpunkte p.a. besser" -f $diff } else { "   -> Depot {0:N1} Prozentpunkte p.a. schlechter" -f (-$diff) }
+            $lines += ("Benchmark {0}: gleiche Käufe/Verkäufe wären heute {1:N2} {2} wert, XIRR {3} %{4}" -f $script:Config.AnalysisBenchmark, $m.BenchValue, $b, (Format-Signed ($m.BenchXirr * 100) "N1"), $verdict)
+        }
+        if ($sr.Approx) { $notes.Add("Teilweise mit aktuellem statt historischem Wechselkurs gerechnet (Verlauf fehlte).") }
+        $ac.Sum.Text = ($lines -join "`r`n")
+        $ac.Sum.ForeColor = if ($res -ge 0) { $colGreen } else { $colRed }
+    }
+    $ac.Status.Text = if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b }
+    $ac.Status.ForeColor = if ($notes.Count -gt 0) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Muted }
+    Set-DynTip $ac.Status ($ac.Status.Text)
+    $ac.Chart.Invalidate()
+}
+
+function Get-RangeLabel {
+    param([string]$R)
+    switch ($R) { "6M" { "6 Monate" } "1Y" { "1 Jahr" } "3Y" { "3 Jahre" } default { "gesamt" } }
+}
+
+function Update-AnalysisReturns {
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.Model) { return }
+    $m = $ac.Model
+    $g = $ac.RetGrid
+    $g.SuspendLayout()
+    $g.Rows.Clear()
+    $sign = { param($Cell, [double]$V) if (-not [double]::IsNaN($V) -and [math]::Abs($V) -gt 0.004) { $Cell.Style.ForeColor = $(if ($V -ge 0) { $colGreen } else { $colRed }) } }
+    foreach ($r in @($m.Rows | Sort-Object -Property @{ Expression = { $_.Value }; Descending = $true }, Ticker)) {
+        $since = if ($r.Since) { [DateTime]::ParseExact($r.Since, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("dd.MM.yy") } elseif ($r.NoBookings) { "ohne Buch." } else { "" }
+        $ri = $g.Rows.Add($r.Ticker, $since, $(if ($r.Shares -gt 0) { "{0:N4}" -f $r.Shares } else { "-" }), $(if ($r.NoPrice) { "kein Kurs" } else { "{0:N2}" -f $r.Value }),
+            ("{0:N2}" -f $r.Cost), (Format-Signed $r.Unreal), (Format-Signed $r.Real), (Format-Signed $r.Div), (Format-Signed $r.Total),
+            $(if ([double]::IsNaN($r.Pct)) { "-" } else { (Format-Signed $r.Pct "N1") + " %" }), $(if ([double]::IsNaN($r.Xirr)) { "-" } else { (Format-Signed ($r.Xirr * 100) "N1") + " %" }))
+        $row = $g.Rows[$ri]
+        foreach ($cn in @("Unreal", "Real", "Div", "Total")) { & $sign $row.Cells[$cn] ([double]$r.$cn) }
+        & $sign $row.Cells["Pct"] ([double]$r.Pct)
+        & $sign $row.Cells["Xirr"] ([double]$r.Xirr)
+        if ($r.NoBookings) { $row.Cells["Since"].ToolTipText = "Keine Kauf-Buchungen: Einstand aus dem Portfolio-Editor (EK x Stück, heutiger Wechselkurs), kein XIRR" }
+        if ($r.Shares -le 0) { $row.DefaultCellStyle.ForeColor = $script:Pal.Muted }
+    }
+    $t = $m.Total
+    $ri = $g.Rows.Add("Summe", "", "", ("{0:N2}" -f $t.Value), ("{0:N2}" -f $t.Cost), (Format-Signed $t.Unreal), (Format-Signed $t.Real), (Format-Signed $t.Div), (Format-Signed $t.Total),
+        $(if ([double]::IsNaN($t.Pct)) { "-" } else { (Format-Signed $t.Pct "N1") + " %" }), $(if ([double]::IsNaN($m.TotalXirr)) { "-" } else { (Format-Signed ($m.TotalXirr * 100) "N1") + " %" }))
+    $row = $g.Rows[$ri]
+    $row.DefaultCellStyle.Font = $fontBadge
+    $row.DefaultCellStyle.BackColor = $script:Pal.Input
+    foreach ($cn in @("Unreal", "Real", "Div", "Total")) { & $sign $row.Cells[$cn] ([double]$t.$cn) }
+    & $sign $row.Cells["Xirr"] ([double]$m.TotalXirr)
+    $g.ResumeLayout()
+    $g.ClearSelection()
+    $ac.RetNote.Text = "Beträge in {0}. Einstand = gleitender Durchschnitt zum Wechselkurs am Kauftag (inkl. Kaufgebühren), Splits berücksichtigt. Gesamt % bezieht sich auf alle Käufe. XIRR ab 30 Tagen Haltedauer." -f $m.Base
+}
+
+function Get-AllocationItems {
+    # Current positions (value > 0) keyed by the chosen dimension
+    $ac = $script:AnaCtl
+    $out = @()
+    if ($null -eq $ac -or $null -eq $ac.Model) { return $out }
+    foreach ($r in @($ac.Model.Rows)) {
+        if ($r.Shares -le 0 -or $r.Value -le 0) { continue }
+        $prof = Get-EffectiveProfile $script:Profiles[$r.Ticker]
+        $key = switch ([string]$ac.Dim) {
+            "Currency" { Get-InstrumentCurrency $r.Ticker }
+            "Sector"   { $prof.Sector }
+            "Country"  { $prof.Country }
+            default    { $r.Ticker }
+        }
+        $out += [PSCustomObject]@{ Key = $key; Value = $r.Value }
+    }
+    return $out
+}
+
+function Update-AnalysisAllocation {
+    $ac = $script:AnaCtl
+    if ($null -eq $ac) { return }
+    $ac.Groups = @(Get-AllocationBreakdown -Items @(Get-AllocationItems))
+    $thr = [double]$script:Config.ConcentrationWarnPct
+    $warn = @(Get-ConcentrationWarnings -Groups $ac.Groups -ThresholdPct $thr)
+    $dimName = switch ([string]$ac.Dim) { "Currency" { "Währung" } "Sector" { "Sektor" } "Country" { "Land" } default { "Position" } }
+    if ($warn.Count -gt 0) {
+        $ac.AllocWarn.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        $ac.AllocWarn.Text = "Klumpenrisiko ({0} über {1:N0} %): {2}" -f $dimName, $thr, ((@($warn) | ForEach-Object { "{0} {1:N1} %" -f $_.Key, $_.Pct }) -join ", ")
+    } else {
+        $ac.AllocWarn.ForeColor = $script:Pal.Muted
+        $ac.AllocWarn.Text = if (@($ac.Groups).Count -gt 0) { "Keine {0} über {1:N0} % des Depots." -f $dimName, $thr } else { "Keine Positionen mit Kurs." }
+    }
+    foreach ($k in $ac.DimButtons.Keys) {
+        $bt = $ac.DimButtons[$k]
+        if ($k -eq $ac.Dim) { Style-FlatButton -Btn $bt -BgColor $script:Pal.Accent -FgColor $script:Pal.HeaderBg -BorderColor $script:Pal.Accent }
+        else { Style-FlatButton -Btn $bt -BgColor $script:Pal.Card -FgColor $script:Pal.Text -BorderColor $script:Pal.Border }
+    }
+    $ac.Bars.Invalidate()
+
+    # profile grid (skipped while a cell is being edited)
+    $pg = $ac.ProfGrid
+    if ($pg.IsCurrentCellInEditMode) { return }
+    $pg.Rows.Clear()
+    foreach ($r in @($ac.Model.Rows | Where-Object { $_.Shares -gt 0 } | Sort-Object -Property Ticker)) {
+        $en = $script:Profiles[$r.Ticker]
+        $ef = Get-EffectiveProfile $en
+        $name = if ($null -ne $en -and $en.Name) { [string]$en.Name } else { "" }
+        $src = "{0} / {1}" -f $(if ($ef.SectorSource) { $ef.SectorSource } else { "-" }), $(if ($ef.CountrySource) { $ef.CountrySource } else { "-" })
+        $ri = $pg.Rows.Add($r.Ticker, $name, $ef.Sector, $ef.Country, $src)
+        if ($ef.SectorSource -eq "manuell") { $pg.Rows[$ri].Cells["Sector"].Style.ForeColor = $script:Pal.Accent }
+        if ($ef.CountrySource -eq "manuell") { $pg.Rows[$ri].Cells["Country"].Style.ForeColor = $script:Pal.Accent }
+    }
+    $pg.ClearSelection()
+}
+
+function Draw-AnalysisChart {
+    param([System.Drawing.Graphics]$g, [int]$W, [int]$H)
+    $ac = $script:AnaCtl
+    $p = $script:Pal
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear($p.Card)
+    $brMuted = New-Object System.Drawing.SolidBrush($p.Muted)
+    $brText = New-Object System.Drawing.SolidBrush($p.Text)
+    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    try {
+        $m = if ($null -ne $ac) { $ac.Model } else { $null }
+        if ($null -eq $m -or $null -eq $m.Series) {
+            $msg = if ($null -eq $m) { "Lade Daten ..." } else { "Keine Wertentwicklung verfügbar (siehe unten)." }
+            $sz = $g.MeasureString($msg, $fontUi)
+            $g.DrawString($msg, $fontUi, $brMuted, [float](($W - $sz.Width) / 2), [float](($H - $sz.Height) / 2))
+            if ($null -ne $ac) { $ac.Geom = $null }
+            return
+        }
+        $sr = $m.Series
+        $i1 = $sr.Dates.Count - 1
+        $i0 = Get-SeriesWindowStart -Dates $sr.Dates -Range ([string]$script:Config.AnalysisRange)
+        if (($i1 - $i0) -lt 1) { $i0 = [math]::Max(0, $i1 - 1) }
+        $lines = @(@{ V = $sr.Value; C = $p.Accent; W = 2.0; Dash = $false; N = "Depotwert" })
+        if ([bool]$script:Config.AnalysisShowInvested) { $lines += @{ V = $sr.Invested; C = $p.Muted; W = 1.3; Dash = $true; N = "Netto investiert" } }
+        if ([bool]$script:Config.AnalysisShowBench -and $null -ne $sr.Bench) { $lines += @{ V = $sr.Bench; C = $amber; W = 1.4; Dash = $false; N = ("Benchmark " + $script:Config.AnalysisBenchmark) } }
+        $min = [double]::MaxValue; $max = [double]::MinValue
+        foreach ($ln in $lines) { for ($i = $i0; $i -le $i1; $i++) { $v = $ln.V[$i]; if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v } } }
+        if (($max - $min) -lt 1e-6) { $max += 1; $min -= 1 }
+        $pad = ($max - $min) * 0.06
+        $min = [math]::Max(0, $min - $pad); $max += $pad
+        $L = S 74; $R = $W - (S 12); $T = S 24; $B = $H - (S 24)
+        if (($R - $L) -lt 50 -or ($B - $T) -lt 40) { return }
+        $toX = { param([int]$I) $L + ($R - $L) * (($I - $i0) / [double]($i1 - $i0)) }
+        $toY = { param([double]$V) $B - ($B - $T) * (($V - $min) / ($max - $min)) }
+        $gridPen = New-Object System.Drawing.Pen($p.Grid, 1)
+        try {
+            for ($k = 0; $k -le 4; $k++) {
+                $v = $min + ($max - $min) * $k / 4.0
+                $y = [float](& $toY $v)
+                $g.DrawLine($gridPen, [float]$L, $y, [float]$R, $y)
+                $lbl = "{0:N0}" -f $v
+                $sz = $g.MeasureString($lbl, $fontAxis)
+                $g.DrawString($lbl, $fontAxis, $brMuted, [float]($L - $sz.Width - (S 4)), [float]($y - $sz.Height / 2))
+            }
+            $inv = [System.Globalization.CultureInfo]::InvariantCulture
+            $nx = [math]::Min(6, $i1 - $i0 + 1)
+            for ($k = 0; $k -lt $nx; $k++) {
+                $ix = [int][math]::Round($i0 + ($i1 - $i0) * $k / [math]::Max(1, $nx - 1))
+                $x = [float](& $toX $ix)
+                $lbl = [DateTime]::ParseExact($sr.Dates[$ix], "yyyy-MM-dd", $inv).ToString("dd.MM.yy")
+                $sz = $g.MeasureString($lbl, $fontAxis)
+                $lx = [math]::Max([float]$L, [math]::Min([float]($R - $sz.Width), [float]($x - $sz.Width / 2)))
+                $g.DrawString($lbl, $fontAxis, $brMuted, [float]$lx, [float]($B + (S 5)))
+            }
+        } finally { $gridPen.Dispose() }
+
+        $lx = [float]$L
+        foreach ($ln in $lines) {
+            $pen = New-Object System.Drawing.Pen($ln.C, [float]($ln.W * $script:DpiScale))
+            try {
+                if ($ln.Dash) { $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash }
+                $pts = New-Object System.Drawing.PointF[] ($i1 - $i0 + 1)
+                for ($i = $i0; $i -le $i1; $i++) { $pts[$i - $i0] = New-Object System.Drawing.PointF([float](& $toX $i), [float](& $toY $ln.V[$i])) }
+                if ($pts.Count -ge 2) { $g.DrawLines($pen, $pts) }
+                $g.DrawLine($pen, $lx, [float](S 11), [float]($lx + (S 16)), [float](S 11))
+                $g.DrawString($ln.N, $fontAxis, $brText, [float]($lx + (S 20)), [float](S 4))
+                $lx += (S 28) + $g.MeasureString($ln.N, $fontAxis).Width
+            } finally { $pen.Dispose() }
+        }
+        $ac.Geom = @{ L = $L; R = $R; T = $T; B = $B; I0 = $i0; I1 = $i1 }
+
+        # hover: vertical line + values box
+        $hi = [int]$ac.HoverIdx
+        if ($hi -ge $i0 -and $hi -le $i1) {
+            $x = [float](& $toX $hi)
+            $hp = New-Object System.Drawing.Pen($p.Muted, 1)
+            $hp.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dot
+            $g.DrawLine($hp, $x, [float]$T, $x, [float]$B)
+            $hp.Dispose()
+            $txt = @([DateTime]::ParseExact($sr.Dates[$hi], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("ddd dd.MM.yyyy"))
+            foreach ($ln in $lines) { $txt += ("{0}: {1:N2}" -f $ln.N, $ln.V[$hi]) }
+            $txt += ("Ergebnis: {0}" -f (Format-Signed ($sr.Value[$hi] + $sr.Dividends[$hi] - $sr.Invested[$hi])))
+            $body = $txt -join "`n"
+            $sz = $g.MeasureString($body, $fontAxis)
+            $bx = if (($x + (S 10) + $sz.Width) -lt $R) { $x + (S 10) } else { $x - (S 10) - $sz.Width }
+            $by = [float]($T + (S 4))
+            $bg = New-Object System.Drawing.SolidBrush($p.Input)
+            $g.FillRectangle($bg, [float]($bx - 4), [float]($by - 3), [float]($sz.Width + 8), [float]($sz.Height + 6))
+            $bg.Dispose()
+            $g.DrawString($body, $fontAxis, $brText, [float]$bx, $by)
+        }
+    } finally {
+        $brMuted.Dispose(); $brText.Dispose()
+    }
+}
+
+function Draw-AllocationBars {
+    param([System.Drawing.Graphics]$g, [int]$W, [int]$H)
+    $ac = $script:AnaCtl
+    $p = $script:Pal
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear($p.Card)
+    $brT = New-Object System.Drawing.SolidBrush($p.Text)
+    $brM = New-Object System.Drawing.SolidBrush($p.Muted)
+    $brA = New-Object System.Drawing.SolidBrush($p.Accent)
+    $brW = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 158, 11))
+    try {
+        $groups = if ($null -ne $ac) { @($ac.Groups) } else { @() }
+        if ($groups.Count -eq 0) {
+            $g.DrawString("Keine Daten.", $fontUi, $brM, [float](S 10), [float](S 10))
+            return
+        }
+        $thr = [double]$script:Config.ConcentrationWarnPct
+        $rowH = S 24
+        $labW = S 150
+        $pctW = S 120
+        $x0 = $labW + (S 8)
+        $x1 = $W - $pctW
+        $maxPct = [math]::Max(1.0, (@($groups | ForEach-Object { [double]$_.Pct }) | Sort-Object -Descending)[0])
+        $y = S 8
+        foreach ($gr in $groups) {
+            if (($y + $rowH) -gt $H) {
+                $g.DrawString(("... und {0} weitere" -f ($groups.Count - [array]::IndexOf($groups, $gr))), $fontUi, $brM, [float](S 8), [float]$y)
+                break
+            }
+            $lbl = [string]$gr.Key
+            if ($lbl.Length -gt 22) { $lbl = $lbl.Substring(0, 21) + "…" }
+            $g.DrawString($lbl, $fontUi, $brT, [float](S 8), [float]($y + (S 4)))
+            $bw = [math]::Max(2.0, ($x1 - $x0) * ([double]$gr.Pct / $maxPct))
+            $br = if ([double]$gr.Pct -gt $thr) { $brW } else { $brA }
+            $g.FillRectangle($br, [float]$x0, [float]($y + (S 4)), [float]$bw, [float]($rowH - (S 9)))
+            $g.DrawString(("{0,5:N1} %  {1:N0}" -f $gr.Pct, $gr.Value), $fontAxis, $brM, [float]($x1 + (S 6)), [float]($y + (S 5)))
+            $y += $rowH
+        }
+        # threshold marker
+        if ($thr -le $maxPct) {
+            $tx = [float]($x0 + ($x1 - $x0) * ($thr / $maxPct))
+            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(245, 158, 11), 1)
+            $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+            $g.DrawLine($pen, $tx, [float](S 4), $tx, [float]([math]::Min($H - 2, $y)))
+            $pen.Dispose()
+        }
+    } finally {
+        $brT.Dispose(); $brM.Dispose(); $brA.Dispose(); $brW.Dispose()
+    }
+}
+
+function Show-AnalysisPage {
+    param([string]$Page)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac) { return }
+    $ac.Page = $Page
+    foreach ($k in $ac.Pages.Keys) { $ac.Pages[$k].Visible = ($k -eq $Page) }
+    foreach ($k in $ac.PageButtons.Keys) {
+        $bt = $ac.PageButtons[$k]
+        if ($k -eq $Page) { Style-FlatButton -Btn $bt -BgColor $script:Pal.Accent -FgColor $script:Pal.HeaderBg -BorderColor $script:Pal.Accent }
+        else { Style-FlatButton -Btn $bt -BgColor $script:Pal.Card -FgColor $script:Pal.Text -BorderColor $script:Pal.Border }
+    }
+}
+
+function Show-AnalysisDialog {
+    if ($null -ne $script:AnaCtl) { return }
+    $p = $script:Pal
+    $aT = [System.Windows.Forms.AnchorStyles]::Top; $aB = [System.Windows.Forms.AnchorStyles]::Bottom
+    $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
+    $aAll = $aT -bor $aB -bor $aL -bor $aR
+
+    $dlg = New-DialogForm -Title "Portfolio-Analyse - $($script:AppTitle)" -W (S 1000) -H (S 640)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MaximizeBox = $true
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 860), (S 520))
+    $dlg.KeyPreview = $true
+
+    $mkBtn = {
+        param([string]$T, [int]$X, [int]$Y, [int]$Wd, $Parent, $Anchor = $null)
+        $b = New-Object System.Windows.Forms.Button
+        $b.SetBounds($X, $Y, $Wd, (S 26))
+        Style-FlatButton -Btn $b -BgColor $p.Card -FgColor $p.Text -BorderColor $p.Border
+        $b.Text = $T
+        if ($null -ne $Anchor) { $b.Anchor = $Anchor }
+        $Parent.Controls.Add($b)
+        return $b
+    }
+
+    $pageBtns = [ordered]@{}
+    $pageBtns["Perf"]  = & $mkBtn "Wertentwicklung" (S 12) (S 10) (S 130) $dlg
+    $pageBtns["Ret"]   = & $mkBtn "Rendite" (S 146) (S 10) (S 100) $dlg
+    $pageBtns["Alloc"] = & $mkBtn "Aufteilung" (S 250) (S 10) (S 110) $dlg
+    Set-DynTip $pageBtns["Perf"] "Depotwert über die Zeit, aus deinen Buchungen nachgerechnet, mit Benchmark" "BENCHMARK"
+    Set-DynTip $pageBtns["Ret"] "Ergebnis und Jahresrendite je Position" "XIRR"
+    Set-DynTip $pageBtns["Alloc"] "Aufteilung nach Position, Währung, Sektor und Land" "ALLOCATION"
+
+    $lblBase = New-Object System.Windows.Forms.Label
+    $lblBase.SetBounds((S 560), (S 15), (S 44), (S 18)); $lblBase.Anchor = $aT -bor $aR; $lblBase.Text = "Basis:"
+    $dlg.Controls.Add($lblBase)
+    $cbBase = New-Object System.Windows.Forms.ComboBox
+    $cbBase.SetBounds((S 604), (S 12), (S 62), (S 24)); $cbBase.Anchor = $aT -bor $aR
+    $cbBase.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbBase.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbBase.BackColor = $p.Input; $cbBase.ForeColor = $p.Accent
+    foreach ($c in (Get-DisplayCurrencies)) { [void]$cbBase.Items.Add($c) }
+    Select-CurrencyInCombo -Combo $cbBase -Code (Get-AnalysisBase)
+    $dlg.Controls.Add($cbBase)
+    $lblBench = New-Object System.Windows.Forms.Label
+    $lblBench.SetBounds((S 676), (S 15), (S 72), (S 18)); $lblBench.Anchor = $aT -bor $aR; $lblBench.Text = "Benchmark:"
+    $dlg.Controls.Add($lblBench)
+    $tbBench = New-Object System.Windows.Forms.TextBox
+    $tbBench.SetBounds((S 748), (S 12), (S 90), (S 24)); $tbBench.Anchor = $aT -bor $aR
+    $tbBench.BackColor = $p.Input; $tbBench.ForeColor = $p.Text; $tbBench.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tbBench.Font = $fontMono; $tbBench.Text = [string]$script:Config.AnalysisBenchmark
+    $dlg.Controls.Add($tbBench)
+    Set-DynTip $tbBench "Yahoo-Symbol, z. B. EUNL.DE (MSCI World, EUR), ^GSPC (S&P 500), ^ATX. Leer = kein Vergleich." "BENCHMARK"
+    $btnReload = & $mkBtn "Neu laden" (S 846) (S 10) (S 140) $dlg ($aT -bor $aR)
+    Set-DynTip $btnReload "Kursverläufe, Wechselkurse und Profile neu von Yahoo laden"
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.SetBounds((S 12), (S 42), (S 976), (S 18)); $lblStatus.Anchor = $aT -bor $aL -bor $aR
+    $lblStatus.AutoEllipsis = $true; $lblStatus.ForeColor = $p.Muted
+    $dlg.Controls.Add($lblStatus)
+
+    $pages = [ordered]@{}
+    foreach ($k in @("Perf", "Ret", "Alloc")) {
+        $pn = New-Object System.Windows.Forms.Panel
+        $pn.SetBounds((S 12), (S 64), (S 976), (S 564))
+        $pn.Anchor = $aAll
+        $pn.BackColor = $p.BodyBg
+        $dlg.Controls.Add($pn)
+        $pages[$k] = $pn
+    }
+
+    # --- Wertentwicklung ---
+    $pp = $pages["Perf"]
+    $rangeBtns = @{}
+    $rx = 0
+    foreach ($rg in @(@("6M", "6M"), @("1Y", "1J"), @("3Y", "3J"), @("Max", "Max"))) {
+        $rangeBtns[$rg[0]] = & $mkBtn $rg[1] $rx 0 (S 46) $pp
+        $rangeBtns[$rg[0]].Tag = $rg[0]
+        $rx += S 50
+    }
+    $chkInv = New-Object System.Windows.Forms.CheckBox
+    $chkInv.SetBounds(($rx + (S 16)), (S 3), (S 140), (S 22)); $chkInv.Text = "Netto investiert"
+    $chkInv.Checked = [bool]$script:Config.AnalysisShowInvested; $chkInv.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $pp.Controls.Add($chkInv)
+    Set-DynTip $chkInv "" "NETINVEST"
+    $chkBench = New-Object System.Windows.Forms.CheckBox
+    $chkBench.SetBounds(($rx + (S 160)), (S 3), (S 120), (S 22)); $chkBench.Text = "Benchmark"
+    $chkBench.Checked = [bool]$script:Config.AnalysisShowBench; $chkBench.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $pp.Controls.Add($chkBench)
+    Set-DynTip $chkBench "" "BENCHMARK"
+    $chart = New-Object System.Windows.Forms.Panel
+    $chart.SetBounds(0, (S 32), (S 976), (S 456))
+    $chart.Anchor = $aAll
+    Enable-DoubleBuffering -Control $chart
+    $pp.Controls.Add($chart)
+    $lblSum = New-Object System.Windows.Forms.Label
+    $lblSum.SetBounds(0, (S 494), (S 976), (S 68))
+    $lblSum.Anchor = $aB -bor $aL -bor $aR
+    $lblSum.Font = $fontMono
+    $pp.Controls.Add($lblSum)
+
+    # --- Rendite ---
+    $pr = $pages["Ret"]
+    $grid = New-Object System.Windows.Forms.DataGridView
+    $grid.SetBounds(0, 0, (S 976), (S 520))
+    $grid.Anchor = $aAll
+    Style-DataGrid -Grid $grid
+    foreach ($cd in @(@("Ticker", "Ticker", 80, ""), @("Since", "Seit", 70, ""), @("Shares", "Stück", 84, ""), @("Value", "Wert", 96, "PRICE"), @("Cost", "Einstand", 96, "EK"),
+                      @("Unreal", "Unrealisiert", 96, "UNREALIZED"), @("Real", "Realisiert", 90, "REALIZED"), @("Div", "Dividenden", 86, ""),
+                      @("Total", "Gesamt", 96, "TOTALRET"), @("Pct", "Gesamt %", 74, "TOTALRET"), @("Xirr", "XIRR p.a.", 74, "XIRR"))) {
+        $ci = $grid.Columns.Add($cd[0], $cd[1])
+        $col = $grid.Columns[$ci]
+        $col.FillWeight = [float](S $cd[2])
+        $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        if ($ci -ge 2) { $col.DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
+        if ($cd[3]) { $col.ToolTipText = Get-GlossaryShort -Key $cd[3] }
+    }
+    $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $pr.Controls.Add($grid)
+    $lblRetNote = New-Object System.Windows.Forms.Label
+    $lblRetNote.SetBounds(0, (S 526), (S 976), (S 36)); $lblRetNote.Anchor = $aB -bor $aL -bor $aR
+    $lblRetNote.ForeColor = $p.Muted
+    $pr.Controls.Add($lblRetNote)
+
+    # --- Aufteilung ---
+    $pa = $pages["Alloc"]
+    $dimBtns = [ordered]@{}
+    $dx = 0
+    foreach ($dm in @(@("Position", "Position"), @("Currency", "Währung"), @("Sector", "Sektor"), @("Country", "Land"))) {
+        $dimBtns[$dm[0]] = & $mkBtn $dm[1] $dx 0 (S 84) $pa
+        $dimBtns[$dm[0]].Tag = $dm[0]
+        $dx += S 88
+    }
+    $lblThr = New-Object System.Windows.Forms.Label
+    $lblThr.SetBounds(($dx + (S 12)), (S 5), (S 96), (S 18)); $lblThr.Text = "Hinweis ab (%):"
+    $pa.Controls.Add($lblThr)
+    $nThr = New-Object System.Windows.Forms.NumericUpDown
+    $nThr.SetBounds(($dx + (S 108)), (S 2), (S 56), (S 22)); $nThr.Minimum = 5; $nThr.Maximum = 90; $nThr.Increment = 5
+    $nThr.Value = [int]$script:Config.ConcentrationWarnPct
+    $nThr.BackColor = $p.Input; $nThr.ForeColor = $p.Text; $nThr.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $pa.Controls.Add($nThr)
+    Set-DynTip $lblThr "" "CONCENTRATION"; Set-DynTip $nThr "" "CONCENTRATION"
+    $bars = New-Object System.Windows.Forms.Panel
+    $bars.SetBounds(0, (S 32), (S 540), (S 492))
+    $bars.Anchor = $aT -bor $aB -bor $aL -bor $aR
+    Enable-DoubleBuffering -Control $bars
+    $pa.Controls.Add($bars)
+    $lblWarn = New-Object System.Windows.Forms.Label
+    $lblWarn.SetBounds(0, (S 530), (S 540), (S 32)); $lblWarn.Anchor = $aB -bor $aL -bor $aR
+    $pa.Controls.Add($lblWarn)
+    $pg = New-Object System.Windows.Forms.DataGridView
+    $pg.SetBounds((S 552), (S 32), (S 424), (S 492))
+    $pg.Anchor = $aT -bor $aB -bor $aR
+    Style-DataGrid -Grid $pg
+    $pg.ReadOnly = $false
+    $pg.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::CellSelect
+    foreach ($cd in @(@("Ticker", "Ticker", 70, $true), @("Name", "Name", 110, $true), @("Sector", "Sektor", 100, $false), @("Country", "Land", 90, $false), @("Source", "Quelle", 70, $true))) {
+        $ci = $pg.Columns.Add($cd[0], $cd[1])
+        $pg.Columns[$ci].FillWeight = [float](S $cd[2])
+        $pg.Columns[$ci].ReadOnly = [bool]$cd[3]
+        $pg.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+    }
+    $pg.Columns["Sector"].ToolTipText = "Sektor überschreiben: Zelle anklicken und tippen. Leer lassen = automatisch (Yahoo)."
+    $pg.Columns["Country"].ToolTipText = "Land überschreiben: Zelle anklicken und tippen. Leer lassen = automatisch (Yahoo)."
+    $pg.Columns["Source"].ToolTipText = "Herkunft Sektor / Land: Yahoo, manuell oder nach Typ (ETF, Krypto ...)"
+    $pg.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $pa.Controls.Add($pg)
+    $lblPg = New-Object System.Windows.Forms.Label
+    $lblPg.SetBounds((S 552), (S 530), (S 424), (S 32)); $lblPg.Anchor = $aB -bor $aR
+    $lblPg.ForeColor = $p.Muted
+    $lblPg.Text = "Sektor/Land per Klick überschreiben (blau = manuell). Leer = wieder automatisch."
+    $pa.Controls.Add($lblPg)
+
+    $script:AnaCtl = @{
+        Dlg = $dlg; Status = $lblStatus; Reload = $btnReload; Base = $cbBase; Bench = $tbBench
+        Pages = $pages; PageButtons = $pageBtns; Page = "Perf"
+        Chart = $chart; Sum = $lblSum; RangeButtons = $rangeBtns; HoverIdx = -1; Geom = $null
+        RetGrid = $grid; RetNote = $lblRetNote
+        Bars = $bars; AllocWarn = $lblWarn; ProfGrid = $pg; DimButtons = $dimBtns; Dim = "Position"; Groups = @()
+        Model = $null; Failed = @()
+    }
+
+    # --- events ---
+    foreach ($k in $pageBtns.Keys) { $pageBtns[$k].Tag = $k; $pageBtns[$k].Add_Click({ param($sender, $e) Show-AnalysisPage ([string]$sender.Tag) }) }
+    $styleRange = {
+        foreach ($k in $script:AnaCtl.RangeButtons.Keys) {
+            $bt = $script:AnaCtl.RangeButtons[$k]
+            if ($k -eq [string]$script:Config.AnalysisRange) { Style-FlatButton -Btn $bt -BgColor $script:Pal.Accent -FgColor $script:Pal.HeaderBg -BorderColor $script:Pal.Accent }
+            else { Style-FlatButton -Btn $bt -BgColor $script:Pal.Card -FgColor $script:Pal.Text -BorderColor $script:Pal.Border }
+        }
+    }
+    $script:AnaCtl.StyleRange = $styleRange
+    foreach ($k in $rangeBtns.Keys) {
+        $rangeBtns[$k].Add_Click({
+            param($sender, $e)
+            $script:Config.AnalysisRange = [string]$sender.Tag
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+            & $script:AnaCtl.StyleRange
+            Update-AnalysisPerf
+        })
+    }
+    & $styleRange
+    $chkInv.Add_CheckedChanged({ param($sender, $e) $script:Config.AnalysisShowInvested = [bool]$sender.Checked; Save-JsonState -Path $script:ConfigPath -Data $script:Config; $script:AnaCtl.Chart.Invalidate() })
+    $chkBench.Add_CheckedChanged({ param($sender, $e) $script:Config.AnalysisShowBench = [bool]$sender.Checked; Save-JsonState -Path $script:ConfigPath -Data $script:Config; $script:AnaCtl.Chart.Invalidate() })
+    $chart.Add_Paint({ param($sender, $e) try { Draw-AnalysisChart -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "Analysis chart: $($_.Exception.Message)" "WARN" } })
+    $chart.Add_Resize({ param($sender, $e) $sender.Invalidate() })
+    $chart.Add_MouseMove({
+        param($sender, $e)
+        $ac = $script:AnaCtl
+        $gm = $ac.Geom
+        if ($null -eq $gm -or $e.X -lt $gm.L -or $e.X -gt $gm.R) { if ($ac.HoverIdx -ne -1) { $ac.HoverIdx = -1; $sender.Invalidate() }; return }
+        $idx = [int][math]::Round($gm.I0 + ($gm.I1 - $gm.I0) * (($e.X - $gm.L) / [double]($gm.R - $gm.L)))
+        if ($idx -ne $ac.HoverIdx) { $ac.HoverIdx = $idx; $sender.Invalidate() }
+    })
+    $chart.Add_MouseLeave({ param($sender, $e) $script:AnaCtl.HoverIdx = -1; $sender.Invalidate() })
+    $bars.Add_Paint({ param($sender, $e) try { Draw-AllocationBars -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "Allocation bars: $($_.Exception.Message)" "WARN" } })
+    $bars.Add_Resize({ param($sender, $e) $sender.Invalidate() })
+    foreach ($k in $dimBtns.Keys) {
+        $dimBtns[$k].Add_Click({ param($sender, $e) $script:AnaCtl.Dim = [string]$sender.Tag; Update-AnalysisAllocation })
+    }
+    $nThr.Add_ValueChanged({
+        param($sender, $e)
+        $script:Config.ConcentrationWarnPct = [int]$sender.Value
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        Update-AnalysisAllocation
+    })
+    $pg.Add_CellEndEdit({
+        param($sender, $e)
+        $col = $sender.Columns[$e.ColumnIndex].Name
+        if ($col -notin @("Sector", "Country")) { return }
+        $row = $sender.Rows[$e.RowIndex]
+        $sym = [string]$row.Cells["Ticker"].Value
+        $txt = ([string]$row.Cells[$col].Value).Trim()
+        $en = Get-ProfileEntry $sym
+        $before = Get-EffectiveProfile $en
+        $auto = if ($col -eq "Sector") { $before.Sector } else { $before.Country }
+        $field = if ($col -eq "Sector") { "ManualSector" } else { "ManualCountry" }
+        # unchanged text = no override; empty = back to automatic
+        if ($txt -ne $auto -or -not $txt) { $en.$field = $txt }
+        Save-Profiles
+        $ef = Get-EffectiveProfile $en
+        $row.Cells[$col].Value = if ($col -eq "Sector") { $ef.Sector } else { $ef.Country }
+        $srcNow = if ($col -eq "Sector") { $ef.SectorSource } else { $ef.CountrySource }
+        $row.Cells[$col].Style.ForeColor = if ($srcNow -eq "manuell") { $script:Pal.Accent } else { $script:Pal.Text }
+        $row.Cells["Source"].Value = "{0} / {1}" -f $(if ($ef.SectorSource) { $ef.SectorSource } else { "-" }), $(if ($ef.CountrySource) { $ef.CountrySource } else { "-" })
+        $ac = $script:AnaCtl
+        $ac.Groups = @(Get-AllocationBreakdown -Items @(Get-AllocationItems))
+        $ac.Bars.Invalidate()
+    })
+    $applyInputs = {
+        $ac = $script:AnaCtl
+        $script:Config.AnalysisBase = [string]$ac.Base.SelectedItem
+        $script:Config.AnalysisBenchmark = ([string]$ac.Bench.Text).Trim().ToUpper()
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    }
+    $script:AnaCtl.ApplyInputs = $applyInputs
+    $btnReload.Add_Click({ & $script:AnaCtl.ApplyInputs; Start-AnalysisLoad -Force $true })
+    $cbBase.Add_SelectionChangeCommitted({ & $script:AnaCtl.ApplyInputs; Start-AnalysisLoad })
+    $tbBench.Add_KeyDown({
+        param($sender, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; & $script:AnaCtl.ApplyInputs; Start-AnalysisLoad }
+    })
+    $dlg.Add_KeyDown({
+        param($sender, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $sender.Close() }
+    })
+    $dlg.Add_Shown({ Show-AnalysisPage "Perf"; Update-AnalysisAllocation; Start-AnalysisLoad })
+
+    try {
+        $owner = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { $script:FsForm } else { $form }
+        [void]$dlg.ShowDialog($owner)
+    } finally {
+        $script:AnaCtl = $null
+        $dlg.Dispose()
+    }
 }
 
 function Show-CurrencyMismatchNotice {
@@ -6893,6 +7897,7 @@ B  Bollinger            R  RSI
 E  Vor-/Nachbörse      W  Währung (EUR/USD/CHF/GBP)
 T  Theme                C  Compact an/aus
 L  Nächstes Layout     G  Glossar (Begriffe)
+P  Portfolio-Analyse
 S  Einstellungen        H  Diese Hilfe
 Z  Zoom zurücksetzen   X  Vergleich an/aus
 Esc  Messung / Popups / Vollbild schließen
@@ -7732,6 +8737,9 @@ $script:GlobalKeyHandler = {
         }
         ([System.Windows.Forms.Keys]::G) {
             Show-GlossaryDialog; $e.Handled = $true
+        }
+        ([System.Windows.Forms.Keys]::P) {
+            Show-AnalysisDialog; $e.Handled = $true
         }
         ([System.Windows.Forms.Keys]::T) {
             $btnThemeCycle.PerformClick(); $e.Handled = $true

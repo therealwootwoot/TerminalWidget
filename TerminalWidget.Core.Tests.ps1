@@ -765,6 +765,7 @@ Describe "Ledger and XIRR (v4.1)" {
         [math]::Round($l.Bought, 6) | Should -Be 1804
         $l.FirstDate | Should -Be "2025-03-03"
         $l.CfAmounts.Count | Should -Be 4
+        ($l.CfKinds -join "") | Should -Be "BBSD"
         [math]::Round(($l.CfAmounts | Measure-Object -Sum).Sum, 6) | Should -Be (-1804 + 490 + 15)
     }
     It "scales today's shares by splits after the last booking" {
