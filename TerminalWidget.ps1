@@ -5846,7 +5846,9 @@ $script:PushPending = New-Object System.Collections.Generic.List[PSObject]
 $script:PushSent    = New-Object System.Collections.Generic.List[DateTime]
 
 function Protect-Secret {
-    # Windows DPAPI (current user) via SecureString, works in 5.1 and 7
+    # Windows DPAPI (current user) via SecureString, works in 5.1 and 7. The
+    # plain text is the token the user just typed; only the encrypted form is stored.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingConvertToSecureStringWithPlainText", "")]
     param([string]$Plain)
     if (-not $Plain) { return "" }
     try { return (ConvertFrom-SecureString -SecureString (ConvertTo-SecureString -String $Plain -AsPlainText -Force)) }
