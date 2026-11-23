@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.5"
+$script:AppVersion    = "4.6"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -492,6 +492,20 @@ $defaultConfig = [PSCustomObject]@{
     ActiveDepot           = ""
     MainDepotName         = "Hauptdepot"
     LastAutoBackup        = ""
+    # v4.6
+    MaType                = "SMA"
+    LowerPanel            = "RSI"
+    UpDownScheme          = "Standard"
+    UpColor               = ""
+    DownColor             = ""
+    AccentHex             = ""
+    ShowArrows            = $false
+    PriceFlash            = $true
+    GlobalHotkey          = "Ctrl+Alt+W"
+    SnapToEdges           = $true
+    GridLayouts           = [PSCustomObject]@{}
+    UserLayouts           = @()
+    FirstRunDone          = $false
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -590,7 +604,9 @@ if ([string]$script:Config.AnalysisRange -notin @("6M", "1Y", "3Y", "Max")) { $s
 $script:Config.ConcentrationWarnPct = [math]::Max(5, [math]::Min(90, [int]$script:Config.ConcentrationWarnPct))
 if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio")) { $script:Config.TerminalBottom = "Watchlist" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
-if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet")) { $script:Config.AccentColor = "Sky" }
+if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene")) { $script:Config.AccentColor = "Sky" }
+if ([string]$script:Config.MaType -notin @("SMA", "EMA")) { $script:Config.MaType = "SMA" }
+if ([string]$script:Config.LowerPanel -notin @("RSI", "MACD")) { $script:Config.LowerPanel = "RSI" }
 if ([int]$script:Config.RefreshSeconds -lt 5) { $script:Config.RefreshSeconds = 15 }
 if ([int]$script:Config.SlowRefreshSeconds -lt [int]$script:Config.RefreshSeconds) { $script:Config.SlowRefreshSeconds = [math]::Max(60, [int]$script:Config.RefreshSeconds) }
 if ([int]$script:Config.SmaFastPeriod -lt 2) { $script:Config.SmaFastPeriod = 20 }
@@ -1565,9 +1581,8 @@ function Remove-SymbolFromWatchlist {
     $u = $Symbol.Trim().ToUpper()
     if ([string]::IsNullOrWhiteSpace($u)) { return $false }
     if (@($script:Config.Watchlist) -notcontains $u) { return $false }
-    if ($AskConfirm -and -not (Confirm-Action -Text "'$u' aus der Watchlist entfernen?" -Title "Watchlist")) {
-        return $false
-    }
+    # v4.6: no question - Ctrl+Z restores the list ($AskConfirm kept for callers)
+    $undoList = @($script:Config.Watchlist)
 
     $list = New-Object System.Collections.Generic.List[string]
     foreach ($w in $script:Config.Watchlist) {
@@ -1588,6 +1603,7 @@ function Remove-SymbolFromWatchlist {
 
     $script:Config.Watchlist = $list.ToArray()
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-Undo -Kind "Watchlist" -Data $undoList -Text "$u aus der Watchlist entfernt"
     if ($script:Config.ActiveTicker.ToUpper() -eq $u) {
         Switch-ActiveTicker -NewTicker $list[0] -SkipResolve $true
     } else {
@@ -2314,8 +2330,14 @@ function Build-ActiveChartSeries {
 
     $script:ActiveSeries    = $dispArr
     $script:ActiveRsiSeries = Compute-Rsi -Prices $closeArr -Period ([int]$script:Config.RsiPeriod)
-    $script:ActiveSma20     = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
-    $script:ActiveSma50     = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    if ([string]$script:Config.MaType -eq "EMA") {
+        $script:ActiveSma20 = Compute-Ema -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
+        $script:ActiveSma50 = Compute-Ema -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    } else {
+        $script:ActiveSma20 = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod)
+        $script:ActiveSma50 = Compute-Sma -Prices $closeArr -Period ([int]$script:Config.SmaSlowPeriod)
+    }
+    $script:ActiveMacd      = Compute-Macd -Prices $closeArr
     $script:ActiveVwap      = Compute-Vwap -Series $dispArr -GmtOffsetSec $script:ActiveGmtOffset
     $bb                     = Compute-BollingerBands -Prices $closeArr -Period ([int]$script:Config.SmaFastPeriod) -Multiplier 2.0
     $script:ActiveBbUpper   = $bb.Upper
@@ -2341,8 +2363,10 @@ function Enable-DoubleBuffering {
 $script:HoverIndex = -1
 
 # Palette & Cached GDI+ Resources
-$colGreen = [System.Drawing.Color]::FromArgb(16, 185, 129)
-$colRed   = [System.Drawing.Color]::FromArgb(244, 63, 94)
+# v4.6: up/down colours from the chosen scheme (colour-blind safe option)
+$udInit   = Get-UpDownColors -Scheme ([string]$script:Config.UpDownScheme) -UpHex ([string]$script:Config.UpColor) -DownHex ([string]$script:Config.DownColor)
+$colGreen = [System.Drawing.Color]::FromArgb($udInit.Up[0], $udInit.Up[1], $udInit.Up[2])
+$colRed   = [System.Drawing.Color]::FromArgb($udInit.Down[0], $udInit.Down[1], $udInit.Down[2])
 
 $fontTicker = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
 $fontPrice  = New-Object System.Drawing.Font("Consolas", 13.0, [System.Drawing.FontStyle]::Bold)
@@ -2356,6 +2380,10 @@ $script:GdiCache = @{}
 
 function Get-ThemeColors {
     $accent = switch ($script:Config.AccentColor) {
+        "Eigene" {
+            $rgb = ConvertFrom-HexColor ([string]$script:Config.AccentHex)
+            if ($null -ne $rgb) { [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) } else { [System.Drawing.Color]::FromArgb(56, 189, 248) }
+        }
         "Amber"  { [System.Drawing.Color]::FromArgb(245, 158, 11) }
         "Violet" { [System.Drawing.Color]::FromArgb(168, 85, 247) }
         default  { [System.Drawing.Color]::FromArgb(56, 189, 248) }
@@ -2858,8 +2886,8 @@ function Render-ChartAndRsi {
         if ($sma20Pts.Count -ge 2) { $g.DrawLines($c["sma20Pen"], $sma20Pts.ToArray()) }
         if ($sma50Pts.Count -ge 2) { $g.DrawLines($c["sma50Pen"], $sma50Pts.ToArray()) }
 
-        $s1Lbl = "SMA$($script:Config.SmaFastPeriod)"
-        $s2Lbl = "SMA$($script:Config.SmaSlowPeriod)"
+        $s1Lbl = "$($script:Config.MaType)$($script:Config.SmaFastPeriod)"
+        $s2Lbl = "$($script:Config.MaType)$($script:Config.SmaSlowPeriod)"
         $g.DrawString($s1Lbl, $fontAxis, $c["sma20Br"], ($priceRect.Left + $leftLegendOffset), ($priceRect.Top + (S 4)))
         $g.DrawString($s2Lbl, $fontAxis, $c["sma50Br"], ($priceRect.Left + $leftLegendOffset + (S 44)), ($priceRect.Top + (S 4)))
         & $addLeg $s1Lbl ($priceRect.Left + $leftLegendOffset) ($priceRect.Top + (S 4)) "SMA"
@@ -2932,8 +2960,59 @@ function Render-ChartAndRsi {
     $bottomAxisAnchor = $priceRect.Bottom
     $rsiRectL = $null
 
-    # Optional RSI Sub-Panel
-    if ($showRsi -and $rsiH -ge (S 42)) {
+    # Optional RSI Sub-Panel (v4.6: or MACD)
+    if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
+        $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
+        $g.FillRectangle($c["panelBrush"], $rsiRect)
+        $g.DrawRectangle($c["sepPen"], $rsiRect)
+        $mAll = $script:ActiveMacd
+        if ($null -ne $mAll -and @($mAll.Macd).Count -eq $totalN) {
+            $vM = Get-ArraySlice $mAll.Macd $s0 $s1
+            $vS = Get-ArraySlice $mAll.Signal $s0 $s1
+            $vH = Get-ArraySlice $mAll.Hist $s0 $s1
+            $mx = 0.0
+            for ($i = 0; $i -lt $n; $i++) {
+                foreach ($v in @($vM[$i], $vS[$i], $vH[$i])) { if (-not [double]::IsNaN([double]$v) -and [math]::Abs([double]$v) -gt $mx) { $mx = [math]::Abs([double]$v) } }
+            }
+            if ($mx -gt 0) {
+                $mx *= 1.1
+                $y0 = $rsiRect.Top + $rsiRect.Height / 2.0
+                $sc = ($rsiRect.Height / 2.0) / $mx
+                $g.DrawLine($c["gridPen"], $rsiRect.Left, [int]$y0, $rsiRect.Right, [int]$y0)
+                $bw = [math]::Max(1.0, ($rsiRect.Width / [double][math]::Max(1, $n)) * 0.6)
+                $mPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+                $sPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+                for ($i = 0; $i -lt $n; $i++) {
+                    $x = $rsiRect.Left + (($i / [double][math]::Max(1, $n - 1)) * $rsiRect.Width)
+                    $hv = [double]$vH[$i]
+                    if (-not [double]::IsNaN($hv) -and $hv -ne 0) {
+                        $hy = $hv * $sc
+                        $br = if ($hv -ge 0) { $c["brUp"] } else { $c["brDown"] }
+                        $top = if ($hv -ge 0) { $y0 - $hy } else { $y0 }
+                        $g.FillRectangle($br, [float]($x - $bw / 2), [float]$top, [float]$bw, [float][math]::Max(1.0, [math]::Abs($hy)))
+                    }
+                    if (-not [double]::IsNaN([double]$vM[$i])) { $mPts.Add((New-Object System.Drawing.PointF([float]$x, [float]($y0 - [double]$vM[$i] * $sc)))) }
+                    if (-not [double]::IsNaN([double]$vS[$i])) { $sPts.Add((New-Object System.Drawing.PointF([float]$x, [float]($y0 - [double]$vS[$i] * $sc)))) }
+                }
+                if ($mPts.Count -ge 2) { $g.DrawLines($c["rsiPenAcc"], $mPts.ToArray()) }
+                if ($sPts.Count -ge 2) {
+                    $sigPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(245, 158, 11), [float](1.1 * $script:DpiScale))
+                    $g.DrawLines($sigPen, $sPts.ToArray())
+                    $sigPen.Dispose()
+                }
+                $lastM = [double]$vM[$n - 1]; $lastS = [double]$vS[$n - 1]
+                $mTxt = if ([double]::IsNaN($lastM)) { "MACD(12,26,9)" } else { "MACD(12,26,9): {0:N2}  Signal {1:N2}" -f $lastM, $lastS }
+                $g.DrawString($mTxt, $fontBadge, $c["rsiBrAcc"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+                & $addLeg $mTxt ($rsiRect.Left + (S 6)) ($rsiRect.Top + 3) "MACD" $fontBadge
+            } else {
+                $g.DrawString("MACD: zu wenig Daten", $fontAxis, $c["axisTextBrush"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+            }
+        } else {
+            $g.DrawString("MACD: zu wenig Daten", $fontAxis, $c["axisTextBrush"], ($rsiRect.Left + (S 6)), ($rsiRect.Top + 3))
+        }
+        $bottomAxisAnchor = $rsiRect.Bottom
+        $rsiRectL = $rsiRect
+    } elseif ($showRsi -and $rsiH -ge (S 42)) {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         $g.FillRectangle($c["panelBrush"], $rsiRect)
         $g.DrawRectangle($c["sepPen"], $rsiRect)
@@ -3530,6 +3609,10 @@ foreach ($ln in @("Ticker", "Compact", "Standard", "Terminal")) {
 }
 [void]$trayMenu.Items.Add($miLayout)
 $miRefresh = $trayMenu.Items.Add("Jetzt aktualisieren (F5)")
+# v4.6: click-through (mouse goes to the window below; hotkey brings it back)
+$miClickThrough = New-Object System.Windows.Forms.ToolStripMenuItem("Durchklicken (Maus geht durch)")
+[void]$trayMenu.Items.Add($miClickThrough)
+$miClickThrough.Add_Click({ Set-ClickThrough (-not $script:ClickThrough) })
 [void]$trayMenu.Items.Add("-")
 $miExit    = $trayMenu.Items.Add("Beenden")
 $trayIcon.ContextMenuStrip = $trayMenu
@@ -4100,7 +4183,7 @@ $btnToggleSma = New-Object System.Windows.Forms.Button
 $btnToggleSma.Location = New-Object System.Drawing.Point((S 350), (S 4))
 $btnToggleSma.Size = New-Object System.Drawing.Size((S 58), (S 25))
 $btnToggleSma.Font = $fontUiBold
-$btnToggleSma.Text = "SMA"
+$btnToggleSma.Text = [string]$script:Config.MaType
 $pnlChartControls.Controls.Add($btnToggleSma)
 Set-Tip $btnToggleSma "Gleitende Durchschnitte SMA $($script:Config.SmaFastPeriod)/$($script:Config.SmaSlowPeriod) (Taste M)" "SMA"
 
@@ -4124,7 +4207,7 @@ $btnToggleRsi = New-Object System.Windows.Forms.Button
 $btnToggleRsi.Location = New-Object System.Drawing.Point((S 528), (S 4))
 $btnToggleRsi.Size = New-Object System.Drawing.Size((S 70), (S 25))
 $btnToggleRsi.Font = $fontUiBold
-$btnToggleRsi.Text = "RSI-$($script:Config.RsiPeriod)"
+$btnToggleRsi.Text = if ([string]$script:Config.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($script:Config.RsiPeriod)" }
 $pnlChartControls.Controls.Add($btnToggleRsi)
 Set-Tip $btnToggleRsi "Relative Strength Index Sub-Panel (Taste R)" "RSI"
 
@@ -4987,6 +5070,7 @@ function Apply-TooltipMode {
 }
 
 function Apply-ThemeToAllControls {
+    Update-UpDownColors
     $script:Pal = Get-ThemeColors
     Rebuild-GdiCache
     Apply-DwmTitlebarTheme
@@ -5494,6 +5578,8 @@ function Refresh-PortfolioGrid {
         )
         $dgvPortfolio.Rows[$idx].Cells[7].Style.ForeColor = if ($r.PnlAbs -ge 0) { $colGreen } else { $colRed }
         $dgvPortfolio.Rows[$idx].Cells[8].Style.ForeColor = if ($r.DayPct -ge 0) { $colGreen } else { $colRed }
+        if ([bool]$script:Config.ShowArrows) { $dgvPortfolio.Rows[$idx].Cells[8].Value = (Get-ArrowPrefix ([double]$r.DayPct)) + [string]$dgvPortfolio.Rows[$idx].Cells[8].Value }
+        Set-PriceFlash -Cell $dgvPortfolio.Rows[$idx].Cells["Price"] -Key ("P|" + $r.Ticker) -Price ([double]$r.Price)
         $eb = Get-TickerEarningsBadge $r.Ticker
         if ($null -ne $eb) {
             $dgvPortfolio.Rows[$idx].Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
@@ -5651,6 +5737,8 @@ function Refresh-WatchlistAndAlerts {
                 $row.Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
             }
             $row.Cells["Day"].Style.ForeColor = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
+            if ([bool]$script:Config.ShowArrows) { $row.Cells["Day"].Value = (Get-ArrowPrefix ([double]$q.ChangePct)) + [string]$row.Cells["Day"].Value }
+            if (-not [bool]$q.FromCache) { Set-PriceFlash -Cell $row.Cells["Price"] -Key ("W|" + $uSym) -Price ([double]$q.Price) }
             if ([bool]$q.FromCache) {
                 $row.Cells["Price"].Style.ForeColor = $script:Pal.Muted
                 $row.Cells["Price"].ToolTipText = "Kurs aus dem Cache (Stand {0}) - wird gerade aktualisiert" -f $q.UpdatedAt.ToString("dd.MM. HH:mm")
@@ -6458,7 +6546,9 @@ function Update-AllUiViews {
         $priceTip = if ($fromCache) { "Kurs aus dem Cache (Stand {0}) - wird gerade aktualisiert" -f $q.UpdatedAt.ToString("dd.MM. HH:mm") } else { "Doppelklick = Kurs kopieren" }
         if ($priceTip -ne $script:LastPriceTip) { Set-Tip $lblLivePrice $priceTip $(if ($fromCache) { "CACHE" } else { "PRICE" }); $script:LastPriceTip = $priceTip }
         $lblDayChange.ForeColor = $col
-        $lblDayChange.Text = "{0}{1:N2}%" -f $sign, $q.ChangePct
+        $lblDayChange.Text = "{0}{1}{2:N2}%" -f (Get-ArrowPrefix ([double]$q.ChangePct)), $sign, $q.ChangePct
+        # v4.6: coloured "pill" behind the day change
+        $lblDayChange.BackColor = Get-BlendColor -A $col -B $p.HeaderBg -T 0.18
         $dispPrev = Convert-CurrencyValue -Amount $q.PrevClose -FromCurrency $q.Currency -ToCurrency $curr
         $lblDayAbs.Text = if ($q.PrevClose -gt 0) { "{0}{1:N2} {2}" -f $sign, ($dispPrice - $dispPrev), $curr } else { "" }
         # v4.2: quarterly figures within a week -> amber note in front of the name
@@ -6495,6 +6585,7 @@ function Update-AllUiViews {
     } else {
         $lblLivePrice.Text = "--.-- $curr"
         $lblDayChange.ForeColor = $p.Muted
+        $lblDayChange.BackColor = $p.HeaderBg
         $lblDayChange.Text = "0.00%"
         $lblDayAbs.Text = ""
         $lblExtQuote.Text = ""
@@ -8905,10 +8996,42 @@ function Invoke-TerminalCommand {
                 Set-Timeframe -Tf $tfMap[$arg0]
             }
             "LAYOUT" {
+                $rest = (@($c.Args | Select-Object -Skip 1) -join " ").Trim()
+                if ($arg0 -eq "SAVE") {
+                    if (-not $rest) { return "Name fehlt: LAYOUT SAVE <Name>" }
+                    if (@(Get-LayoutNames | Where-Object { $_.ToUpper() -eq $rest.ToUpper() }).Count -gt 0) { return "'$rest' ist ein eingebautes Layout - bitte anderen Namen wählen" }
+                    Save-UserLayout -Name $rest
+                    return ""
+                }
+                if ($arg0 -eq "DEL") {
+                    $script:Config.UserLayouts = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -ne $rest.ToUpper() })
+                    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                    Set-TransientStatus "Layout '$rest' gelöscht" 3
+                    return ""
+                }
+                $full = (@($c.Args) -join " ").Trim()
                 $ln = @(Get-LayoutNames | Where-Object { $_.ToUpper() -eq $arg0 })
-                if ($ln.Count -eq 0) { return "Layout: " + ((Get-LayoutNames) -join " / ") }
-                Apply-Layout $ln[0]
+                if ($ln.Count -gt 0) { Apply-Layout $ln[0]; return "" }
+                if (Use-UserLayout -Name $full) { return "" }
+                $own = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name })
+                return "Layout: " + ((@(Get-LayoutNames) + $own) -join " / ") + " - eigenes speichern: LAYOUT SAVE <Name>"
             }
+            "IND"    {
+                switch ($arg0) {
+                    "MACD" { $script:Config.LowerPanel = "MACD"; $script:Config.ShowRsi = $true }
+                    "RSI"  { $script:Config.LowerPanel = "RSI"; $script:Config.ShowRsi = $true }
+                    "EMA"  { $script:Config.MaType = "EMA"; $script:Config.ShowSma = $true }
+                    "SMA"  { $script:Config.MaType = "SMA"; $script:Config.ShowSma = $true }
+                    default { return "IND MACD / RSI / EMA / SMA" }
+                }
+                Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                $btnToggleRsi.Text = if ([string]$script:Config.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($script:Config.RsiPeriod)" }
+                $btnToggleSma.Text = [string]$script:Config.MaType
+                Refresh-AllMarketData -Force
+                Update-AllUiViews
+            }
+            "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "TOUR"   { Show-WelcomeTour }
             "THEME"  {
                 if (-not $arg0) { $btnThemeCycle.PerformClick(); return "" }
                 $tn = @(Get-ThemeNames | Where-Object { $_.ToUpper() -eq $arg0 })
@@ -8984,7 +9107,7 @@ function Invoke-TerminalCommand {
 function Update-PaletteSuggestions {
     $pc = $script:PalCtl
     if ($null -eq $pc) { return }
-    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }))
+    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }) -Layouts @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name }))
     $pc.List.BeginUpdate()
     $pc.List.Items.Clear()
     foreach ($it in $pc.Items) { [void]$pc.List.Items.Add($it.Text) }
@@ -9611,6 +9734,342 @@ function Show-CsvImportDialog {
     }
 }
 
+# ==============================================================================
+# v4.6: grid columns, global hotkey, click-through, snapping, undo, price
+# flash, colours, own layouts, welcome tour
+# ==============================================================================
+
+# ---- colours ----
+function Get-BlendColor {
+    param([System.Drawing.Color]$A, [System.Drawing.Color]$B, [double]$T)
+    return [System.Drawing.Color]::FromArgb([int]($B.R + ($A.R - $B.R) * $T), [int]($B.G + ($A.G - $B.G) * $T), [int]($B.B + ($A.B - $B.B) * $T))
+}
+
+function Update-UpDownColors {
+    $ud = Get-UpDownColors -Scheme ([string]$script:Config.UpDownScheme) -UpHex ([string]$script:Config.UpColor) -DownHex ([string]$script:Config.DownColor)
+    $script:colGreen = [System.Drawing.Color]::FromArgb($ud.Up[0], $ud.Up[1], $ud.Up[2])
+    $script:colRed = [System.Drawing.Color]::FromArgb($ud.Down[0], $ud.Down[1], $ud.Down[2])
+}
+
+function Get-ArrowPrefix {
+    param([double]$V)
+    if (-not [bool]$script:Config.ShowArrows) { return "" }
+    if ($V -gt 0) { return [string][char]0x25B2 + " " }
+    if ($V -lt 0) { return [string][char]0x25BC + " " }
+    return ""
+}
+
+# ---- grid columns: right-click on a header, drag headers to reorder ----
+$script:GridDefaults = @{}
+$script:GridLayoutSig = @{}
+$script:GridLayoutBusy = $false
+
+function Save-GridLayout {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key)
+    if ($script:GridLayoutBusy) { return }
+    $gl = $script:Config.GridLayouts
+    if ($null -eq $gl) { $gl = [PSCustomObject]@{}; $script:Config.GridLayouts = $gl }
+    $val = @(ConvertTo-GridLayout @($Grid.Columns))
+    # resizing the window changes widths but not the weights: only save real changes
+    $sig = ($val | ForEach-Object { "{0}:{1}:{2:F1}:{3}" -f $_.Name, $_.Index, $_.Weight, $_.Visible }) -join "|"
+    if ($script:GridLayoutSig[$Key] -eq $sig) { return }
+    $script:GridLayoutSig[$Key] = $sig
+    if ($null -eq $gl.PSObject.Properties[$Key]) { $gl | Add-Member -NotePropertyName $Key -NotePropertyValue $val -Force } else { $gl.$Key = $val }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
+function Restore-GridLayout {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key, [switch]$Defaults)
+    $items = $null
+    if ($Defaults) { $items = $script:GridDefaults[$Key] }
+    elseif ($null -ne $script:Config.GridLayouts -and $null -ne $script:Config.GridLayouts.PSObject.Properties[$Key]) { $items = @($script:Config.GridLayouts.$Key) }
+    if ($null -eq $items) { return }
+    $script:GridLayoutBusy = $true
+    try {
+        foreach ($it in @($items | Sort-Object -Property @{ Expression = { [int]$_.Index } })) {
+            $col = $Grid.Columns[[string]$it.Name]
+            if ($null -eq $col) { continue }
+            if ($col.Index -ne 0) { $col.Visible = [bool]$it.Visible }
+            if ([double]$it.Weight -gt 0) { $col.FillWeight = [float][double]$it.Weight }
+            $col.DisplayIndex = [math]::Min([int]$it.Index, $Grid.Columns.Count - 1)
+        }
+    } catch { Write-WidgetLog "Grid layout $Key not restored: $($_.Exception.Message)" "WARN" }
+    finally { $script:GridLayoutBusy = $false }
+}
+
+function Enable-GridCustomization {
+    param([System.Windows.Forms.DataGridView]$Grid, [string]$Key)
+    $script:GridDefaults[$Key] = @(ConvertTo-GridLayout @($Grid.Columns))
+    $Grid.AllowUserToOrderColumns = $true
+    $Grid.Tag = $Key
+    Restore-GridLayout -Grid $Grid -Key $Key
+    $script:GridLayoutSig[$Key] = (@(ConvertTo-GridLayout @($Grid.Columns)) | ForEach-Object { "{0}:{1}:{2:F1}:{3}" -f $_.Name, $_.Index, $_.Weight, $_.Visible }) -join "|"
+    $Grid.Add_ColumnDisplayIndexChanged({ param($sender, $e) Save-GridLayout -Grid $sender -Key ([string]$sender.Tag) })
+    $Grid.Add_ColumnWidthChanged({ param($sender, $e) Save-GridLayout -Grid $sender -Key ([string]$sender.Tag) })
+    $Grid.Add_ColumnHeaderMouseClick({
+        param($sender, $e)
+        if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) { return }
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $menu.ShowCheckMargin = $true
+        foreach ($col in @($sender.Columns | Sort-Object DisplayIndex)) {
+            $mi = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($col.HeaderText) { $col.HeaderText } else { $col.Name }))
+            $mi.Checked = $col.Visible
+            $mi.Enabled = ($col.Index -ne 0)
+            $mi.Tag = @($sender, $col.Name)
+            $mi.Add_Click({
+                param($s2, $e2)
+                $gr = $s2.Tag[0]; $cn = [string]$s2.Tag[1]
+                $gr.Columns[$cn].Visible = -not $gr.Columns[$cn].Visible
+                Save-GridLayout -Grid $gr -Key ([string]$gr.Tag)
+            })
+            [void]$menu.Items.Add($mi)
+        }
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        $rs = New-Object System.Windows.Forms.ToolStripMenuItem("Standard wiederherstellen")
+        $rs.Tag = $sender
+        $rs.Add_Click({
+            param($s2, $e2)
+            Restore-GridLayout -Grid $s2.Tag -Key ([string]$s2.Tag.Tag) -Defaults
+            Save-GridLayout -Grid $s2.Tag -Key ([string]$s2.Tag.Tag)
+        })
+        [void]$menu.Items.Add($rs)
+        $menu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
+    })
+}
+
+# ---- global hotkey + click-through (Win32 via a small helper class) ----
+$script:Hotkey = $null
+$script:HotkeyTypeOk = $false
+try {
+    if (-not ("TwHotkeyWindow" -as [type])) {
+        $refs = New-Object System.Collections.Generic.List[string]
+        foreach ($t in @([System.Windows.Forms.NativeWindow], [System.Windows.Forms.Message], [System.Windows.Forms.CreateParams])) {
+            $loc = $t.Assembly.Location
+            if ($loc -and -not $refs.Contains($loc)) { $refs.Add($loc) }
+        }
+        Add-Type -ReferencedAssemblies $refs.ToArray() -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class TwHotkeyWindow : System.Windows.Forms.NativeWindow, IDisposable {
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+    public Action OnHotkey;
+    bool registered;
+    public TwHotkeyWindow() { CreateHandle(new System.Windows.Forms.CreateParams()); }
+    public bool Register(uint mods, uint vk) { Unregister(); registered = RegisterHotKey(Handle, 0x7A11, mods | 0x4000, vk); return registered; }
+    public void Unregister() { if (registered) { UnregisterHotKey(Handle, 0x7A11); registered = false; } }
+    protected override void WndProc(ref System.Windows.Forms.Message m) {
+        if (m.Msg == 0x0312 && OnHotkey != null) { try { OnHotkey(); } catch { } }
+        base.WndProc(ref m);
+    }
+    public void Dispose() { Unregister(); DestroyHandle(); }
+    public static void SetClickThrough(IntPtr hWnd, bool on) {
+        int ex = GetWindowLong(hWnd, -20);
+        if (on) { ex = ex | 0x80000 | 0x20; } else { ex = ex & ~0x20; }
+        SetWindowLong(hWnd, -20, ex);
+    }
+}
+"@
+    }
+    $script:HotkeyTypeOk = $true
+} catch {
+    Write-WidgetLog "Hotkey helper not available: $($_.Exception.Message)" "WARN"
+}
+
+function Invoke-HotkeyToggle {
+    if ($script:IsClosing) { return }
+    if ($script:ClickThrough) { Set-ClickThrough $false }
+    if ($form.Visible -and $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Minimized -and [System.Windows.Forms.Form]::ActiveForm -eq $form) {
+        $form.Hide()
+    } else {
+        Show-MainWindow
+        $form.Activate()
+    }
+}
+
+function Register-GlobalHotkey {
+    if (-not $script:HotkeyTypeOk) { return "nicht verfügbar" }
+    try {
+        if ($null -eq $script:Hotkey) {
+            $script:Hotkey = New-Object TwHotkeyWindow
+            $script:Hotkey.OnHotkey = [Action]{ Invoke-HotkeyToggle }
+        }
+        $script:Hotkey.Unregister()
+        $hk = ConvertFrom-HotkeyText ([string]$script:Config.GlobalHotkey)
+        if ($null -eq $hk) { return "aus" }
+        if ($script:Hotkey.Register([uint32]$hk.Mods, [uint32]$hk.Key)) { Write-WidgetLog "Global hotkey: $($hk.Text)"; return "" }
+        Write-WidgetLog "Global hotkey $($hk.Text) is used by another program" "WARN"
+        return "$($hk.Text) ist schon von einem anderen Programm belegt"
+    } catch {
+        Write-WidgetLog "Global hotkey failed: $($_.Exception.Message)" "WARN"
+        return "Fehler: $($_.Exception.Message)"
+    }
+}
+
+$script:ClickThrough = $false
+function Set-ClickThrough {
+    param([bool]$On)
+    if (-not $script:HotkeyTypeOk) { Set-TransientStatus "Durchklicken ist auf diesem System nicht verfügbar" 4; return }
+    if ($On -and -not (ConvertFrom-HotkeyText ([string]$script:Config.GlobalHotkey))) {
+        Show-InfoBox -Text "Zum Zurückholen wird das globale Tastenkürzel gebraucht (Einstellungen). Ohne Kürzel bleibt nur das Tray-Menü." -Title "Durchklicken"
+    }
+    $script:ClickThrough = $On
+    try { [TwHotkeyWindow]::SetClickThrough($form.Handle, $On) } catch { Write-WidgetLog "Click-through failed: $($_.Exception.Message)" "WARN" }
+    if ($On) {
+        if (-not $form.TopMost) { $form.TopMost = $true }
+        if ($form.Opacity -gt 0.85) { $form.Opacity = 0.85 }
+    } else {
+        $form.Opacity = [double]$script:Config.Opacity / 100.0
+        $form.TopMost = [bool]$script:Config.TopMost
+    }
+    $miClickThrough.Checked = $On
+    Write-WidgetLog "Click-through: $On"
+}
+
+# ---- undo for deletions (Ctrl+Z within 10 seconds) ----
+$script:Undo = $null
+function Set-Undo {
+    param([string]$Kind, $Data, [string]$Text)
+    $script:Undo = @{ Kind = $Kind; Data = $Data; Until = (Get-Date).AddSeconds(10) }
+    Set-TransientStatus ("{0} - Strg+Z = rückgängig" -f $Text) 10
+}
+
+function Invoke-Undo {
+    $u = $script:Undo
+    if (-not (Test-UndoValid -Undo $u)) { return $false }
+    $script:Undo = $null
+    switch ($u.Kind) {
+        "Alert" {
+            $ix = [math]::Min([int]$u.Data.Index, $script:Alerts.Count)
+            $script:Alerts.Insert($ix, $u.Data.Item)
+            Save-Alerts
+        }
+        "Position" {
+            $script:Portfolio[[string]$u.Data.Key] = $u.Data.Item
+            Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
+        }
+        "Watchlist" {
+            $script:Config.Watchlist = @($u.Data)
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        }
+    }
+    Set-TransientStatus "Wiederhergestellt" 3
+    Refresh-AllMarketData
+    Update-AllUiViews
+    return $true
+}
+
+# ---- price flash ----
+$script:LastFlashPrice = @{}
+$script:FlashTimer = New-Object System.Windows.Forms.Timer
+$script:FlashTimer.Interval = 900
+$script:FlashTimer.Add_Tick({
+    $script:FlashTimer.Stop()
+    foreach ($pair in @(@($dgvWatchlist, "Price"), @($dgvPortfolio, "Price"))) {
+        $g = $pair[0]
+        if ($null -eq $g.Columns[$pair[1]]) { continue }
+        foreach ($r in $g.Rows) { $r.Cells[$pair[1]].Style.BackColor = [System.Drawing.Color]::Empty }
+    }
+})
+
+function Set-PriceFlash {
+    # Tints the price cell when the price changed since the last refresh
+    param($Cell, [string]$Key, [double]$Price)
+    if (-not [bool]$script:Config.PriceFlash -or $Price -le 0) { return }
+    $old = $script:LastFlashPrice[$Key]
+    $script:LastFlashPrice[$Key] = $Price
+    if ($null -eq $old -or [math]::Abs([double]$old - $Price) -lt 1e-9) { return }
+    $c = if ($Price -gt [double]$old) { $script:colGreen } else { $script:colRed }
+    $Cell.Style.BackColor = Get-BlendColor -A $c -B $script:Pal.Card -T 0.35
+    $script:FlashTimer.Stop()
+    $script:FlashTimer.Start()
+}
+
+# ---- own layouts ----
+$script:LayoutKeys = @("Layout", "TerminalChartPct", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalBottom", "Theme", "AccentColor", "AccentHex",
+                       "UpDownScheme", "ChartType", "ShowVolume", "ShowSma", "ShowRsi", "ShowVwap", "ShowBollinger", "ShowExtended", "Timeframe", "LowerPanel", "MaType", "Opacity", "TopMost")
+
+function Save-UserLayout {
+    param([string]$Name)
+    $snap = [ordered]@{ Name = $Name }
+    foreach ($k in $script:LayoutKeys) { $snap[$k] = $script:Config.$k }
+    $list = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -ne $Name.ToUpper() })
+    $script:Config.UserLayouts = @($list) + @([PSCustomObject]$snap)
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-TransientStatus "Layout '$Name' gespeichert (LAYOUT $($Name.ToUpper()))" 4
+}
+
+function Use-UserLayout {
+    param([string]$Name)
+    $hit = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ -and ([string]$_.Name).ToUpper() -eq $Name.ToUpper() })
+    if ($hit.Count -eq 0) { return $false }
+    $l = $hit[0]
+    foreach ($k in $script:LayoutKeys) { if ($null -ne $l.PSObject.Properties[$k] -and $k -ne "Layout") { $script:Config.$k = $l.$k } }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-UpDownColors
+    Apply-ThemeToAllControls
+    $form.Opacity = [double]$script:Config.Opacity / 100.0
+    $form.TopMost = [bool]$script:Config.TopMost
+    Apply-Layout ([string]$l.Layout)
+    Refresh-AllMarketData -Force
+    Update-AllUiViews
+    return $true
+}
+
+# ---- welcome tour ----
+function Show-WelcomeTour {
+    $pages = @(
+        @("Willkommen beim TerminalWidget", "Vom kleinen Ticker bis zum Terminal: mit L (oder dem Layout-Button oben rechts) wechselst du zwischen Ticker, Compact, Standard und Terminal.`r`n`r`nMaus über ein Element halten zeigt eine Erklärung. G öffnet das Glossar, H alle Tastenkürzel."),
+        @("Ticker und Watchlist", "Strg+F sucht einen Ticker (Name, Symbol oder ISIN). In der Watchlist: ziehen = Reihenfolge, Entf = löschen (Strg+Z holt ihn zurück), Rechtsklick auf eine Spaltenüberschrift = Spalten ein-/ausblenden, Überschriften ziehen = umsortieren."),
+        @("Portfolio", "Positionen im Portfolio-Tab anlegen - beim Speichern wird nach dem Kaufdatum gefragt. Buchungen vom Broker: Historie > Import (CSV). Mehrere Depots: Auswahl oben im Portfolio-Tab. P öffnet die Analyse mit Wertentwicklung, Rendite, Aufteilung und Dividenden."),
+        @("Alarme und Handy", "Alarme im Watch-Tab oder per Rechtsklick in den Chart: Kurs, Tag%, Trailing-Stopp, 52W-Hoch, Volumen, Depotwert ... Einstellungen > Handy-Push schickt sie per ntfy oder Telegram aufs Handy, mit Ruhezeit für die Nacht."),
+        @("Befehlszeile", "Strg+K öffnet die Befehlszeile wie im Terminal:`r`n  NVDA GP 1Y   Chart     NVDA DES   Beschreibung`r`n  NVDA N   Nachrichten   CAL   Termine   TOP   Gewinner/Verlierer`r`n  NVDA ALRT TRAIL 8   Alarm`r`n`r`nStrg+Alt+W holt das Widget von überall nach vorne (einstellbar).")
+    )
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title "Kurze Tour" -W (S 520) -H (S 300)
+    $t = New-Object System.Windows.Forms.Label
+    $t.SetBounds((S 20), (S 16), (S 480), (S 28)); $t.Font = $fontUiBold; $t.ForeColor = $p.Accent
+    $dlg.Controls.Add($t)
+    $b = New-Object System.Windows.Forms.Label
+    $b.SetBounds((S 20), (S 52), (S 480), (S 180)); $b.Font = $fontUi
+    $dlg.Controls.Add($b)
+    $n = New-Object System.Windows.Forms.Label
+    $n.SetBounds((S 20), (S 254), (S 120), (S 20)); $n.ForeColor = $p.Muted
+    $dlg.Controls.Add($n)
+    $next = New-Object System.Windows.Forms.Button
+    $next.SetBounds((S 406), (S 248), (S 96), (S 30))
+    Style-FlatButton -Btn $next -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $dlg.Controls.Add($next)
+    $skip = New-Object System.Windows.Forms.Button
+    $skip.SetBounds((S 302), (S 248), (S 96), (S 30)); $skip.Text = "Überspringen"
+    Style-FlatButton -Btn $skip -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $skip.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($skip)
+    $dlg.CancelButton = $skip
+    $script:TourCtl = @{ Dlg = $dlg; T = $t; B = $b; N = $n; Next = $next; Pages = $pages; I = 0 }
+    $script:TourCtl.Show = {
+        $tc = $script:TourCtl
+        $pg = $tc.Pages[$tc.I]
+        $tc.T.Text = $pg[0]; $tc.B.Text = $pg[1]
+        $tc.N.Text = "{0} / {1}" -f ($tc.I + 1), $tc.Pages.Count
+        $tc.Next.Text = if ($tc.I -ge $tc.Pages.Count - 1) { "Los geht's" } else { "Weiter" }
+    }
+    $next.Add_Click({
+        $tc = $script:TourCtl
+        if ($tc.I -ge $tc.Pages.Count - 1) { $tc.Dlg.Close(); return }
+        $tc.I++
+        & $tc.Show
+    })
+    & $script:TourCtl.Show
+    [void]$dlg.ShowDialog($form)
+    $script:TourCtl = $null
+    $dlg.Dispose()
+    $script:Config.FirstRunDone = $true
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
 function Show-CurrencyMismatchNotice {
     # v3.0: positions whose currency contradicts their own bookings were most
     # likely hit by the v2.9 load bug (non EUR/USD/CHF -> EUR, amount kept).
@@ -9840,10 +10299,12 @@ function Show-SettingsDialog {
     $nRsi   = & $addNum "RSI-Periode" 2 100 ([int]$cfg.RsiPeriod) "" "RSI"
     $nRsiOb = & $addNum "RSI überkauft ab" 51 99 ([int]$cfg.RsiOverbought) "" "RSI"
     $nRsiOs = & $addNum "RSI überverkauft bis" 1 49 ([int]$cfg.RsiOversold) "" "RSI"
+    $cbMa   = & $addCombo "Gleitender Durchschnitt" @("SMA", "EMA") ([string]$cfg.MaType) "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" "EMA"
+    $cbLow  = & $addCombo "Unteres Feld im Chart" @("RSI", "MACD") ([string]$cfg.LowerPanel) "" "MACD"
 
     & $addSection "Darstellung"
     $cbTheme  = & $addCombo "Theme" @(Get-ThemeNames) ([string]$cfg.Theme) "" "THEME"
-    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet") ([string]$cfg.AccentColor)
+    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen"
     $chkTop   = & $addCheck "Immer im Vordergrund" ([bool]$cfg.TopMost) "" "PIN"
     $chkTape  = & $addCheck "Laufleiste (Watchlist) im Compact-Layout" ([bool]$cfg.CompactTape)
 
@@ -9902,6 +10363,54 @@ function Show-SettingsDialog {
     $chkTWatch = & $addCheck "Terminal: Watchlist und Alarme anzeigen" ([bool]$cfg.TerminalShowWatch) "" "LAYOUT"
     $chkTPort  = & $addCheck "Terminal: Portfolio anzeigen" ([bool]$cfg.TerminalShowPortfolio) "" "LAYOUT"
     $nTChart   = & $addNum "Terminal: Chart-Höhe (%)" 25 80 ([int]$cfg.TerminalChartPct) "Anteil des Charts an der Fensterhöhe; der Rest gehört den Listen" "LAYOUT" 5
+
+    # v4.6: colours and window
+    & $addSection "Farben und Fenster"
+    $cbUd     = & $addCombo "Farben für Plus / Minus" @(@((Get-UpDownSchemes).Keys) + @("Eigene")) ([string]$cfg.UpDownScheme) "Farbenblind = Blau / Orange. Eigene = frei wählen." "COLORS"
+    $chkArrow = & $addCheck "Pfeile vor Veränderungen anzeigen" ([bool]$cfg.ShowArrows) "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" "COLORS"
+    $chkFlash = & $addCheck "Kurs kurz einfärben, wenn er sich ändert" ([bool]$cfg.PriceFlash)
+    $chkSnap  = & $addCheck "Fenster am Bildschirmrand einrasten" ([bool]$cfg.SnapToEdges)
+    $lHk = New-Object System.Windows.Forms.Label
+    $lHk.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
+    $lHk.Size = New-Object System.Drawing.Size((S 258), (S 18))
+    $lHk.Text = "Globales Tastenkürzel (zeigen / verstecken)"
+    $dlg.Controls.Add($lHk)
+    $tHk = New-Object System.Windows.Forms.TextBox
+    $tHk.SetBounds(($lay.X + (S 292)), $lay.Y, (S 112), (S 22))
+    $tHk.BackColor = $p.Input; $tHk.ForeColor = $p.Text; $tHk.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tHk.Font = $fontMono; $tHk.Text = [string]$cfg.GlobalHotkey
+    $dlg.Controls.Add($tHk)
+    Set-DynTip $tHk "Funktioniert auch, wenn ein anderes Programm vorne ist. Z. B. Ctrl+Alt+W, Win+F9. Leer = aus." "HOTKEY"
+    Set-DynTip $lHk "" "HOTKEY"
+    $lay.Y += S 29
+    $script:NewColors = @{ Up = [string]$cfg.UpColor; Down = [string]$cfg.DownColor; Accent = [string]$cfg.AccentHex }
+    $pickColor = {
+        param([string]$Start)
+        $cd = New-Object System.Windows.Forms.ColorDialog
+        $cd.FullOpen = $true
+        $rgb = ConvertFrom-HexColor $Start
+        if ($null -ne $rgb) { $cd.Color = [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) }
+        $hex = ""
+        if ($cd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $hex = ConvertTo-HexColor $cd.Color.R $cd.Color.G $cd.Color.B }
+        $cd.Dispose()
+        return $hex
+    }
+    $script:PickColor = $pickColor
+    $cbUd.Add_SelectionChangeCommitted({
+        param($sender, $e)
+        if ([string]$sender.SelectedItem -ne "Eigene") { return }
+        $u = & $script:PickColor $script:NewColors.Up
+        if (-not $u) { return }
+        $d = & $script:PickColor $script:NewColors.Down
+        if (-not $d) { return }
+        $script:NewColors.Up = $u; $script:NewColors.Down = $d
+    })
+    $cbAccent.Add_SelectionChangeCommitted({
+        param($sender, $e)
+        if ([string]$sender.SelectedItem -ne "Eigene") { return }
+        $a = & $script:PickColor $script:NewColors.Accent
+        if ($a) { $script:NewColors.Accent = $a }
+    })
 
     & $addSection "Erklärungen (Maus darüber)"
     $modes = Get-TooltipModes
@@ -10039,6 +10548,23 @@ function Show-SettingsDialog {
     $cfg.TerminalChartPct      = [int]$nTChart.Value
     foreach ($mk in $modes.Keys) { if ($modes[$mk] -eq [string]$cbTip.SelectedItem) { $cfg.TooltipMode = $mk } }
     $cfg.TooltipDelayMs        = [int]$nTipDelay.Value
+    # v4.6
+    if ([string]$cbMa.SelectedItem -ne [string]$cfg.MaType -or [string]$cbLow.SelectedItem -ne [string]$cfg.LowerPanel) { $needRefresh = $true }
+    $cfg.MaType                = [string]$cbMa.SelectedItem
+    $cfg.LowerPanel            = [string]$cbLow.SelectedItem
+    $cfg.UpDownScheme          = [string]$cbUd.SelectedItem
+    if ($cfg.UpDownScheme -eq "Eigene" -and -not ($script:NewColors.Up -and $script:NewColors.Down)) { $cfg.UpDownScheme = "Standard" }
+    $cfg.UpColor               = [string]$script:NewColors.Up
+    $cfg.DownColor             = [string]$script:NewColors.Down
+    $cfg.AccentHex             = [string]$script:NewColors.Accent
+    if ($cfg.AccentColor -eq "Eigene" -and -not $cfg.AccentHex) { $cfg.AccentColor = "Sky" }
+    $cfg.ShowArrows            = [bool]$chkArrow.Checked
+    $cfg.PriceFlash            = [bool]$chkFlash.Checked
+    $cfg.SnapToEdges           = [bool]$chkSnap.Checked
+    $hkNew = $tHk.Text.Trim()
+    $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
+    if (-not $hkNew -or $null -ne (ConvertFrom-HotkeyText $hkNew)) { $cfg.GlobalHotkey = $hkNew }
+    else { Set-TransientStatus "Tastenkürzel '$hkNew' nicht erkannt - z. B. Ctrl+Alt+W" 6; $hkChanged = $false }
     $autoWanted = [bool]$chkAuto.Checked
     $dlg.Dispose()
     if ($autoWanted -ne $autoNow) {
@@ -10056,7 +10582,8 @@ function Show-SettingsDialog {
     if ($cmbRefresh.Items.IndexOf($refStr) -lt 0) { [void]$cmbRefresh.Items.Add($refStr) }
     $cmbRefresh.SelectedIndex = $cmbRefresh.Items.IndexOf($refStr)
     $form.TopMost = [bool]$cfg.TopMost
-    $btnToggleRsi.Text = "RSI-$($cfg.RsiPeriod)"
+    $btnToggleRsi.Text = if ([string]$cfg.LowerPanel -eq "MACD") { "MACD" } else { "RSI-$($cfg.RsiPeriod)" }
+    $btnToggleSma.Text = [string]$cfg.MaType
     Set-Tip $btnToggleSma "Gleitende Durchschnitte SMA $($cfg.SmaFastPeriod)/$($cfg.SmaSlowPeriod) (Taste M)" "SMA"
     Apply-TooltipMode
     Update-ChartControlsLayout
@@ -10065,6 +10592,10 @@ function Show-SettingsDialog {
     Apply-Layout $newLayout
     if ($needRefresh) { Refresh-AllMarketData -Force }
     Set-TransientStatus "Einstellungen gespeichert" 3
+    if ($hkChanged) {
+        $hm = Register-GlobalHotkey
+        if ($hm -and $hm -ne "aus") { Set-TransientStatus "Tastenkürzel: $hm" 6 }
+    }
 }
 
 function Show-GlossaryDialog {
@@ -10186,6 +10717,11 @@ NVDA ALRT TRAIL 8 / >= 150 / TAG- 3 / 52H / VOL 2
 NVDA WL / CMP / TX   Watchlist / Vergleich / Transaktion
 PORT  ANA  DVD  CAL  TOP  FX  LOG  REP  TF 3M  LAYOUT TERMINAL
 THEME OLED  SET  PUSH  GLOS  ABOUT  PF <Depot>  IMP  BAK
+IND MACD/EMA  LAYOUT SAVE <Name>  CT (Durchklicken)  TOUR
+
+Strg+Z         Löschen rückgängig (10 Sekunden)
+Strg+Alt+W     Widget von überall zeigen / verstecken
+Rechtsklick auf Spaltenkopf = Spalten wählen, Kopf ziehen = Reihenfolge
 
 Alarme: Kurs, Tag%, RSI, SMA, Trailing-Stopp, EK%, 52W-Hoch/-Tief,
 Volumen-Spitze, Depotwert und Depot-Tag%. "Verlauf" zeigt alle
@@ -10375,6 +10911,17 @@ $cmiZoomReset.Add_Click({ Reset-ChartZoom })
 
 # Portfolio Grid & Editor Events
 Update-DepotCombo
+# v4.6: columns (right-click a header), global hotkey, snapping to screen edges
+Enable-GridCustomization -Grid $dgvWatchlist -Key "Watchlist"
+Enable-GridCustomization -Grid $dgvPortfolio -Key "Portfolio"
+$hkMsg = Register-GlobalHotkey
+if ($hkMsg -and $hkMsg -ne "aus") { Write-WidgetLog "Global hotkey: $hkMsg" "WARN" }
+$form.Add_ResizeEnd({
+    if (-not [bool]$script:Config.SnapToEdges -or $form.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) { return }
+    $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $sn = Get-SnappedPosition -X $form.Left -Y $form.Top -W $form.Width -H $form.Height -AreaLeft $wa.Left -AreaTop $wa.Top -AreaRight $wa.Right -AreaBottom $wa.Bottom -Dist (S 16)
+    if ($sn.Moved) { $form.Location = New-Object System.Drawing.Point([int]$sn.X, [int]$sn.Y) }
+})
 $cmbDepot.Add_SelectionChangeCommitted({
     if ($script:DepotComboBusy) { return }
     $ix = $cmbDepot.SelectedIndex
@@ -10393,6 +10940,7 @@ $cmbPortSort.Add_SelectedIndexChanged({
 })
 $dgvPortfolio.Add_ColumnHeaderMouseClick({
     param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     $name = $sender.Columns[$e.ColumnIndex].Name
     if ($name -eq "Spark") { return }
     Step-GridSort -Sort $script:PfSort -Col $name -TextCols @("Ticker")
@@ -10401,6 +10949,7 @@ $dgvPortfolio.Add_ColumnHeaderMouseClick({
 })
 $dgvWatchlist.Add_ColumnHeaderMouseClick({
     param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     Step-GridSort -Sort $script:WlSort -Col ($sender.Columns[$e.ColumnIndex].Name) -TextCols @("Sym")
     Set-GridSortGlyph -Grid $dgvWatchlist -Sort $script:WlSort
     $lblWlTitle.Text = if ($script:WlSort.Col) { "Watchlist (sortiert - 3. Klick = eigene Reihenfolge)" } else { "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" }
@@ -10558,10 +11107,11 @@ $btnPortHist.Add_Click({ Show-TransactionHistory })
 $btnPortDel.Add_Click({
     $sym = $txtPortTicker.Text.Trim().ToUpper()
     if ($sym -and $script:Portfolio.ContainsKey($sym)) {
-        if (-not (Confirm-Action -Text "Position '$sym' wirklich löschen?" -Title "Portfolio")) { return }
+        $old = $script:Portfolio[$sym]
         $script:Portfolio.Remove($sym)
         Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
         Update-AllUiViews
+        Set-Undo -Kind "Position" -Data @{ Key = $sym; Item = $old } -Text "Position $sym gelöscht (Buchungen bleiben)"
     }
 })
 
@@ -10803,10 +11353,12 @@ $btnAddAlert.Add_Click({
 $btnDelAlert.Add_Click({
     $idx = $lstAlerts.SelectedIndex
     if ($idx -ge 0 -and $idx -lt $script:Alerts.Count) {
-        if (-not (Confirm-Action -Text "Alarm '$($lstAlerts.Items[$idx])' löschen?" -Title "Preis-Alarm")) { return }
+        # v4.6: no question any more - Ctrl+Z brings it back
+        $al = $script:Alerts[$idx]
         $script:Alerts.RemoveAt($idx)
         Save-Alerts
         Update-AllUiViews
+        Set-Undo -Kind "Alert" -Data @{ Item = $al; Index = $idx } -Text ("Alarm {0} {1} gelöscht" -f $al.Ticker, $al.Condition)
     }
 })
 
@@ -11028,6 +11580,10 @@ $script:GlobalKeyHandler = {
         if (-not $script:Config.CompactMode) { Populate-TickerDropdown -FilterText "" }
         return
     }
+    # v4.6: Ctrl+Z = undo the last deletion (not inside text boxes)
+    if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Z -and -not ($sender.ActiveControl -is [System.Windows.Forms.TextBox])) {
+        if (Invoke-Undo) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    }
     # v4.4: Ctrl+K = command line (works in the fullscreen chart too)
     if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::K) {
         $e.Handled = $true
@@ -11231,6 +11787,10 @@ $uiTimer.Add_Tick({
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
         if ($script:PushPending.Count -gt 0) { Pump-PushTasks }
+        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown) {
+            $script:TourShown = $true
+            Show-WelcomeTour
+        }
         if ($nowTick -ge $script:NextEventsCheck) {
             $script:NextEventsCheck = $nowTick.AddMinutes(10)
             Update-EventsIfStale
