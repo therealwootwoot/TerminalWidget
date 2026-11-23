@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.1"
+$script:AppVersion    = "4.2"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -431,7 +431,7 @@ function Backup-DataFiles {
     # Returns the backup folder, or "" when there was nothing to copy / it failed.
     param([string]$Reason = "manuell")
     try {
-        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json") |
+        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json") |
             ForEach-Object { Join-Path $script:DataDir $_ } | Where-Object { Test-Path $_ })
         if ($files.Count -eq 0) { return "" }
         $safe = ($Reason -replace '[^A-Za-z0-9_.-]', '_')
@@ -466,6 +466,7 @@ $defaultConfig = [PSCustomObject]@{
     ShowBollinger         = $false
     ShowExtended          = $true
     NotifyMarketOpen      = $true
+    NotifyEarnings        = $true
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -661,6 +662,86 @@ function Get-ProfileEntry {
         $script:Profiles[$u] = [PSCustomObject]@{ Sector = ""; Industry = ""; Country = ""; QuoteType = ""; Name = ""; FetchedAt = ""; ManualSector = ""; ManualCountry = "" }
     }
     return $script:Profiles[$u]
+}
+
+# Earnings / dividend dates (v4.2) from Yahoo quoteSummary, refreshed about
+# once a day. Unknown numbers are stored as null (NaN is not valid JSON).
+$script:EventsPath = Join-Path $script:DataDir "events.json"
+$script:Events = @{}
+
+function ConvertTo-EventNumber {
+    param($V)
+    if ($null -eq $V) { return [double]::NaN }
+    try { return [double]$V } catch { return [double]::NaN }
+}
+
+function New-EventEntry {
+    param($V = $null)
+    $e = [PSCustomObject]@{
+        EarningsDate = ""; EarningsEnd = ""; ExDividendDate = ""; DividendDate = ""
+        DividendRate = [double]::NaN; DividendYield = [double]::NaN; TrailingRate = [double]::NaN
+        FetchedAt = ""; NotifiedEarnings = ""
+    }
+    if ($null -ne $V) {
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings")) { if ($null -ne $V.$f) { $e.$f = [string]$V.$f } }
+        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) { $e.$f = ConvertTo-EventNumber $V.$f }
+    }
+    return $e
+}
+
+$rawEvents = Load-JsonState -Path $script:EventsPath -DefaultValue $null
+if ($null -ne $rawEvents) {
+    foreach ($prop in $rawEvents.PSObject.Properties) {
+        if ($null -ne $prop.Value) { $script:Events[$prop.Name.ToUpper()] = New-EventEntry $prop.Value }
+    }
+}
+
+function Save-Events {
+    $out = @{}
+    foreach ($k in @($script:Events.Keys)) {
+        $e = $script:Events[$k]
+        $o = [ordered]@{}
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings")) { $o[$f] = [string]$e.$f }
+        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) {
+            $n = [double]$e.$f
+            $o[$f] = if ([double]::IsNaN($n) -or [double]::IsInfinity($n)) { $null } else { $n }
+        }
+        $out[$k] = [PSCustomObject]$o
+    }
+    Save-JsonState -Path $script:EventsPath -Data $out
+}
+
+function Set-EventEntry {
+    # Stores parsed calendar data; the "notified" mark survives while the
+    # earnings date stays the same
+    param([string]$Ticker, $Cal)
+    $u = ([string]$Ticker).ToUpper()
+    $old = $script:Events[$u]
+    $e = New-EventEntry
+    if ($null -ne $Cal) {
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate")) { $e.$f = [string]$Cal.$f }
+        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) { $e.$f = ConvertTo-EventNumber $Cal.$f }
+    } elseif ($null -ne $old) {
+        $e = New-EventEntry $old
+    }
+    if ($null -ne $old -and [string]$old.NotifiedEarnings -and [string]$old.NotifiedEarnings -eq $e.EarningsDate) { $e.NotifiedEarnings = [string]$old.NotifiedEarnings }
+    $e.FetchedAt = (Get-Date).ToString("o")
+    $script:Events[$u] = $e
+}
+
+function Get-TickerEarningsBadge {
+    param([string]$Sym, [int]$WindowDays = 7)
+    $ev = $script:Events[([string]$Sym).ToUpper()]
+    if ($null -eq $ev) { return $null }
+    return (Get-EarningsBadge -EarningsDate ([string]$ev.EarningsDate) -WindowDays $WindowDays)
+}
+
+function Format-IsoDateDe {
+    param([string]$Iso)
+    if (-not $Iso -or $Iso.Length -lt 10) { return "" }
+    $d = [DateTime]::MinValue
+    if ([DateTime]::TryParseExact($Iso.Substring(0, 10), "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return $d.ToString("dd.MM.yyyy") }
+    return $Iso
 }
 
 # Persistent Intraday Cache
@@ -1157,6 +1238,9 @@ $script:ProfileWorkerScript = {
     param($Client, [string[]]$Symbols, $Box, $Shared)
     $logs = New-Object System.Collections.Generic.List[string]
     $res = @{}
+    # v4.2: calendarEvents / summaryDetail = earnings and dividend dates
+    $evOnly = [bool]$Box.EventsOnly
+    $mods = if ($evOnly) { "calendarEvents%2CsummaryDetail" } else { "assetProfile%2CquoteType%2CcalendarEvents%2CsummaryDetail" }
     $get = {
         param([string]$U)
         try {
@@ -1186,12 +1270,14 @@ $script:ProfileWorkerScript = {
         $e = [Uri]::EscapeDataString($sym)
         $sum = $null; $srch = $null
         if ($crumb) {
-            $r = & $get ("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{0}?modules=assetProfile%2CquoteType&crumb={1}" -f $e, [Uri]::EscapeDataString($crumb))
+            $r = & $get ("https://query2.finance.yahoo.com/v10/finance/quoteSummary/{0}?modules={1}&crumb={2}" -f $e, $mods, [Uri]::EscapeDataString($crumb))
             if ($null -ne $r -and $r.Code -eq 200) { try { $sum = $r.Body | ConvertFrom-Json } catch { } }
             elseif ($null -ne $r -and $r.Code -eq 401) { $Shared.Crumb = ""; $crumb = ""; $logs.Add("WARN|Yahoo crumb rejected (401), continuing with the search") }
         }
-        $r2 = & $get ("https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=5&newsCount=0" -f $e)
-        if ($null -ne $r2 -and $r2.Code -eq 200) { try { $srch = $r2.Body | ConvertFrom-Json } catch { } }
+        if (-not $evOnly) {
+            $r2 = & $get ("https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=5&newsCount=0" -f $e)
+            if ($null -ne $r2 -and $r2.Code -eq 200) { try { $srch = $r2.Body | ConvertFrom-Json } catch { } }
+        }
         $res[$sym] = @{ Summary = $sum; Search = $srch }
     }
     $Box.Results = $res
@@ -1206,24 +1292,31 @@ $script:ProfileJobRunning = $false
 function Start-ProfileJob {
     # Fetches the profiles of $Symbols in the background; $OnComplete runs on
     # the UI thread after the store was updated and saved
-    param([string[]]$Symbols, [scriptblock]$OnComplete = $null)
+    param([string[]]$Symbols, [scriptblock]$OnComplete = $null, [bool]$EventsOnly = $false)
     $syms = @($Symbols | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpper() } | Sort-Object -Unique)
     if ($syms.Count -eq 0 -or $script:IsClosing -or $script:ProfileJobRunning) { return }
     $script:ProfileJobRunning = $true
-    $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
+    $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null; EventsOnly = $EventsOnly })
     $done = {
         param($Box, $Ctx)
         $script:ProfileJobRunning = $false
-        $n = 0
+        $n = 0; $ne = 0
         foreach ($sym in @($Box.Results.Keys)) {
             $rr = $Box.Results[$sym]
-            $pr = ConvertFrom-YahooProfile -Summary $rr.Summary -Search $rr.Search -Symbol $sym
-            $en = Get-ProfileEntry $sym
-            foreach ($f in @("Sector", "Industry", "Country", "QuoteType", "Name")) { if ($pr.$f) { $en.$f = [string]$pr.$f } }
-            $en.FetchedAt = (Get-Date).ToString("o")
-            $n++
+            if (-not $Box.EventsOnly) {
+                $pr = ConvertFrom-YahooProfile -Summary $rr.Summary -Search $rr.Search -Symbol $sym
+                $en = Get-ProfileEntry $sym
+                foreach ($f in @("Sector", "Industry", "Country", "QuoteType", "Name")) { if ($pr.$f) { $en.$f = [string]$pr.$f } }
+                $en.FetchedAt = (Get-Date).ToString("o")
+                $n++
+            }
+            # v4.2: earnings / dividend dates (kept when Yahoo had nothing this time)
+            $cal = if ($null -ne $rr.Summary) { ConvertFrom-YahooCalendar -Summary $rr.Summary } else { $null }
+            Set-EventEntry -Ticker $sym -Cal $cal
+            $ne++
         }
         if ($n -gt 0) { Save-Profiles; Write-WidgetLog "Profiles updated: $n" }
+        if ($ne -gt 0) { Save-Events; Write-WidgetLog "Event dates updated: $ne" }
         if ($null -ne $Ctx.Then) { & $Ctx.Then }
     }
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = @{ Then = $OnComplete }; OnComplete = $done }
@@ -5229,6 +5322,11 @@ function Refresh-PortfolioGrid {
         )
         $dgvPortfolio.Rows[$idx].Cells[7].Style.ForeColor = if ($r.PnlAbs -ge 0) { $colGreen } else { $colRed }
         $dgvPortfolio.Rows[$idx].Cells[8].Style.ForeColor = if ($r.DayPct -ge 0) { $colGreen } else { $colRed }
+        $eb = Get-TickerEarningsBadge $r.Ticker
+        if ($null -ne $eb) {
+            $dgvPortfolio.Rows[$idx].Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+            $dgvPortfolio.Rows[$idx].Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
+        }
     }
     Restore-GridState -Grid $dgvPortfolio -State $gridState
     } finally {
@@ -5375,6 +5473,11 @@ function Refresh-WatchlistAndAlerts {
                 $mStr
             )
             $row = $dgvWatchlist.Rows[$idx]
+            $eb = Get-TickerEarningsBadge $uSym
+            if ($null -ne $eb) {
+                $row.Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+                $row.Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
+            }
             $row.Cells["Day"].Style.ForeColor = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
             if ([bool]$q.FromCache) {
                 $row.Cells["Price"].Style.ForeColor = $script:Pal.Muted
@@ -5602,6 +5705,49 @@ function Update-MarketStatusUi {
     }
 }
 
+# ------------------------------------------------------------------------------
+# Earnings / dividend dates (v4.2): refreshed in the background for portfolio,
+# watchlist and the active ticker; tray hint the day before quarterly figures
+# ------------------------------------------------------------------------------
+$script:NextEventsCheck = (Get-Date).AddSeconds(30)
+
+function Get-EventSymbols {
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    if ($script:Config.ActiveTicker) { [void]$set.Add(([string]$script:Config.ActiveTicker).ToUpper()) }
+    foreach ($k in $script:Portfolio.Keys) { [void]$set.Add(([string]$k).ToUpper()) }
+    foreach ($w in @($script:Config.Watchlist)) { if ($w) { [void]$set.Add(([string]$w).ToUpper()) } }
+    return @($set | Where-Object { $_ -notmatch '^\^|=X$|-USD$|-EUR$' })
+}
+
+function Update-EventsIfStale {
+    if ($script:IsClosing -or $script:ProfileJobRunning -or $script:WorkerShared.CrumbFailed) { return }
+    $stale = @(Get-EventSymbols | Where-Object { Test-EventsStale -Entry $script:Events[$_] } | Select-Object -First 15)
+    if ($stale.Count -eq 0) { return }
+    Start-ProfileJob -Symbols $stale -EventsOnly $true -OnComplete {
+        try { Update-AllUiViews } catch { }
+        if ($null -ne $script:AnaCtl) { Update-AnalysisDividends }
+        Check-EarningsNotifications
+    }
+}
+
+function Check-EarningsNotifications {
+    # One balloon per company and earnings date, the day before (or on the day)
+    if (-not $script:Config.ShowTrayNotifications -or -not $script:Config.NotifyEarnings) { return }
+    $changed = $false
+    foreach ($k in @($script:Portfolio.Keys)) {
+        $u = ([string]$k).ToUpper()
+        $ev = $script:Events[$u]
+        if ($null -eq $ev -or -not $ev.EarningsDate -or [string]$ev.NotifiedEarnings -eq [string]$ev.EarningsDate) { continue }
+        $b = Get-EarningsBadge -EarningsDate ([string]$ev.EarningsDate) -WindowDays 1
+        if ($null -eq $b) { continue }
+        $trayIcon.ShowBalloonTip(6000, "Quartalszahlen: $u", ("{0} ({1}) - Kurs kann stark schwanken" -f $(if ($b.Days -eq 0) { "Heute" } else { "Morgen" }), (Format-IsoDateDe $b.Date)), [System.Windows.Forms.ToolTipIcon]::Info)
+        $ev.NotifiedEarnings = [string]$ev.EarningsDate
+        $changed = $true
+        Write-WidgetLog "Earnings notice: $u $($ev.EarningsDate)"
+    }
+    if ($changed) { Save-Events }
+}
+
 function Check-MarketOpenNotifications {
     # Balloon once per exchange when its regular session starts
     if (-not $script:Config.ShowTrayNotifications -or -not $script:Config.NotifyMarketOpen) { return }
@@ -5777,7 +5923,15 @@ function Update-AllUiViews {
         $lblDayChange.Text = "{0}{1:N2}%" -f $sign, $q.ChangePct
         $dispPrev = Convert-CurrencyValue -Amount $q.PrevClose -FromCurrency $q.Currency -ToCurrency $curr
         $lblDayAbs.Text = if ($q.PrevClose -gt 0) { "{0}{1:N2} {2}" -f $sign, ($dispPrice - $dispPrev), $curr } else { "" }
-        $lblHeaderName.Text = "{0} ({1})" -f $q.LongName, $q.Currency
+        # v4.2: quarterly figures within a week -> amber note in front of the name
+        $eb = Get-TickerEarningsBadge ([string]$script:Config.ActiveTicker)
+        if ($null -ne $eb) {
+            $lblHeaderName.Text = "Zahlen {0} · {1} ({2})" -f $eb.Text, $q.LongName, $q.Currency
+            $lblHeaderName.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        } else {
+            $lblHeaderName.Text = "{0} ({1})" -f $q.LongName, $q.Currency
+            $lblHeaderName.ForeColor = $p.Muted
+        }
 
         # Pre-/after-market quote below the price
         if ($q.ExtPrice -gt 0) {
@@ -5804,6 +5958,7 @@ function Update-AllUiViews {
         $lblDayAbs.Text = ""
         $lblExtQuote.Text = ""
         $lblHeaderName.Text = $sym
+        $lblHeaderName.ForeColor = $script:Pal.Muted
         Update-TrayIcon -Key "none"
     }
     Update-MarketStatusUi
@@ -6316,12 +6471,7 @@ function Invoke-PositionRebuild {
     $own = if ($null -ne $Owner) { $Owner } else { $form }
     $title = "Position neu berechnen"
     # v4.1: split events (bounded synchronous lookup, once per session)
-    if (-not $script:SplitCache.ContainsKey($sym)) {
-        $su = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1mo&range=max&events=split" -f [Uri]::EscapeDataString($sym)
-        $sr = Invoke-ParallelFetch -Urls @($su)
-        $sh = ConvertFrom-YahooDailyHistory -Json $sr[$su]
-        if ($null -ne $sh) { $script:SplitCache[$sym] = @{ Splits = @($sh.Splits); ToYear = (Get-Date).Year } }
-    }
+    Ensure-SplitsLoaded -Tickers @($sym)
     $r = Get-PositionFromTransactions -Transactions $script:Transactions.ToArray() -Ticker $sym -Splits (Get-SplitMap)
     if ($null -eq $r) {
         [System.Windows.Forms.MessageBox]::Show($own, "Für $sym gibt es keine Kauf-/Verkaufsbuchungen.", $title,
@@ -6566,7 +6716,8 @@ function Show-YearReport {
             }
             foreach ($t in @($Ctx.SplitUrls.Keys)) {
                 $h = ConvertFrom-YahooDailyHistory -Json $Box.Results[$Ctx.SplitUrls[$t]]
-                if ($null -ne $h) { $script:SplitCache[$t] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year } }
+                $old = $script:SplitCache[$t]
+                if ($null -ne $h -and ($null -eq $old -or -not [bool]$old.Full)) { $script:SplitCache[$t] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year } }
             }
             if ($null -eq $script:RepCtl) { return }
             & $script:RepCtl.Compute $Ctx.Year $Ctx.Base $Ctx.Txs $Ctx.Fb
@@ -6727,7 +6878,8 @@ function Start-AnalysisLoad {
                 $h = ConvertFrom-YahooDailyHistory -Json $Box.Results[$Ctx.Urls[$s]]
                 if ($null -ne $h) {
                     $script:AnaHist[$s] = @{ Hist = $h; At = (Get-Date); From = $Ctx.From }
-                    $script:SplitCache[$s] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year }
+                    $old = $script:SplitCache[$s]
+                    if ($null -eq $old -or -not [bool]$old.Full) { $script:SplitCache[$s] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year } }
                 } else {
                     $failed += $s
                 }
@@ -6747,11 +6899,18 @@ function Start-AnalysisLoad {
         }
     }
 
-    # Profiles (sector / country) in parallel, at most every 30 days
-    $stale = @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() } | Where-Object { $Force -or (Test-ProfileStale -Entry $script:Profiles[$_]) })
+    # Profiles (sector / country) at most every 30 days; the same request also
+    # brings the earnings / dividend dates (v4.2), those are kept for a day
+    $pSyms = @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() })
+    $stale = @($pSyms | Where-Object { $Force -or (Test-ProfileStale -Entry $script:Profiles[$_]) })
+    $evStale = @($pSyms | Where-Object { $Force -or (Test-EventsStale -Entry $script:Events[$_]) })
+    $after = { if ($null -ne $script:AnaCtl) { Update-AnalysisAllocation; Update-AnalysisDividends } }
     if ($stale.Count -gt 0) {
-        Start-ProfileJob -Symbols $stale -OnComplete { if ($null -ne $script:AnaCtl) { Update-AnalysisAllocation } }
+        Start-ProfileJob -Symbols (@($stale) + @($evStale)) -OnComplete $after
+    } elseif ($evStale.Count -gt 0 -and -not $script:WorkerShared.CrumbFailed) {
+        Start-ProfileJob -Symbols $evStale -EventsOnly $true -OnComplete $after
     }
+    Start-DividendLoad -Force $Force
 }
 
 function Update-AnalysisModel {
@@ -6853,6 +7012,7 @@ function Update-AnalysisModel {
     Update-AnalysisPerf
     Update-AnalysisReturns
     Update-AnalysisAllocation
+    Update-AnalysisDividends
 }
 
 function Format-Signed {
@@ -7144,6 +7304,154 @@ function Draw-AllocationBars {
     }
 }
 
+# ------------------------------------------------------------------------------
+# Dividends page (v4.2): history per share from the chart events (5 years,
+# monthly bars), dates from quoteSummary where available, otherwise estimated
+# ------------------------------------------------------------------------------
+$script:DivHist = @{}     # symbol -> @{ Divs; Currency; At; Failed }
+
+function Start-DividendLoad {
+    param([bool]$Force = $false)
+    $urls = @{}
+    foreach ($k in @($script:Portfolio.Keys)) {
+        $u = ([string]$k).ToUpper()
+        if ([double]$script:Portfolio[$k].Shares -le 0) { continue }
+        $h = $script:DivHist[$u]
+        $fresh = ($null -ne $h -and ((Get-Date) - $h.At).TotalHours -lt $(if ($h.Failed) { 0.5 } else { 6 }))
+        if ($Force -or -not $fresh) {
+            $urls[$u] = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1mo&range=5y&events=div" -f [Uri]::EscapeDataString($u)
+        }
+    }
+    if ($urls.Count -eq 0) { Update-AnalysisDividends; return }
+    Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
+        param($Box, $Ctx)
+        foreach ($s in @($Ctx.Urls.Keys)) {
+            $h = ConvertFrom-YahooDailyHistory -Json $Box.Results[$Ctx.Urls[$s]]
+            if ($null -ne $h) { $script:DivHist[$s] = @{ Divs = @($h.Dividends); Currency = [string]$h.Currency; At = (Get-Date); Failed = $false } }
+            else { $script:DivHist[$s] = @{ Divs = @(); Currency = ""; At = (Get-Date); Failed = $true } }
+        }
+        if ($null -ne $script:AnaCtl) { Update-AnalysisDividends }
+    }
+}
+
+function Update-AnalysisDividends {
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.DivGrid) { return }
+    $base = Get-AnalysisBase
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $g = $ac.DivGrid
+    $g.Rows.Clear()
+    $items = New-Object System.Collections.Generic.List[PSObject]
+    $tot = @{ Income = 0.0; Value = 0.0; Cost = 0.0; Loading = 0; Payers = 0 }
+    foreach ($sym in @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() } | Sort-Object)) {
+        $pf = $script:Portfolio[$sym]
+        $sh = [double]$pf.Shares
+        if ($sh -le 0) { continue }
+        $dh = $script:DivHist[$sym]
+        $ev = $script:Events[$sym]
+        $cur = if ($null -ne $dh -and $dh.Currency) { [string]$dh.Currency } else { Get-InstrumentCurrency $sym }
+        if (-not $cur) { $cur = [string]$pf.Currency }
+        $pxB = Get-AnalysisPriceNow -Sym $sym -Base $base
+        if (-not [double]::IsNaN($pxB)) { $tot.Value += $sh * $pxB }
+        $tot.Cost += Convert-CurrencyValue -Amount ($sh * [double]$pf.AvgPrice) -FromCurrency ([string]$pf.Currency) -ToCurrency $base
+
+        $st = $null; $proj = @()
+        if ($null -ne $dh -and -not $dh.Failed) {
+            $st = Get-DividendStats -Dividends $dh.Divs -AsOf $today
+            if ($null -ne $st) { $proj = @(Get-DividendProjection -Dividends $dh.Divs -AsOf $today -Stats $st) }
+        }
+        if ($null -eq $dh) { $tot.Loading++ }
+        $incB = 0.0
+        foreach ($pj in $proj) {
+            $v = Convert-CurrencyValue -Amount ([double]$pj.Amount * $sh) -FromCurrency $cur -ToCurrency $base
+            $incB += $v
+            $items.Add([PSCustomObject]@{ Date = $pj.Date; Value = $v })
+        }
+        $tot.Income += $incB
+        if ($incB -gt 0) { $tot.Payers++ }
+
+        $annual = if ($null -ne $st) { [double]$st.Annual } else { 0.0 }
+        $pxI = Get-AnalysisPriceNow -Sym $sym -Base $cur
+        $avgI = Convert-CurrencyValue -Amount ([double]$pf.AvgPrice) -FromCurrency ([string]$pf.Currency) -ToCurrency $cur
+        $yld = if ($annual -gt 0 -and -not [double]::IsNaN($pxI) -and $pxI -gt 0) { "{0:N2}%" -f ($annual / $pxI * 100.0) } else { "-" }
+        $yoc = if ($annual -gt 0 -and $avgI -gt 0) { "{0:N2}%" -f ($annual / $avgI * 100.0) } else { "-" }
+        $rhythm = if ($null -eq $dh) { "lädt ..." } elseif ($dh.Failed) { "n/v" } elseif ($null -eq $st) { "keine" } elseif ($st.Stopped) { "ausgesetzt?" } else { [string]$st.FrequencyLabel }
+        $lastTxt = if ($null -ne $st) { "{0:N4} {1}" -f $st.Last, $cur } else { "-" }
+        $annTxt = if ($annual -gt 0) { "{0:N4} {1}" -f $annual, $cur } else { "-" }
+        $incTxt = if ($incB -gt 0) { "{0:N2} {1}" -f $incB, $base } else { "-" }
+        $exTxt = "-"; $exExact = $false
+        if ($null -ne $ev -and $ev.ExDividendDate -and [string]::CompareOrdinal([string]$ev.ExDividendDate, $today) -ge 0) { $exTxt = Format-IsoDateDe $ev.ExDividendDate; $exExact = $true }
+        elseif ($null -ne $st -and $st.NextEx) { $exTxt = "~" + (Format-IsoDateDe $st.NextEx) }
+        $payTxt = if ($null -ne $ev -and $ev.DividendDate -and [string]::CompareOrdinal([string]$ev.DividendDate, $today) -ge 0) { Format-IsoDateDe $ev.DividendDate } else { "-" }
+        $earnTxt = "-"
+        if ($null -ne $ev -and $ev.EarningsDate -and [string]::CompareOrdinal([string]$ev.EarningsDate, $today) -ge 0) {
+            $earnTxt = Format-IsoDateDe $ev.EarningsDate
+            if ($ev.EarningsEnd -and $ev.EarningsEnd -ne $ev.EarningsDate) { $earnTxt += " - " + (Format-IsoDateDe $ev.EarningsEnd) }
+        }
+        $ri = $g.Rows.Add($sym, $rhythm, $lastTxt, $annTxt, $yld, $yoc, $incTxt, $exTxt, $payTxt, $earnTxt)
+        $row = $g.Rows[$ri]
+        if (-not $exExact -and $exTxt -ne "-") { $row.Cells["Ex"].Style.ForeColor = $script:Pal.Muted; $row.Cells["Ex"].ToolTipText = "Geschätzt aus dem bisherigen Rhythmus (~). Genaues Datum kommt von Yahoo, sobald angekündigt." }
+        if ($null -ne $st -and $st.Stopped) { $row.Cells["Freq"].Style.ForeColor = $amber; $row.Cells["Freq"].ToolTipText = "Seit {0} keine Zahlung mehr - gekürzt oder ausgesetzt? Nicht in der Prognose." -f (Format-IsoDateDe $st.LastDate) }
+        if ($null -ne $st) { $row.Cells["Last"].ToolTipText = "Letzte Dividende am {0} (Ex-Tag), {1} Zahlungen in 12 Monaten" -f (Format-IsoDateDe $st.LastDate), $st.Count12 }
+        $eb = Get-TickerEarningsBadge $sym
+        if ($null -ne $eb) { $row.Cells["Earn"].Style.ForeColor = $amber; $row.Cells["Earn"].ToolTipText = "Quartalszahlen {0}" -f $eb.Text }
+    }
+    $ac.DivBuckets = @(Get-MonthlyBuckets -Items $items.ToArray() -AsOf $today)
+    $ac.DivBase = $base
+
+    # received this year (bookings, gross, in base)
+    $recv = [double]::NaN
+    try {
+        $fb = @{}
+        foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
+        $rep = Get-RealizedReport -Transactions $script:Transactions.ToArray() -Year (Get-Date).Year -Base $base -History (Get-FxHistoryMap) -FallbackFromEur $fb -Splits (Get-SplitMap)
+        $recv = [double]$rep.DividendsGross
+    } catch { Write-WidgetLog "Dividends received: $($_.Exception.Message)" "WARN" }
+
+    $yP = if ($tot.Value -gt 0) { "{0:N2} %" -f ($tot.Income / $tot.Value * 100.0) } else { "-" }
+    $yC = if ($tot.Cost -gt 0) { "{0:N2} %" -f ($tot.Income / $tot.Cost * 100.0) } else { "-" }
+    $rTxt = if ([double]::IsNaN($recv)) { "-" } else { "{0:N2} {1}" -f $recv, $base }
+    $ac.DivSum.Text = ("Erwartet nächste 12 Monate: {0:N2} {1}  (≈ {2:N2} {1} / Monat)   Rendite: {3}   auf Einstand: {4}`r`nErhalten {5} (gebucht): {6}   Zahler: {7} von {8} Positionen{9}" -f
+        $tot.Income, $base, ($tot.Income / 12.0), $yP, $yC, (Get-Date).Year, $rTxt, $tot.Payers, $g.Rows.Count, $(if ($tot.Loading -gt 0) { "   (lade Dividenden ...)" } else { "" }))
+    $ac.DivBars.Invalidate()
+}
+
+function Draw-DividendBars {
+    param([System.Drawing.Graphics]$g, [int]$W, [int]$H)
+    $ac = $script:AnaCtl
+    $p = $script:Pal
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear($p.Card)
+    $brT = New-Object System.Drawing.SolidBrush($p.Text)
+    $brM = New-Object System.Drawing.SolidBrush($p.Muted)
+    $brA = New-Object System.Drawing.SolidBrush($p.Accent)
+    $sfC = New-Object System.Drawing.StringFormat
+    $sfC.Alignment = [System.Drawing.StringAlignment]::Center
+    try {
+        $bk = if ($null -ne $ac) { @($ac.DivBuckets) } else { @() }
+        $g.DrawString(("Erwartete Dividenden je Monat (nach Ex-Tag, brutto, {0})" -f $ac.DivBase), $fontUi, $brM, [float](S 8), [float](S 6))
+        if ($bk.Count -eq 0) { return }
+        $max = 0.0
+        foreach ($b in $bk) { if ([double]$b.Value -gt $max) { $max = [double]$b.Value } }
+        if ($max -le 0) { $g.DrawString("Keine Dividenden erwartet.", $fontUi, $brM, [float](S 8), [float](S 30)); return }
+        $top = S 44; $bot = $H - (S 24)
+        $slot = ($W - (S 16)) / [double]$bk.Count
+        for ($i = 0; $i -lt $bk.Count; $i++) {
+            $v = [double]$bk[$i].Value
+            $x = (S 8) + $i * $slot
+            $bh = if ($max -gt 0) { ($bot - $top) * $v / $max } else { 0 }
+            if ($v -gt 0) {
+                $g.FillRectangle($brA, [float]($x + $slot * 0.18), [float]($bot - $bh), [float]($slot * 0.64), [float][math]::Max(1, $bh))
+                $g.DrawString(("{0:N0}" -f $v), $fontUi, $brT, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot - $bh - (S 18)), [float]$slot, [float](S 18))), $sfC)
+            }
+            $g.DrawString([string]$bk[$i].Label, $fontUi, $brM, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot + (S 4)), [float]$slot, [float](S 18))), $sfC)
+        }
+    } finally {
+        $brT.Dispose(); $brM.Dispose(); $brA.Dispose(); $sfC.Dispose()
+    }
+}
+
 function Show-AnalysisPage {
     param([string]$Page)
     $ac = $script:AnaCtl
@@ -7185,6 +7493,8 @@ function Show-AnalysisDialog {
     $pageBtns["Perf"]  = & $mkBtn "Wertentwicklung" (S 12) (S 10) (S 130) $dlg
     $pageBtns["Ret"]   = & $mkBtn "Rendite" (S 146) (S 10) (S 100) $dlg
     $pageBtns["Alloc"] = & $mkBtn "Aufteilung" (S 250) (S 10) (S 110) $dlg
+    $pageBtns["Div"]   = & $mkBtn "Dividenden" (S 364) (S 10) (S 110) $dlg
+    Set-DynTip $pageBtns["Div"] "Erwartete Dividenden, Rendite, Ex-Tage und Quartalszahlen je Position" "DIVFORECAST"
     Set-DynTip $pageBtns["Perf"] "Depotwert über die Zeit, aus deinen Buchungen nachgerechnet, mit Benchmark" "BENCHMARK"
     Set-DynTip $pageBtns["Ret"] "Ergebnis und Jahresrendite je Position" "XIRR"
     Set-DynTip $pageBtns["Alloc"] "Aufteilung nach Position, Währung, Sektor und Land" "ALLOCATION"
@@ -7217,7 +7527,7 @@ function Show-AnalysisDialog {
     $dlg.Controls.Add($lblStatus)
 
     $pages = [ordered]@{}
-    foreach ($k in @("Perf", "Ret", "Alloc")) {
+    foreach ($k in @("Perf", "Ret", "Alloc", "Div")) {
         $pn = New-Object System.Windows.Forms.Panel
         $pn.SetBounds((S 12), (S 64), (S 976), (S 564))
         $pn.Anchor = $aAll
@@ -7250,6 +7560,8 @@ function Show-AnalysisDialog {
     $chart.Anchor = $aAll
     Enable-DoubleBuffering -Control $chart
     $pp.Controls.Add($chart)
+    $btnBuyDates = & $mkBtn "Kaufdaten ..." (S 846) 0 (S 130) $pp ($aT -bor $aR)
+    Set-DynTip $btnBuyDates "Kaufdatum für Positionen ohne Buchung nachtragen (Anfangsbestand) oder Datum von Editor-Buchungen korrigieren" "OPENING"
     $lblSum = New-Object System.Windows.Forms.Label
     $lblSum.SetBounds(0, (S 494), (S 976), (S 68))
     $lblSum.Anchor = $aB -bor $aL -bor $aR
@@ -7328,7 +7640,38 @@ function Show-AnalysisDialog {
     $lblPg.Text = "Sektor/Land per Klick überschreiben (blau = manuell). Leer = wieder automatisch."
     $pa.Controls.Add($lblPg)
 
+    # --- Dividenden ---
+    $pd = $pages["Div"]
+    $lblDivSum = New-Object System.Windows.Forms.Label
+    $lblDivSum.SetBounds(0, 0, (S 976), (S 40)); $lblDivSum.Anchor = $aT -bor $aL -bor $aR
+    $lblDivSum.Font = $fontMono
+    $pd.Controls.Add($lblDivSum)
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.SetBounds(0, (S 44), (S 976), (S 290)); $dg.Anchor = $aT -bor $aL -bor $aR
+    Style-DataGrid -Grid $dg
+    foreach ($cd in @(@("Ticker", "Ticker", 80, ""), @("Freq", "Rhythmus", 96, ""), @("Last", "Letzte", 96, ""), @("Annual", "Pro Jahr", 96, ""), @("Yield", "Rendite", 70, "DIVYIELD"),
+                      @("Yoc", "auf EK", 70, "YOC"), @("Income", "Erwartet 12M", 104, "DIVFORECAST"), @("Ex", "Nächster Ex-Tag", 104, "EXDATE"), @("Pay", "Zahltag", 84, ""), @("Earn", "Quartalszahlen", 130, "EARNINGS"))) {
+        $ci = $dg.Columns.Add($cd[0], $cd[1])
+        $col = $dg.Columns[$ci]
+        $col.FillWeight = [float](S $cd[2])
+        $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        if ($ci -ge 2 -and $ci -le 6) { $col.DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
+        if ($cd[3]) { $col.ToolTipText = Get-GlossaryShort -Key $cd[3] }
+    }
+    $dg.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $pd.Controls.Add($dg)
+    $divBars = New-Object System.Windows.Forms.Panel
+    $divBars.SetBounds(0, (S 342), (S 976), (S 186)); $divBars.Anchor = $aAll
+    Enable-DoubleBuffering -Control $divBars
+    $pd.Controls.Add($divBars)
+    $lblDivNote = New-Object System.Windows.Forms.Label
+    $lblDivNote.SetBounds(0, (S 532), (S 976), (S 30)); $lblDivNote.Anchor = $aB -bor $aL -bor $aR
+    $lblDivNote.ForeColor = $p.Muted
+    $lblDivNote.Text = "Prognose: Zahlungen der letzten 12 Monate je Aktie × heutige Stückzahl, brutto (vor Steuern). ~ = geschätzter Termin. Wechselkurse von heute."
+    $pd.Controls.Add($lblDivNote)
+
     $script:AnaCtl = @{
+        DivGrid = $dg; DivSum = $lblDivSum; DivBars = $divBars; DivBuckets = @(); DivBase = ""
         Dlg = $dlg; Status = $lblStatus; Reload = $btnReload; Base = $cbBase; Bench = $tbBench
         Pages = $pages; PageButtons = $pageBtns; Page = "Perf"
         Chart = $chart; Sum = $lblSum; RangeButtons = $rangeBtns; HoverIdx = -1; Geom = $null
@@ -7372,6 +7715,9 @@ function Show-AnalysisDialog {
     $chart.Add_MouseLeave({ param($sender, $e) $script:AnaCtl.HoverIdx = -1; $sender.Invalidate() })
     $bars.Add_Paint({ param($sender, $e) try { Draw-AllocationBars -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "Allocation bars: $($_.Exception.Message)" "WARN" } })
     $bars.Add_Resize({ param($sender, $e) $sender.Invalidate() })
+    $divBars.Add_Paint({ param($sender, $e) try { Draw-DividendBars -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "Dividend bars: $($_.Exception.Message)" "WARN" } })
+    $divBars.Add_Resize({ param($sender, $e) $sender.Invalidate() })
+    $btnBuyDates.Add_Click({ if ([int](@(Show-BuyDatesDialog) | Select-Object -Last 1) -gt 0) { Start-AnalysisLoad } })
     foreach ($k in $dimBtns.Keys) {
         $dimBtns[$k].Add_Click({ param($sender, $e) $script:AnaCtl.Dim = [string]$sender.Tag; Update-AnalysisAllocation })
     }
@@ -7430,6 +7776,200 @@ function Show-AnalysisDialog {
         $script:AnaCtl = $null
         $dlg.Dispose()
     }
+}
+
+# ------------------------------------------------------------------------------
+# Buy dates (v4.2): the date of a buy matters for the value history, XIRR and
+# the yearly report. Saving a position asks for it; "Kaufdaten" adds opening
+# bookings for unbooked shares and corrects editor bookings dated "today".
+# Bookings dated before a split are stored in the units of their own date.
+# ------------------------------------------------------------------------------
+function Ensure-SplitsLoaded {
+    # Split events of these tickers (bounded synchronous lookup, once per session)
+    param([string[]]$Tickers)
+    $need = @(@($Tickers) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpper() } | Sort-Object -Unique | Where-Object { -not $script:SplitCache.ContainsKey($_) -or -not [bool]$script:SplitCache[$_].Full })
+    if ($need.Count -eq 0) { return }
+    $urls = @{}
+    foreach ($t in $need) { $urls[$t] = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1mo&range=max&events=split" -f [Uri]::EscapeDataString($t) }
+    $res = Invoke-ParallelFetch -Urls @($urls.Values)
+    foreach ($t in $need) {
+        $h = ConvertFrom-YahooDailyHistory -Json $res[$urls[$t]]
+        # Full = complete history (range=max); the analysis cache only covers its own window
+        if ($null -ne $h) { $script:SplitCache[$t] = @{ Splits = @($h.Splits); ToYear = (Get-Date).Year; Full = $true } }
+        else { Write-WidgetLog "Split events for $t not available (offline?)" "WARN" }
+    }
+}
+
+function Get-BookingUnitsFactor {
+    # today's units -> units on Date (1.0 for recent dates, no lookup needed)
+    param([string]$Ticker, [string]$Date)
+    if (-not $Date) { return 1.0 }
+    $d = [DateTime]::ParseExact($Date, "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    if (((Get-Date).Date - $d).TotalDays -lt 7) { return 1.0 }
+    Ensure-SplitsLoaded -Tickers @($Ticker)
+    return (Get-SplitFactorAfter -Splits (Get-SplitMap) -Ticker $Ticker -Date $Date)
+}
+
+function Show-BuyDatePrompt {
+    # Returns yyyy-MM-dd, or "" when cancelled
+    param([string]$Ticker, [double]$Shares)
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title "Kaufdatum - $Ticker" -W (S 360) -H (S 150)
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.SetBounds((S 14), (S 12), (S 332), (S 40))
+    $lbl.Text = ("Wann wurden die {0:N4} Stück {1} gekauft?`r`nFür Wertentwicklung, Rendite (XIRR) und Jahresreport." -f $Shares, $Ticker)
+    $dlg.Controls.Add($lbl)
+    $dp = New-Object System.Windows.Forms.DateTimePicker
+    $dp.SetBounds((S 14), (S 60), (S 140), (S 24))
+    $dp.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+    $dp.CustomFormat = "dd.MM.yyyy"
+    $dp.MaxDate = (Get-Date).Date
+    $dp.Value = (Get-Date).Date
+    $dlg.Controls.Add($dp)
+    Set-DynTip $dp "Tippen oder aus dem Kalender wählen. Enter = übernehmen." "OPENING"
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds((S 156), (S 106), (S 90), (S 28))
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $ok.Text = "OK"
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($ok)
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.SetBounds((S 252), (S 106), (S 94), (S 28))
+    Style-FlatButton -Btn $cancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $cancel.Text = "Abbrechen"
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($cancel)
+    $dlg.AcceptButton = $ok
+    $dlg.CancelButton = $cancel
+    $dlg.Add_Shown({ param($sender, $e) $sender.ActiveControl = $sender.AcceptButton })
+    $res = $dlg.ShowDialog($form)
+    $iso = $dp.Value.ToString("yyyy-MM-dd")
+    $dlg.Dispose()
+    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { return "" }
+    return $iso
+}
+
+function Get-BuyDateRows {
+    # Opening bookings still missing + editor bookings whose date can be corrected
+    $rows = New-Object System.Collections.Generic.List[PSObject]
+    $syms = @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() } | Sort-Object)
+    Ensure-SplitsLoaded -Tickers $syms
+    $splits = Get-SplitMap
+    $txs = $script:Transactions.ToArray()
+    foreach ($sym in $syms) {
+        $pf = $script:Portfolio[$sym]
+        $r = Get-PositionFromTransactions -Transactions $txs -Ticker $sym -Splits $splits
+        $bkSh = 0.0; $bkAvg = [double]$pf.AvgPrice
+        if ($null -ne $r) {
+            $bkSh = [double]$r.Shares
+            if ((Get-NormalizedCurrencyCode ([string]$r.Currency)) -eq (Get-NormalizedCurrencyCode ([string]$pf.Currency))) { $bkAvg = [double]$r.AvgPrice }
+        }
+        $ob = Get-OpeningBooking -Shares ([double]$pf.Shares) -AvgPrice ([double]$pf.AvgPrice) -BookedShares $bkSh -BookedAvg $bkAvg
+        if ($null -ne $ob) {
+            $rows.Add([PSCustomObject]@{ Kind = "Open"; Ticker = $sym; What = $(if ($bkSh -gt 0) { "fehlt (Teil)" } else { "ohne Buchung" }); Shares = $ob.Shares; Price = $ob.Price; Currency = [string]$pf.Currency; Date = ""; Tx = $null })
+        }
+    }
+    foreach ($tx in $script:Transactions) {
+        if ([string]$tx.Type -eq "Kauf" -and ([string]$tx.Note) -like "Portfolio-Editor*") {
+            $rows.Add([PSCustomObject]@{ Kind = "Edit"; Ticker = [string]$tx.Ticker; What = "Editor-Buchung"; Shares = [double]$tx.Shares; Price = [double]$tx.Price; Currency = [string]$tx.Currency; Date = [string]$tx.Date; Tx = $tx })
+        }
+    }
+    return $rows.ToArray()
+}
+
+function Show-BuyDatesDialog {
+    # Returns the number of changed / added bookings
+    $p = $script:Pal
+    $rows = @(Get-BuyDateRows)
+    $dlg = New-DialogForm -Title "Kaufdaten - $($script:AppTitle)" -W (S 720) -H (S 420)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 600), (S 300))
+    $aAll = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $info = New-Object System.Windows.Forms.Label
+    $info.SetBounds((S 12), (S 10), (S 696), (S 46))
+    $info.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $info.Text = if ($rows.Count -eq 0) { "Alle Positionen sind vollständig gebucht, und es gibt keine Editor-Buchungen zu korrigieren." } else { "Kaufdatum in der letzten Spalte eintragen (TT.MM.JJJJ). 'ohne Buchung' / 'fehlt': es wird ein Kauf nachgebucht (Anfangsbestand), die Position bleibt unverändert. 'Editor-Buchung': das Datum wird korrigiert. Leer lassen = nichts ändern." }
+    $dlg.Controls.Add($info)
+    $g = New-Object System.Windows.Forms.DataGridView
+    $g.SetBounds((S 12), (S 60), (S 696), (S 306))
+    $g.Anchor = $aAll
+    Style-DataGrid -Grid $g
+    $g.ReadOnly = $false
+    $g.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::CellSelect
+    foreach ($cd in @(@("Ticker", "Ticker", 80, $true), @("What", "Art", 110, $true), @("Shares", "Stück", 90, $true), @("Price", "Kurs", 90, $true), @("Cur", "Whg", 50, $true), @("Date", "Kaufdatum", 100, $false))) {
+        $ci = $g.Columns.Add($cd[0], $cd[1])
+        $g.Columns[$ci].FillWeight = [float](S $cd[2])
+        $g.Columns[$ci].ReadOnly = [bool]$cd[3]
+        $g.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+    }
+    $g.Columns["Date"].DefaultCellStyle.ForeColor = $p.Accent
+    $g.Columns["What"].ToolTipText = Get-GlossaryShort -Key "OPENING"
+    $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    foreach ($r in $rows) {
+        $dTxt = if ($r.Date) { [DateTime]::ParseExact($r.Date.Substring(0, 10), "yyyy-MM-dd", $inv).ToString("dd.MM.yyyy") } else { "" }
+        [void]$g.Rows.Add($r.Ticker, $r.What, ("{0:N4}" -f $r.Shares), ("{0:N4}" -f $r.Price), $r.Currency, $dTxt)
+    }
+    $dlg.Controls.Add($g)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds((S 518), (S 378), (S 90), (S 28)); $ok.Anchor = $aBR
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $ok.Text = "Übernehmen"
+    $dlg.Controls.Add($ok)
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.SetBounds((S 614), (S 378), (S 94), (S 28)); $cancel.Anchor = $aBR
+    Style-FlatButton -Btn $cancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $cancel.Text = "Abbrechen"
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($cancel)
+    $dlg.CancelButton = $cancel
+    $script:BuyDateCtl = @{ Dlg = $dlg; Grid = $g; Rows = $rows; Changed = 0 }
+    $ok.Add_Click({
+        $bc = $script:BuyDateCtl
+        $bc.Grid.EndEdit() | Out-Null
+        $today = (Get-Date).ToString("yyyy-MM-dd")
+        $plan = @()
+        for ($i = 0; $i -lt $bc.Rows.Count; $i++) {
+            $txt = ([string]$bc.Grid.Rows[$i].Cells["Date"].Value).Trim()
+            $r = $bc.Rows[$i]
+            if (-not $txt) { continue }
+            $iso = ConvertTo-IsoDate $txt
+            if (-not $iso -or [string]::CompareOrdinal($iso, $today) -gt 0) {
+                [System.Windows.Forms.MessageBox]::Show($bc.Dlg, ("{0}: '{1}' ist kein gültiges Datum (TT.MM.JJJJ, nicht in der Zukunft)." -f $r.Ticker, $txt), "Kaufdaten",
+                    [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                $bc.Grid.CurrentCell = $bc.Grid.Rows[$i].Cells["Date"]
+                return
+            }
+            if ($r.Kind -eq "Edit" -and $iso -eq ([string]$r.Date).Substring(0, 10)) { continue }
+            $plan += ,@($r, $iso)
+        }
+        foreach ($pl in $plan) {
+            $r = $pl[0]; $iso = $pl[1]
+            $fD = Get-BookingUnitsFactor -Ticker $r.Ticker -Date $iso
+            if ($r.Kind -eq "Open") {
+                Add-TransactionRecord -Type "Kauf" -Ticker $r.Ticker -Shares ($r.Shares / $fD) -Price ($r.Price * $fD) -Fee 0 -Currency $r.Currency -Date $iso -Note "Anfangsbestand (nachgetragen)"
+                Write-WidgetLog ("Opening booking: {0} {1:N4} @ {2:N4} {3} on {4} (split factor {5})" -f $r.Ticker, $r.Shares, $r.Price, $r.Currency, $iso, $fD)
+            } else {
+                $fR = Get-BookingUnitsFactor -Ticker $r.Ticker -Date ([string]$r.Date).Substring(0, 10)
+                $r.Tx.Shares = [double]$r.Tx.Shares * $fR / $fD
+                $r.Tx.Price = [double]$r.Tx.Price * $fD / $fR
+                $r.Tx.Date = $iso
+                Write-WidgetLog ("Editor booking of {0} moved from {1} to {2}" -f $r.Ticker, $r.Date, $iso)
+            }
+            $bc.Changed++
+        }
+        if ($bc.Changed -gt 0) { Save-Transactions }
+        $bc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $bc.Dlg.Close()
+    })
+    $owner = if ($null -ne $script:AnaCtl) { $script:AnaCtl.Dlg } else { $form }
+    [void]$dlg.ShowDialog($owner)
+    $n = [int]$script:BuyDateCtl.Changed
+    $script:BuyDateCtl = $null
+    $dlg.Dispose()
+    if ($n -gt 0) { Set-TransientStatus ("{0} Kaufdatum/-daten übernommen" -f $n) 4 }
+    return $n
 }
 
 function Show-CurrencyMismatchNotice {
@@ -7670,6 +8210,7 @@ function Show-SettingsDialog {
     & $addSection "Benachrichtigungen"
     $chkTray  = & $addCheck "Tray-Hinweis + Ton bei Alarmen" ([bool]$cfg.ShowTrayNotifications)
     $chkOpen  = & $addCheck "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" ([bool]$cfg.NotifyMarketOpen)
+    $chkEarn  = & $addCheck "Hinweis am Vortag von Quartalszahlen (Portfolio)" ([bool]$cfg.NotifyEarnings) "" "EARNINGS"
 
     & $addSection "System"
     $autoNow  = Test-Autostart
@@ -7779,6 +8320,7 @@ function Show-SettingsDialog {
     $cfg.CompactTape           = [bool]$chkTape.Checked
     $cfg.ShowTrayNotifications = [bool]$chkTray.Checked
     $cfg.NotifyMarketOpen      = [bool]$chkOpen.Checked
+    $cfg.NotifyEarnings        = [bool]$chkEarn.Checked
     # v4.0
     $newLayout                 = [string]$cbLayout.SelectedItem
     $cfg.Opacity               = [int]$nOpacity.Value
@@ -7897,7 +8439,8 @@ B  Bollinger            R  RSI
 E  Vor-/Nachbörse      W  Währung (EUR/USD/CHF/GBP)
 T  Theme                C  Compact an/aus
 L  Nächstes Layout     G  Glossar (Begriffe)
-P  Portfolio-Analyse
+P  Portfolio-Analyse (Wertentwicklung, Rendite,
+   Aufteilung, Dividenden, Kaufdaten nachtragen)
 S  Einstellungen        H  Diese Hilfe
 Z  Zoom zurücksetzen   X  Vergleich an/aus
 Esc  Messung / Popups / Vollbild schließen
@@ -7923,6 +8466,7 @@ Header ziehen = Fenster verschieben
 Marktstatus: Maus über die Statuszeile = Handelszeiten
 Chart: Fadenkreuz zeigt Kurs (rechts) und Zeit (unten) an der Maus
 Compact-Laufleiste: Klick = Ticker öffnen, Maus darüber = Pause
+Ticker in Orange = Quartalszahlen in den nächsten 7 Tagen
 "@
     [System.Windows.Forms.MessageBox]::Show($form, $txt, "Hilfe - $($script:AppTitle)",
         [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -8245,6 +8789,13 @@ $btnPortSave.Add_Click({
         }
     }
 
+    # v4.2: the buy gets its real date (value history, XIRR, yearly report)
+    $buyDate = ""
+    if ($logBuy) {
+        $buyDate = Show-BuyDatePrompt -Ticker $sym -Shares $sh
+        if (-not $buyDate) { $lblNachkaufOut.Text = "Speichern abgebrochen."; return }
+    }
+
     $script:Portfolio[$sym] = [PSCustomObject]@{
         Ticker    = $sym
         Shares    = $finalShares
@@ -8254,7 +8805,11 @@ $btnPortSave.Add_Click({
         TargetAvg = Parse-DecimalInput $txtPortTarget.Text
     }
     Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
-    if ($logBuy) { Add-TransactionRecord -Type "Kauf" -Ticker $sym -Shares $sh -Price $avg -Fee 0 -Currency $posCurr -Date "" -Note "Portfolio-Editor" }
+    if ($logBuy) {
+        # a buy dated before a split is stored in the units of its own date
+        $bf = Get-BookingUnitsFactor -Ticker $sym -Date $buyDate
+        Add-TransactionRecord -Type "Kauf" -Ticker $sym -Shares ($sh / $bf) -Price ($avg * $bf) -Fee 0 -Currency $posCurr -Date $buyDate -Note "Portfolio-Editor"
+    }
     Refresh-AllMarketData
     Update-AllUiViews
 })
@@ -8865,6 +9420,11 @@ $uiTimer.Add_Tick({
     try {
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
+        if ($nowTick -ge $script:NextEventsCheck) {
+            $script:NextEventsCheck = $nowTick.AddMinutes(10)
+            Update-EventsIfStale
+            Check-EarningsNotifications
+        }
     } catch {
         Write-WidgetLog "UI tick failed: $($_.Exception.Message)" "WARN"
     }

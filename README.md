@@ -9,7 +9,7 @@ A desktop stock widget for Windows written in PowerShell (WinForms). It runs any
 1. Keep all files in one folder.
 2. Double-click `TerminalWidget_Start.bat`. It starts Windows PowerShell 5.1 with a hidden console.
 
-Your data (settings, portfolio, alerts, transactions, profiles) lives in `%LOCALAPPDATA%\TerminalWidget`, never in this folder. When upgrading from v3 ("Financial Terminal Widget") it is copied over automatically; see [docs/UPGRADE-v4.0.md](docs/UPGRADE-v4.0.md). What changed in each version: [docs/CHANGES-v4.1.md](docs/CHANGES-v4.1.md).
+Your data (settings, portfolio, alerts, transactions, profiles, event dates) lives in `%LOCALAPPDATA%\TerminalWidget`, never in this folder. When upgrading from v3 ("Financial Terminal Widget") it is copied over automatically; see [docs/UPGRADE-v4.0.md](docs/UPGRADE-v4.0.md). What changed in each version: [v4.2](docs/CHANGES-v4.2.md), [v4.1](docs/CHANGES-v4.1.md).
 
 ## Files
 

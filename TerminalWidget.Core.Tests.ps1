@@ -1018,3 +1018,17 @@ Describe "Earnings and dividend dates (v4.2)" {
         Test-EventsStale -Entry $null -Now $now | Should -BeTrue
     }
 }
+
+Describe "Opening bookings across splits (v4.2)" {
+    It "converts today's shares to the units of the booking date" {
+        $s = @{ "NVDA" = @([PSCustomObject]@{ Date = "2024-06-10"; Ratio = 10.0 }, [PSCustomObject]@{ Date = "2021-07-20"; Ratio = 4.0 }) }
+        Get-SplitFactorAfter -Splits $s -Ticker "nvda" -Date "2023-01-02" | Should -Be 10
+        Get-SplitFactorAfter -Splits $s -Ticker "NVDA" -Date "2020-01-02" | Should -Be 40
+        Get-SplitFactorAfter -Splits $s -Ticker "NVDA" -Date "2024-06-10" | Should -Be 1
+        # booked as 10 @ 150 in 2023 -> 100 @ 15 today
+        $tx = @([PSCustomObject]@{ Date = "2023-01-02"; Ticker = "NVDA"; Type = "Kauf"; Shares = (100 / 10); Price = (15 * 10); Fee = 0; Currency = "USD" })
+        $p = Get-PositionFromTransactions -Transactions $tx -Ticker "NVDA" -Splits $s
+        $p.Shares | Should -Be 100
+        $p.AvgPrice | Should -Be 15
+    }
+}

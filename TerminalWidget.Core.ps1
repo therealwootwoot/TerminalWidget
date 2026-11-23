@@ -2241,3 +2241,14 @@ function Test-EventsStale {
     if (-not [DateTime]::TryParse([string]$Entry.FetchedAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)) { return $true }
     return (($Now - $t).TotalHours -gt $MaxHours)
 }
+
+function Get-SplitFactorAfter {
+    # Product of all split ratios AFTER Date: a booking on Date for N of
+    # today's shares is N / factor shares at price x factor in its own time
+    param([hashtable]$Splits, [string]$Ticker, [string]$Date)
+    $f = 1.0
+    foreach ($sp in @(Get-SplitEvents -Splits $Splits -Ticker $Ticker)) {
+        if ([string]::CompareOrdinal([string]$sp.Date, $Date) -gt 0) { $f *= [double]$sp.Ratio }
+    }
+    return $f
+}
