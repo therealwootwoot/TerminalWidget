@@ -55,6 +55,8 @@ jobs:
           Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -Force -SkipPublisherCheck
 
       - name: Run Pester
+        env:
+          TW_RUN_UI_SMOKE: "1"
         run: |
           Import-Module Pester -MinimumVersion 5.5
           $cfg = New-PesterConfiguration

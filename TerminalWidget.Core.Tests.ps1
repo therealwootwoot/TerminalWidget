@@ -1465,3 +1465,45 @@ Describe "Colours, hotkeys, layout helpers (v4.6)" {
         Test-UndoValid -Undo $null | Should -BeFalse
     }
 }
+
+# ==============================================================================
+# v4.7: UI smoke test - starts the real widget (only when TW_RUN_UI_SMOKE=1, as in CI)
+# ==============================================================================
+Describe "UI smoke test (v4.7)" -Tag "UI" {
+    BeforeAll {
+        $script:SmokeOn = ($env:TW_RUN_UI_SMOKE -eq "1")
+    }
+    It "starts the widget, opens every dialog and closes again without programming errors" {
+        if (-not $script:SmokeOn) { Set-ItResult -Skipped -Because "set TW_RUN_UI_SMOKE=1 to run (opens windows)"; return }
+        $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
+        $dir = Join-Path ([IO.Path]::GetTempPath()) ("tw_smoke_" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText((Join-Path $dir "config.json"), '{"FirstRunDone": true, "Layout": "Standard", "Watchlist": ["NVDA", "MSFT", "SAP.DE"], "ActiveTicker": "NVDA"}', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "portfolio.json"), '{"NVDA": {"Ticker": "NVDA", "Shares": 10, "AvgPrice": 100, "Currency": "USD", "BuyAmount": 0, "TargetAvg": 0}, "MSFT": {"Ticker": "MSFT", "Shares": 5, "AvgPrice": 300, "Currency": "USD", "BuyAmount": 0, "TargetAvg": 0}}', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "transactions.json"), '[{"Id": "a", "Date": "2024-03-01", "Ticker": "NVDA", "Type": "Kauf", "Shares": 1, "Price": 800, "Fee": 1, "Currency": "USD", "Realized": 0, "Note": ""}, {"Id": "b", "Date": "2025-01-10", "Ticker": "MSFT", "Type": "Kauf", "Shares": 5, "Price": 300, "Fee": 1, "Currency": "USD", "Realized": 0, "Note": ""}, {"Id": "c", "Date": "2025-06-12", "Ticker": "MSFT", "Type": "Dividende", "Shares": 5, "Price": 4.15, "Fee": 0, "Currency": "USD", "Realized": 0, "Note": ""}]', $utf8)
+        [IO.File]::WriteAllText((Join-Path $dir "alerts.json"), '[{"Id": "1", "Ticker": "NVDA", "Condition": ">=", "TargetPrice": 99999, "Currency": "EUR", "Triggered": false, "Note": "", "RearmMin": 0, "TriggeredAt": ""}]', $utf8)
+        $report = Join-Path $dir "smoke-report.json"
+        $env:TW_SMOKE_TEST = $report
+        $env:TW_SMOKE_DIR = $dir
+        try {
+            $exe = (Get-Process -Id $PID).Path
+            $p = Start-Process -FilePath $exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ui`"") -PassThru
+            $done = $p.WaitForExit(420000)
+            if (-not $done) { try { $p.Kill() } catch { } }
+        } finally {
+            Remove-Item Env:\TW_SMOKE_TEST -ErrorAction SilentlyContinue
+            Remove-Item Env:\TW_SMOKE_DIR -ErrorAction SilentlyContinue
+        }
+        $log = Join-Path $dir "widget.log"
+        if (Test-Path $log) { Write-Host "---- widget.log (last 60 lines) ----"; Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
+        $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
+        Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
+        $rep = Get-Content $report -Raw | ConvertFrom-Json
+        foreach ($st in @($rep.Steps)) { Write-Host ("{0,-28} {1,-5} {2,6} ms {3}" -f $st.Name, $(if ($st.Ok) { "ok" } else { "FAIL" }), $st.Ms, $st.Error) }
+        foreach ($n in @($rep.Notes)) { Write-Host "note: $n" }
+        (@($rep.Failures) -join "`n") | Should -BeNullOrEmpty
+        @($rep.Steps).Count | Should -BeGreaterThan 40
+        $p.ExitCode | Should -Be 0
+    }
+}

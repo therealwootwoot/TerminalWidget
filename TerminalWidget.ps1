@@ -256,6 +256,8 @@ $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 # v4.5: portable.txt next to the script = data in <program folder>\data
 $script:IsPortable    = Test-Path (Join-Path $script:ScriptDir "portable.txt")
 $script:DataDir       = if ($script:IsPortable) { Join-Path $script:ScriptDir "data" } else { Join-Path $env:LOCALAPPDATA "TerminalWidget" }
+# v4.7: the CI smoke test runs on its own data folder
+if ($env:TW_SMOKE_TEST -and $env:TW_SMOKE_DIR) { $script:DataDir = $env:TW_SMOKE_DIR }
 $script:OldDataDir    = Join-Path $env:LOCALAPPDATA "NvidiaWidgetV2"   # v2.x / v3.x
 $script:ConfigPath    = Join-Path $script:DataDir "config.json"
 $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
@@ -1529,6 +1531,7 @@ function Resolve-BestSymbol {
 
 function Confirm-Action {
     param([string]$Text, [string]$Title = "Bestätigen")
+    if ($env:TW_SMOKE_TEST) { return $true }
     # Pass the form as owner so the box never hides behind the TopMost widget
     $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
     $ans = [System.Windows.Forms.MessageBox]::Show(
@@ -9287,6 +9290,7 @@ function Get-PrioMarketStates {
 
 function Show-InfoBox {
     param([string]$Text, [string]$Title = "Hinweis")
+    if ($env:TW_SMOKE_TEST) { Write-WidgetLog "InfoBox: $Text"; return }
     $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
     [void][System.Windows.Forms.MessageBox]::Show($owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 }
@@ -11787,7 +11791,7 @@ $uiTimer.Add_Tick({
         if ($form.Visible) { Update-MarketStatusUi; Update-StatusLine }
         Check-MarketOpenNotifications
         if ($script:PushPending.Count -gt 0) { Pump-PushTasks }
-        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown) {
+        if ($script:StartupDone -and -not [bool]$script:Config.FirstRunDone -and $form.Visible -and -not $script:TourShown -and -not $script:SmokeMode) {
             $script:TourShown = $true
             Show-WelcomeTour
         }
@@ -11871,6 +11875,140 @@ $form.Add_FormClosing({
     # be on the call stack (inside DoEvents) and must not hit disposed objects.
 })
 
+# ==============================================================================
+# v4.7: UI smoke test (CI). TW_SMOKE_TEST = report path. Starts the real
+# window, opens every dialog (closed again by a timer), runs commands and
+# layout switches, then writes a JSON report and exits with the error count.
+# ==============================================================================
+$script:SmokeMode = [bool]$env:TW_SMOKE_TEST
+$script:SmokeSteps = New-Object System.Collections.Generic.List[PSObject]
+$script:SmokeFailures = New-Object System.Collections.Generic.List[string]
+$script:SmokeNotes = New-Object System.Collections.Generic.List[string]
+$script:SmokeProgErrors = @("CommandNotFoundException", "ParameterBindingFailed", "ParameterArgumentTransformationError", "NamedParameterNotFound",
+    "PositionalParameterNotFound", "MethodNotFound", "MethodCountCouldNotFindBest", "InvokeMethodOnNull", "NullArray", "PropertyAssignmentException",
+    "PropertyNotFound", "InvalidCastFromStringToInteger", "ArgumentTransformationError", "RuntimeException", "IndexOutOfRangeException", "NullReferenceException", "VariableIsUndefined")
+
+function Get-SmokeErrors {
+    # Errors since the last call: programming errors fail the step, the rest are notes
+    param([string]$Step)
+    $fails = @()
+    if ($global:Error.Count -gt 0) {
+        $errs = @($global:Error)
+        $global:Error.Clear()
+        [array]::Reverse($errs)
+        foreach ($er in $errs) {
+            $id = [string]$er.FullyQualifiedErrorId
+            $ln = if ($er.InvocationInfo) { $er.InvocationInfo.ScriptLineNumber } else { 0 }
+            $msg = "{0} @ line {1}: {2} [{3}]" -f $Step, $ln, $er.ToString(), $id
+            $isProg = $false
+            foreach ($p in $script:SmokeProgErrors) { if ($id -like "$p*") { $isProg = $true; break } }
+            if ($isProg) { $fails += $msg } else { $script:SmokeNotes.Add($msg) }
+        }
+    }
+    return $fails
+}
+
+function Invoke-SmokeStep {
+    param([string]$Name, [scriptblock]$Action, [int]$CloseAfterMs = 1200)
+    [void](Get-SmokeErrors -Step "before $Name")
+    $script:SmokeCloser.Interval = $CloseAfterMs
+    $script:SmokeCloser.Start()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ok = $true; $err = ""
+    try { & $Action } catch { $ok = $false; $err = "{0} @ line {1}" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber }
+    $script:SmokeCloser.Stop()
+    foreach ($f in @(Get-SmokeErrors -Step $Name)) { $ok = $false; $script:SmokeFailures.Add($f) }
+    if ($err) { $script:SmokeFailures.Add("$Name : $err") }
+    $script:SmokeSteps.Add([PSCustomObject]@{ Name = $Name; Ok = $ok; Ms = $sw.ElapsedMilliseconds; Error = $err })
+}
+
+$script:SmokeCloser = New-Object System.Windows.Forms.Timer
+$script:SmokeCloser.Add_Tick({
+    # closes every window except the main window (and the fullscreen chart)
+    foreach ($f in @([System.Windows.Forms.Application]::OpenForms)) {
+        if ([object]::ReferenceEquals($f, $form) -or ($null -ne $script:FsForm -and [object]::ReferenceEquals($f, $script:FsForm))) { continue }
+        try { $f.Close() } catch { }
+    }
+})
+
+function Invoke-SmokeTest {
+    $pump = { [System.Windows.Forms.Application]::DoEvents() }
+    Invoke-SmokeStep "Refresh" { Refresh-AllMarketData -Force; for ($i = 0; $i -lt 60 -and $script:IsRefreshing; $i++) { Start-Sleep -Milliseconds 250; & $pump }; Evaluate-GlobalAlerts; Update-AllUiViews }
+    foreach ($lay in @("Terminal", "Standard", "Compact", "Ticker", "Standard")) { Invoke-SmokeStep "Layout $lay" { Apply-Layout $lay; & $pump } }
+    foreach ($tab in @("Chart", "Portfolio", "Watchlist", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
+    foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
+    foreach ($cmd in @("TF 1Y", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
+        Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
+    }
+    Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
+    $dialogs = [ordered]@{
+        "Settings" = { Show-SettingsDialog }
+        "Glossary" = { Show-GlossaryDialog }
+        "Analysis Perf" = { Show-AnalysisDialog -Page "Perf" }
+        "Analysis Ret" = { Show-AnalysisDialog -Page "Ret" }
+        "Analysis Alloc" = { Show-AnalysisDialog -Page "Alloc" }
+        "Analysis Div" = { Show-AnalysisDialog -Page "Div" }
+        "Transaction history" = { Show-TransactionHistory }
+        "Transaction dialog" = { Show-TransactionDialog -Ticker "NVDA" }
+        "Year report" = { Show-YearReport }
+        "Buy dates" = { [void](Show-BuyDatesDialog) }
+        "Alert log" = { Show-AlertLogDialog }
+        "Push" = { [void](Show-PushDialog) }
+        "News" = { Show-NewsDialog "NVDA" }
+        "Description" = { Show-DescriptionDialog "NVDA" }
+        "Ticker dividends" = { Show-TickerDividendsDialog "MSFT" }
+        "Calendar" = { Show-CalendarDialog }
+        "Movers" = { Show-MoversDialog }
+        "FX" = { Show-FxDialog }
+        "About" = { Show-AboutDialog }
+        "Restore" = { Show-RestoreDialog }
+        "Compare" = { Show-CompareDialog }
+        "Command palette" = { Show-CommandPalette -Initial "NV" }
+        "Welcome tour" = { Show-WelcomeTour }
+    }
+    foreach ($k in $dialogs.Keys) { Invoke-SmokeStep "Dialog $k" $dialogs[$k] 2500 }
+    Invoke-SmokeStep "Depot switch" {
+        $script:Config.Depots = @([PSCustomObject]@{ Id = "smoke"; Name = "Smoke" })
+        Switch-Depot "smoke"; & $pump
+        Switch-Depot ""; & $pump
+    }
+    Invoke-SmokeStep "Undo" {
+        $script:Alerts.Add([PSCustomObject]@{ Id = "x"; Ticker = "AAPL"; Condition = ">="; TargetPrice = 1.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
+        Update-AllUiViews
+        $lstAlerts.SelectedIndex = $script:Alerts.Count - 1
+        $btnDelAlert.PerformClick()
+        [void](Invoke-Undo)
+    }
+    Invoke-SmokeStep "Click-through" { Set-ClickThrough $true; Set-ClickThrough $false }
+    Invoke-SmokeStep "Backup" { [void](Backup-DataFiles -Reason "smoke"); Invoke-DailyBackup }
+    Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
+
+    $rep = [PSCustomObject]@{
+        PowerShell = $PSVersionTable.PSVersion.ToString(); Version = $script:AppVersion
+        Steps = $script:SmokeSteps.ToArray(); Failures = $script:SmokeFailures.ToArray(); Notes = $script:SmokeNotes.ToArray()
+    }
+    try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, ($rep | ConvertTo-Json -Depth 5), [System.Text.Encoding]::UTF8) } catch { }
+    $script:SmokeExit = $script:SmokeFailures.Count
+    $trayIcon.Visible = $false
+    $form.Close()
+}
+
+$script:SmokeExit = 99
+if ($script:SmokeMode) {
+    $script:SmokeStarter = New-Object System.Windows.Forms.Timer
+    $script:SmokeStarter.Interval = 3000
+    $script:SmokeStarter.Add_Tick({
+        $script:SmokeStarter.Stop()
+        try { Invoke-SmokeTest } catch {
+            $script:SmokeFailures.Add("Smoke runner: $($_.Exception.Message) @ line $($_.InvocationInfo.ScriptLineNumber)")
+            try { [IO.File]::WriteAllText([string]$env:TW_SMOKE_TEST, (@{ Failures = $script:SmokeFailures.ToArray(); Steps = $script:SmokeSteps.ToArray() } | ConvertTo-Json -Depth 5)) } catch { }
+            $script:SmokeExit = 98
+            $form.Close()
+        }
+    })
+    $form.Add_Shown({ $script:SmokeStarter.Start() })
+}
+
 Write-WidgetLog "Starting message loop"
 try {
     [void][System.Windows.Forms.Application]::Run($form)
@@ -11897,3 +12035,4 @@ try {
         $script:AppMutex.Dispose()
     }
 }
+if ($script:SmokeMode) { exit ([int]$script:SmokeExit) }
