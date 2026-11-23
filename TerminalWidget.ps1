@@ -12307,7 +12307,7 @@ function Invoke-SmokeTest {
     }
     Invoke-SmokeStep "Undo" {
         $script:Alerts.Add([PSCustomObject]@{ Id = "x"; Ticker = "AAPL"; Condition = ">="; TargetPrice = 1.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
-        Update-AllUiViews
+        Refresh-WatchlistAndAlerts
         $lstAlerts.SelectedIndex = $script:Alerts.Count - 1
         $btnDelAlert.PerformClick()
         [void](Invoke-Undo)
