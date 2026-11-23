@@ -1301,3 +1301,92 @@ Describe "News, calendar, polling, versions (v4.4)" {
         Get-LatestTagVersion @() | Should -Be ""
     }
 }
+
+# ==============================================================================
+# v4.5
+# ==============================================================================
+Describe "CSV import (v4.5)" {
+    It "splits quoted fields" {
+        (Split-CsvLine -Line 'a;"b;c";"say ""hi""";' -Delimiter ";") -join "|" | Should -Be 'a|b;c|say "hi"|'
+    }
+    It "detects the delimiter" {
+        Get-CsvDelimiter -Lines @("a;b;c", "1;2,5;3") | Should -Be ";"
+        Get-CsvDelimiter -Lines @("a,b,c", "1,2.5,3") | Should -Be ","
+        Get-CsvDelimiter -Lines @("a`tb`tc", "1`t2`t3") | Should -Be "`t"
+    }
+    It "skips a preamble and finds the header" {
+        $txt = "Depotumsätze`r`nZeitraum: 2025`r`nDatum;Typ;ISIN;Stück;Kurs;Gebühr`r`n15.01.2025;Kauf;US67066G1040;10;120,50;1,00`r`n`r`n"
+        $c = ConvertFrom-CsvText $txt
+        $c.Headers -join "|" | Should -Be "Datum|Typ|ISIN|Stück|Kurs|Gebühr"
+        @($c.Rows).Count | Should -Be 1
+        $c.Rows[0][4] | Should -Be "120,50"
+    }
+    It "guesses columns" {
+        $m = Get-CsvColumnGuess @("Buchungstag", "Transaktionsart", "Name", "ISIN", "Anzahl", "Ausführungskurs", "Betrag", "Provision", "Währung")
+        $m.Date | Should -Be 0; $m.Type | Should -Be 1; $m.Name | Should -Be 2; $m.Ident | Should -Be 3
+        $m.Shares | Should -Be 4; $m.Price | Should -Be 5; $m.Amount | Should -Be 6; $m.Fee | Should -Be 7; $m.Currency | Should -Be 8
+        (Get-CsvColumnGuess @("foo", "bar")).Date | Should -Be -1
+    }
+    It "reads numbers <Raw>" -TestCases @(
+        @{ Raw = "1.234,56"; V = 1234.56 }, @{ Raw = "1,234.56"; V = 1234.56 }, @{ Raw = "-12,5"; V = -12.5 },
+        @{ Raw = "12 EUR"; V = 12 }, @{ Raw = "1.234.567"; V = 1234567 }, @{ Raw = "0.5"; V = 0.5 }
+    ) {
+        param($Raw, $V)
+        ConvertFrom-CsvNumber $Raw | Should -Be $V
+    }
+    It "treats empty text as NaN" { [double]::IsNaN((ConvertFrom-CsvNumber "")) | Should -BeTrue; [double]::IsNaN((ConvertFrom-CsvNumber "abc")) | Should -BeTrue }
+    It "maps broker wording <Raw> -> <T>" -TestCases @(
+        @{ Raw = "Kauf"; T = "Kauf" }, @{ Raw = "BUY"; T = "Kauf" }, @{ Raw = "Sparplanausführung"; T = "Kauf" }, @{ Raw = "Verkauf"; T = "Verkauf" },
+        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "" }
+    ) {
+        param($Raw, $T)
+        ConvertFrom-CsvType $Raw | Should -Be $T
+    }
+    It "recognises ISINs" { Test-Isin "US67066G1040" | Should -BeTrue; Test-Isin "NVDA" | Should -BeFalse }
+    It "converts rows to bookings" {
+        $map = @{ Date = 0; Type = 1; Ident = 2; Shares = 3; Price = 4; Amount = 5; Fee = 6; Tax = -1; Currency = 7; Name = -1 }
+        $rows = @(
+            ,@("15.01.2025", "Kauf", "US67066G1040", "10", "120,50", "", "1,00", "USD")
+            ,@("2025-02-03T10:00:00", "Verkauf", "NVDA", "-4", "", "596,00", "4,00", "")
+            ,@("20.03.2025", "Dividende", "US67066G1040", "10", "", "0,40", "", "USD")
+            ,@("01.04.2025", "Einzahlung", "", "", "", "1000", "", "")
+        )
+        $b = @(ConvertFrom-BrokerRows -Rows $rows -Map $map -DefaultCurrency "EUR")
+        $b[0].Date | Should -Be "2025-01-15"; $b[0].Type | Should -Be "Kauf"; $b[0].Shares | Should -Be 10; $b[0].Price | Should -Be 120.5; $b[0].Fee | Should -Be 1; $b[0].Currency | Should -Be "USD"; $b[0].Ok | Should -BeTrue
+        $b[1].Date | Should -Be "2025-02-03"; $b[1].Shares | Should -Be 4; $b[1].Price | Should -Be 150; $b[1].Currency | Should -Be "EUR"
+        $b[2].Type | Should -Be "Dividende"; $b[2].Price | Should -Be 0.4
+        $b[3].Ok | Should -BeFalse
+        $b[3].Note | Should -Match "Art unbekannt"
+    }
+    It "infers buy/sell from the sign without a type column" {
+        $map = @{ Date = 0; Type = -1; Ident = 1; Shares = 2; Price = 3; Amount = -1; Fee = -1; Tax = -1; Currency = -1; Name = -1 }
+        $b = @(ConvertFrom-BrokerRows -Rows @(,@("20240115", "AAPL", "-3", "180.5")) -Map $map)
+        $b[0].Type | Should -Be "Verkauf"; $b[0].Date | Should -Be "2024-01-15"; $b[0].Shares | Should -Be 3
+    }
+    It "finds duplicates" {
+        $ex = @([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "NVDA"; Type = "Kauf"; Shares = 10.0; Price = 120.5 })
+        Test-DuplicateTransaction -Existing $ex -New ([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "nvda"; Type = "Kauf"; Shares = 10.0; Price = 120.9 }) | Should -BeTrue
+        Test-DuplicateTransaction -Existing $ex -New ([PSCustomObject]@{ Date = "2025-01-15"; Ticker = "NVDA"; Type = "Kauf"; Shares = 11.0; Price = 120.5 }) | Should -BeFalse
+        Test-DuplicateTransaction -Existing @() -New $ex[0] | Should -BeFalse
+    }
+    It "picks a symbol from the search" {
+        $j = '{"quotes":[{"symbol":"NVD.DE","quoteType":"EQUITY","shortname":"NVIDIA"},{"symbol":"NVDA","quoteType":"EQUITY","shortname":"NVIDIA"},{"symbol":"X","quoteType":"OPTION"}]}' | ConvertFrom-Json
+        Get-YahooSymbolFromSearch $j | Should -Be "NVD.DE"
+        Get-YahooSymbolFromSearch $j -PreferSuffix "NVDA" | Should -Be "NVDA"
+        Get-YahooSymbolFromSearch $null | Should -Be ""
+    }
+}
+
+Describe "Depots and backups (v4.5)" {
+    It "makes folder-safe ids" {
+        ConvertTo-DepotId "Zweites Depot (Flatex)" | Should -Be "zweites-depot-flatex"
+        ConvertTo-DepotId "Übungsdepot" | Should -Be "uebungsdepot"
+        ConvertTo-DepotId "   " | Should -Be "depot"
+    }
+    It "reads backup folder names" {
+        $i = Get-BackupInfo "20251124_093000_taeglich"
+        $i.When | Should -Be ([DateTime]::new(2025, 11, 24, 9, 30, 0))
+        $i.Reason | Should -Be "taeglich"
+        (Get-BackupInfo "foo").When | Should -Be ([DateTime]::MinValue)
+    }
+}
