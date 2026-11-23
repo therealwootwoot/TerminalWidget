@@ -246,14 +246,16 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.4"
+$script:AppVersion    = "4.5"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
 # ==============================================================================
 # Part 1: Storage Paths, Atomic Persistence & Config Migration
 # ==============================================================================
-$script:DataDir       = Join-Path $env:LOCALAPPDATA "TerminalWidget"
+# v4.5: portable.txt next to the script = data in <program folder>\data
+$script:IsPortable    = Test-Path (Join-Path $script:ScriptDir "portable.txt")
+$script:DataDir       = if ($script:IsPortable) { Join-Path $script:ScriptDir "data" } else { Join-Path $env:LOCALAPPDATA "TerminalWidget" }
 $script:OldDataDir    = Join-Path $env:LOCALAPPDATA "NvidiaWidgetV2"   # v2.x / v3.x
 $script:ConfigPath    = Join-Path $script:DataDir "config.json"
 $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
@@ -379,6 +381,8 @@ Write-WidgetLog "Mutex acquired, building UI"
 
 function Save-JsonState {
     param([string]$Path, $Data)
+    # v4.5: after a restore / import the files on disk must stay as they are
+    if ($script:FreezeData) { return }
     $tmpPath = "$Path.tmp"
     try {
         # -InputObject (not the pipeline) so arrays with 0/1 items stay JSON arrays
@@ -438,9 +442,12 @@ function Backup-DataFiles {
         $dest = Join-Path $script:BackupDir ("{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $safe)
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
         foreach ($f in $files) { Copy-Item -Path $f -Destination $dest -Force }
+        # v4.5: further depots
+        $dd = Join-Path $script:DataDir "depots"
+        if (Test-Path $dd) { Copy-Item -Path $dd -Destination (Join-Path $dest "depots") -Recurse -Force }
         $all = @(Get-ChildItem -Path $script:BackupDir -Directory | Sort-Object Name -Descending)
-        if ($all.Count -gt 10) {
-            $all | Select-Object -Skip 10 | ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($all.Count -gt 20) {
+            $all | Select-Object -Skip 20 | ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
         }
         Write-WidgetLog "Backup created: $dest"
         return $dest
@@ -480,6 +487,11 @@ $defaultConfig = [PSCustomObject]@{
     # v4.4
     CommandHistory        = @()
     ClosedPollMinutes     = 10
+    # v4.5
+    Depots                = @()
+    ActiveDepot           = ""
+    MainDepotName         = "Hauptdepot"
+    LastAutoBackup        = ""
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -585,7 +597,43 @@ if ([int]$script:Config.SmaFastPeriod -lt 2) { $script:Config.SmaFastPeriod = 20
 if ([int]$script:Config.SmaSlowPeriod -lt 5) { $script:Config.SmaSlowPeriod = 50 }
 if ([int]$script:Config.RsiPeriod -lt 2) { $script:Config.RsiPeriod = 14 }
 
+# ------------------------------------------------------------------------------
+# Depots (v4.5): several portfolios. The main depot uses portfolio.json /
+# transactions.json in the data folder (as before), others live in
+# depots\<id>\. Alerts, profiles and event dates are shared.
+# ------------------------------------------------------------------------------
+$script:DepotDir = Join-Path $script:DataDir "depots"
+
+function Get-DepotList {
+    $list = @([PSCustomObject]@{ Id = ""; Name = $(if ($script:Config.MainDepotName) { [string]$script:Config.MainDepotName } else { "Hauptdepot" }) })
+    foreach ($d in @($script:Config.Depots)) { if ($null -ne $d -and $d.Id) { $list += [PSCustomObject]@{ Id = [string]$d.Id; Name = [string]$d.Name } } }
+    return $list
+}
+
+function Get-DepotName {
+    param([string]$Id)
+    foreach ($d in Get-DepotList) { if ($d.Id -eq $Id) { return $d.Name } }
+    return ""
+}
+
+function Set-DepotPaths {
+    param([string]$Id)
+    if (-not $Id) {
+        $script:PortfolioPath = Join-Path $script:DataDir "portfolio.json"
+        $script:TransactionsPath = Join-Path $script:DataDir "transactions.json"
+        return
+    }
+    $dir = Join-Path $script:DepotDir $Id
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $script:PortfolioPath = Join-Path $dir "portfolio.json"
+    $script:TransactionsPath = Join-Path $dir "transactions.json"
+}
+
+if ([string]$script:Config.ActiveDepot -and -not (@(Get-DepotList | Where-Object { $_.Id -eq [string]$script:Config.ActiveDepot }).Count)) { $script:Config.ActiveDepot = "" }
+Set-DepotPaths ([string]$script:Config.ActiveDepot)
+
 # Portfolio Holdings
+function Read-PortfolioData {
 $script:Portfolio = @{}
 $rawPortfolio = Load-JsonState -Path $script:PortfolioPath -DefaultValue $null
 if ($null -ne $rawPortfolio) {
@@ -605,6 +653,8 @@ if ($null -ne $rawPortfolio) {
         }
     }
 }
+}
+Read-PortfolioData
 
 # Global Alerts
 $script:Alerts = New-Object System.Collections.Generic.List[PSObject]
@@ -643,7 +693,8 @@ foreach ($e in @(Load-JsonState -Path $script:AlertLogPath -DefaultValue @())) {
 }
 
 # Transaction history (v2.9): buys / sells / dividends with realized P/L
-$script:TransactionsPath = Join-Path $script:DataDir "transactions.json"
+# (path set by Set-DepotPaths)
+function Read-TransactionsData {
 $script:Transactions = New-Object System.Collections.Generic.List[PSObject]
 foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @())) {
     if ($null -ne $t -and $t.Ticker -and $t.Type) {
@@ -661,6 +712,8 @@ foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @()
         })
     }
 }
+}
+Read-TransactionsData
 
 # Company profiles (v4.1): sector / country from Yahoo plus manual overrides,
 # kept apart from portfolio.json so editing a position never loses them
@@ -4363,15 +4416,30 @@ $form.Controls.Add($viewPortfolio)
 
 $lblPortSummary = New-Object System.Windows.Forms.Label
 $lblPortSummary.Location = New-Object System.Drawing.Point((S 10), (S 8))
-$lblPortSummary.Size = New-Object System.Drawing.Size((S 544), (S 22))
+$lblPortSummary.Size = New-Object System.Drawing.Size((S 456), (S 22))
+$lblPortSummary.AutoEllipsis = $true
 $lblPortSummary.Font = $fontMono
 $lblPortSummary.ForeColor = $script:Pal.Text
 $lblPortSummary.Text = "Depotwert: 0.00 $($script:Config.Currency) | Gesamt G/V: +0.00 $($script:Config.Currency) (+0.00%)"
 $viewPortfolio.Controls.Add($lblPortSummary)
 
+# v4.5: depot selector
+$cmbDepot = New-Object System.Windows.Forms.ComboBox
+$cmbDepot.Location = New-Object System.Drawing.Point((S 470), (S 6))
+$cmbDepot.Size = New-Object System.Drawing.Size((S 136), (S 24))
+$cmbDepot.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cmbDepot.BackColor = $script:Pal.Input
+$cmbDepot.ForeColor = $script:Pal.Accent
+$cmbDepot.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbDepot.Font = $fontUi
+$cmbDepot.DropDownWidth = S 200
+$viewPortfolio.Controls.Add($cmbDepot)
+Set-Tip $cmbDepot "Depot wählen: mehrere Portfolios (z. B. zweiter Broker, Übungsdepot). Befehl: PF <Name>"
+
 $cmbPortSort = New-Object System.Windows.Forms.ComboBox
-$cmbPortSort.Location = New-Object System.Drawing.Point((S 560), (S 6))
-$cmbPortSort.Size = New-Object System.Drawing.Size((S 188), (S 24))
+$cmbPortSort.Location = New-Object System.Drawing.Point((S 612), (S 6))
+$cmbPortSort.Size = New-Object System.Drawing.Size((S 136), (S 24))
+$cmbPortSort.DropDownWidth = S 200
 $cmbPortSort.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $cmbPortSort.BackColor = $script:Pal.Input
 $cmbPortSort.ForeColor = $script:Pal.Text
@@ -4796,6 +4864,7 @@ $pnlChartControls.Anchor = $aB -bor $aL -bor $aR
 # Portfolio view
 $lblPortSummary.Anchor = $aT -bor $aL -bor $aR
 $cmbPortSort.Anchor    = $aT -bor $aR
+$cmbDepot.Anchor       = $aT -bor $aR
 $dgvPortfolio.Anchor   = $anchorAll
 $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
 $lblNachkaufOut.Anchor = $aT -bor $aL -bor $aR
@@ -4974,6 +5043,7 @@ function Apply-ThemeToAllControls {
 
     $viewPortfolio.BackColor = $p.Card
     $cmbPortSort.BackColor = $p.Input
+    $cmbDepot.BackColor = $p.Input; $cmbDepot.ForeColor = $p.Accent
     $cmbPortSort.ForeColor = $p.Text
     Style-DataGrid -Grid $dgvPortfolio
     $pnlPortBottom.BackColor = $p.HeaderBg
@@ -6928,15 +6998,28 @@ function Show-TransactionHistory {
         $sfd.Dispose()
     })
     & $fill
+    # v4.5: CSV import from the history window
+    $btnImp = New-Object System.Windows.Forms.Button
+    $btnImp.SetBounds((S 572), (S 398), (S 60), (S 28))
+    $btnImp.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    Style-FlatButton -Btn $btnImp -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnImp.Text = "Import"
+    $btnImp.Add_Click({ $script:TxHist.Import = $true; $script:TxHist.Dlg.Close() })
+    $dlg.Controls.Add($btnImp)
+    Set-DynTip $btnImp "Buchungen aus einer Broker-CSV importieren (Trade Republic, Scalable, Flatex, comdirect, IBKR ... - Spalten werden erkannt). Befehl: IMP"
+    $script:TxHist.Import = $false
     [void]$dlg.ShowDialog($form)
+    $doImport = [bool]$script:TxHist.Import
     $script:TxHist = $null
     $dlg.Dispose()
+    if ($doImport) { Show-CsvImportDialog }
 }
 
 function Invoke-PositionRebuild {
     # v3.0: replays all buys/sells of one ticker (average cost, see Core) and -
     # after a preview - replaces the position. Returns $true when it changed.
-    param([string]$Ticker, $Owner = $null)
+    # v4.5: -Silent = no dialogs (CSV import)
+    param([string]$Ticker, $Owner = $null, [switch]$Silent)
     $sym = ([string]$Ticker).Trim().ToUpper()
     if (-not $sym) { return $false }
     $own = if ($null -ne $Owner) { $Owner } else { $form }
@@ -6945,6 +7028,7 @@ function Invoke-PositionRebuild {
     Ensure-SplitsLoaded -Tickers @($sym)
     $r = Get-PositionFromTransactions -Transactions $script:Transactions.ToArray() -Ticker $sym -Splits (Get-SplitMap)
     if ($null -eq $r) {
+        if ($Silent) { return $false }
         [System.Windows.Forms.MessageBox]::Show($own, "Für $sym gibt es keine Kauf-/Verkaufsbuchungen.", $title,
             [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         return $false
@@ -6957,8 +7041,10 @@ function Invoke-PositionRebuild {
     if ($r.Clamped) { $notes += "`r`n- Ein Verkauf war größer als der Bestand und wurde begrenzt" }
     if ($r.Splits -gt 0) { $notes += "`r`n- {0} Aktiensplit(s) berücksichtigt (Stück und EK umgerechnet)" -f $r.Splits }
     $msg = ("{0}: aus {1} Buchung(en) neu berechnen (Durchschnittskosten)?`r`n`r`nAktuell:  {2}`r`nNeu:      {3}{4}`r`n`r`nHinweis: Werte, die im Portfolio-Editor direkt überschrieben wurden, sind nicht als Buchung erfasst und gehen dabei verloren." -f $sym, $r.Used, $oldTxt, $newTxt, $notes)
-    $ans = [System.Windows.Forms.MessageBox]::Show($own, $msg, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    if (-not $Silent) {
+        $ans = [System.Windows.Forms.MessageBox]::Show($own, $msg, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    }
 
     if ($r.Shares -le 0) {
         [void]$script:Portfolio.Remove($sym)
@@ -8836,6 +8922,16 @@ function Invoke-TerminalCommand {
             "GLOS"   { Show-GlossaryDialog }
             "HELP"   { Show-ShortcutHelp }
             "ABOUT"  { Show-AboutDialog }
+            "IMP"    { Show-CsvImportDialog }
+            "BAK"    { Show-RestoreDialog }
+            "PF"     {
+                $want = (@($c.Args) -join " ").Trim()
+                if (-not $want) { New-Depot; return "" }
+                $hit = @(Get-DepotList | Where-Object { $_.Name.ToUpper() -eq $want.ToUpper() -or $_.Id.ToUpper() -eq $want.ToUpper() })
+                if ($hit.Count -eq 0) { return "Depot '$want' gibt es nicht. Vorhanden: " + ((Get-DepotList | ForEach-Object { $_.Name }) -join ", ") }
+                Switch-Depot $hit[0].Id
+                Set-ActiveTab -TabName "Portfolio"
+            }
         }
         return ""
     }
@@ -8888,7 +8984,7 @@ function Invoke-TerminalCommand {
 function Update-PaletteSuggestions {
     $pc = $script:PalCtl
     if ($null -eq $pc) { return }
-    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12)
+    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }))
     $pc.List.BeginUpdate()
     $pc.List.Items.Clear()
     foreach ($it in $pc.Items) { [void]$pc.List.Items.Add($it.Text) }
@@ -9064,6 +9160,455 @@ function Get-PrioMarketStates {
         $out += [string]$ms.State
     }
     return $out
+}
+
+function Show-InfoBox {
+    param([string]$Text, [string]$Title = "Hinweis")
+    $owner = if ($null -ne $form -and -not $form.IsDisposed) { $form } else { $null }
+    [void][System.Windows.Forms.MessageBox]::Show($owner, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+}
+
+# ==============================================================================
+# v4.5: depots, CSV import, backups / restore, export / import, portable mode
+# ==============================================================================
+function Switch-Depot {
+    param([string]$Id)
+    if ($Id -eq [string]$script:Config.ActiveDepot) { return }
+    Set-DepotPaths $Id
+    Read-PortfolioData
+    Read-TransactionsData
+    $script:Config.ActiveDepot = $Id
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Write-WidgetLog ("Depot switched to '{0}'" -f (Get-DepotName $Id))
+    Update-DepotCombo
+    Set-TransientStatus ("Depot: {0}" -f (Get-DepotName $Id)) 3
+    Refresh-AllMarketData
+    Update-AllUiViews
+}
+
+function Read-TextInput {
+    # Small input box; returns the text or $null when cancelled
+    param([string]$Title, [string]$Prompt, [string]$Value = "")
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title $Title -W (S 380) -H (S 130)
+    $l = New-Object System.Windows.Forms.Label
+    $l.SetBounds((S 14), (S 12), (S 352), (S 20)); $l.Text = $Prompt
+    $dlg.Controls.Add($l)
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.SetBounds((S 14), (S 38), (S 352), (S 24)); $t.Text = $Value
+    $t.BackColor = $p.Input; $t.ForeColor = $p.Text; $t.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $dlg.Controls.Add($t)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds((S 172), (S 86), (S 94), (S 28)); $ok.Text = "OK"
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($ok)
+    $ca = New-Object System.Windows.Forms.Button
+    $ca.SetBounds((S 272), (S 86), (S 94), (S 28)); $ca.Text = "Abbrechen"
+    Style-FlatButton -Btn $ca -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($ca)
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $ca
+    $res = $dlg.ShowDialog($form)
+    $v = $t.Text.Trim()
+    $dlg.Dispose()
+    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    return $v
+}
+
+function New-Depot {
+    $name = Read-TextInput -Title "Neues Depot" -Prompt "Name des Depots (z. B. Zweitbroker, Übungsdepot):"
+    if (-not $name) { return }
+    $base = ConvertTo-DepotId $name
+    $id = $base; $n = 2
+    while (@(Get-DepotList | Where-Object { $_.Id -eq $id }).Count -gt 0) { $id = "{0}-{1}" -f $base, $n; $n++ }
+    $script:Config.Depots = @(@($script:Config.Depots) | Where-Object { $null -ne $_ }) + @([PSCustomObject]@{ Id = $id; Name = $name })
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Write-WidgetLog "Depot created: $name ($id)"
+    Switch-Depot $id
+}
+
+function Rename-ActiveDepot {
+    $id = [string]$script:Config.ActiveDepot
+    $name = Read-TextInput -Title "Depot umbenennen" -Prompt "Neuer Name:" -Value (Get-DepotName $id)
+    if (-not $name) { return }
+    if (-not $id) { $script:Config.MainDepotName = $name }
+    else { foreach ($d in @($script:Config.Depots)) { if ([string]$d.Id -eq $id) { $d.Name = $name } } }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-DepotCombo
+}
+
+function Remove-ActiveDepot {
+    $id = [string]$script:Config.ActiveDepot
+    if (-not $id) { Show-InfoBox -Text "Das Hauptdepot kann nicht gelöscht werden." -Title "Depot"; return }
+    $name = Get-DepotName $id
+    if (-not (Confirm-Action -Text ("Depot '{0}' mit allen Positionen und Buchungen löschen?`r`n`r`nDie Dateien werden vorher ins Backup kopiert." -f $name) -Title "Depot löschen")) { return }
+    [void](Backup-DataFiles -Reason ("vor_loeschen_" + $id))
+    Switch-Depot ""
+    try { Remove-Item -Path (Join-Path $script:DepotDir $id) -Recurse -Force -ErrorAction Stop } catch { Write-WidgetLog "Depot folder not removed: $($_.Exception.Message)" "WARN" }
+    $script:Config.Depots = @(@($script:Config.Depots) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $id })
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-DepotCombo
+    Set-TransientStatus "Depot '$name' gelöscht" 4
+}
+
+$script:DepotComboBusy = $false
+function Update-DepotCombo {
+    $script:DepotComboBusy = $true
+    try {
+        $cmbDepot.Items.Clear()
+        $sel = 0; $i = 0
+        foreach ($d in Get-DepotList) {
+            [void]$cmbDepot.Items.Add($d.Name)
+            if ($d.Id -eq [string]$script:Config.ActiveDepot) { $sel = $i }
+            $i++
+        }
+        foreach ($x in @("+ Neues Depot ...", "  Umbenennen ...", "  Löschen ...")) { [void]$cmbDepot.Items.Add($x) }
+        $cmbDepot.SelectedIndex = $sel
+    } finally { $script:DepotComboBusy = $false }
+}
+
+# ---- backups ----
+function Invoke-DailyBackup {
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    if ([string]$script:Config.LastAutoBackup -eq $today) { return }
+    if (Backup-DataFiles -Reason "taeglich") {
+        $script:Config.LastAutoBackup = $today
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    }
+}
+
+function Restart-Widget {
+    # Restored / imported data must not be overwritten by this instance on exit
+    $script:FreezeData = $true
+    $bat = Join-Path $script:ScriptDir "TerminalWidget_Start.bat"
+    try {
+        if (Test-Path $bat) {
+            Start-Process -FilePath "cmd.exe" -ArgumentList ('/c timeout /t 3 /nobreak >nul & start "" "{0}"' -f $bat) -WindowStyle Hidden
+        } else {
+            $exe = (Get-Process -Id $PID).Path
+            $self = Join-Path $script:ScriptDir "TerminalWidget.ps1"
+            Start-Process -FilePath "cmd.exe" -ArgumentList ('/c timeout /t 3 /nobreak >nul & start "" "{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}"' -f $exe, $self) -WindowStyle Hidden
+        }
+    } catch { Write-WidgetLog "Restart failed: $($_.Exception.Message)" "ERROR" }
+    Write-WidgetLog "Restarting the widget"
+    $trayIcon.Visible = $false
+    $form.Close()
+}
+
+function Copy-DataSet {
+    # Copies the data files (+ depots folder) from $From to $To
+    param([string]$From, [string]$To)
+    foreach ($f in @(Get-DataFileNames)) {
+        $src = Join-Path $From $f
+        if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $To $f) -Force }
+    }
+    $dSrc = Join-Path $From "depots"
+    if (Test-Path $dSrc) {
+        $dDst = Join-Path $To "depots"
+        if (Test-Path $dDst) { Remove-Item -Path $dDst -Recurse -Force }
+        Copy-Item -Path $dSrc -Destination $dDst -Recurse -Force
+    }
+}
+
+function Show-RestoreDialog {
+    $rows = @()
+    if (Test-Path $script:BackupDir) {
+        foreach ($d in @(Get-ChildItem -Path $script:BackupDir -Directory | Sort-Object Name -Descending)) {
+            $bi = Get-BackupInfo $d.Name
+            $n = @(Get-ChildItem -Path $d.FullName -File).Count
+            $dep = if (Test-Path (Join-Path $d.FullName "depots")) { "+ Depots" } else { "" }
+            $rows += @{ Cells = @($(if ($bi.When -gt [DateTime]::MinValue) { $bi.When.ToString("dd.MM.yyyy HH:mm") } else { $d.Name }), $bi.Reason, ("{0} Dateien {1}" -f $n, $dep).Trim()); Tag = $d.FullName }
+        }
+    }
+    Show-InfoGrid -Title "Backup wiederherstellen (BAK)" -Columns @("Zeitpunkt", "Anlass", "Inhalt") -Weights @(140, 200, 140) -W 560 -H 460 -Footer "Doppelklick = dieses Backup wiederherstellen (der aktuelle Stand wird vorher gesichert, danach startet das Widget neu). Täglich wird automatisch gesichert, die letzten 20 bleiben." -Extra @{ Rows = $rows } -OnShown { Set-InfoRows -Rows $script:InfoCtl.Rows } -OnDouble {
+        param($Tag)
+        $src = [string]$Tag
+        $bi = Get-BackupInfo (Split-Path -Leaf $src)
+        if (-not (Confirm-Action -Text ("Stand vom {0} wiederherstellen?`r`n`r`nEinstellungen, Portfolio, Depots, Alarme und Buchungen werden ersetzt. Der aktuelle Stand wird vorher gesichert. Danach startet das Widget neu." -f $bi.When.ToString("dd.MM.yyyy HH:mm")) -Title "Wiederherstellen")) { return }
+        [void](Backup-DataFiles -Reason "vor_wiederherstellung")
+        try {
+            Copy-DataSet -From $src -To $script:DataDir
+            Write-WidgetLog "Backup restored: $src"
+        } catch {
+            Write-WidgetLog "Restore failed: $($_.Exception.Message)" "ERROR"
+            Show-InfoBox -Text "Wiederherstellen fehlgeschlagen: $($_.Exception.Message)" -Title "Wiederherstellen"
+            return
+        }
+        $script:InfoCtl.Dlg.Close()
+        Restart-Widget
+    }
+}
+
+function Export-DataZip {
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "ZIP-Archiv (*.zip)|*.zip"
+    $sfd.FileName = "TerminalWidget_Daten_{0}.zip" -f (Get-Date -Format "yyyyMMdd")
+    if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tw_export_" + [Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        Copy-DataSet -From $script:DataDir -To $tmp
+        Compress-Archive -Path (Join-Path $tmp "*") -DestinationPath $sfd.FileName -Force
+        Write-WidgetLog "Data exported: $($sfd.FileName)"
+        Show-InfoBox -Text ("Exportiert nach:`r`n{0}`r`n`r`nHinweis: ein Telegram-Token ist an dein Windows-Konto gebunden und muss auf einem anderen PC neu eingetragen werden." -f $sfd.FileName) -Title "Export"
+    } catch {
+        Write-WidgetLog "Export failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox -Text "Export fehlgeschlagen: $($_.Exception.Message)" -Title "Export"
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Import-DataZip {
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "ZIP-Archiv (*.zip)|*.zip"
+    if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tw_import_" + [Guid]::NewGuid().ToString("N"))
+    try {
+        Expand-Archive -Path $ofd.FileName -DestinationPath $tmp -Force
+        if (-not (Test-Path (Join-Path $tmp "config.json"))) { Show-InfoBox -Text "Das Archiv enthält keine config.json - kein TerminalWidget-Export." -Title "Import"; return }
+        if (-not (Confirm-Action -Text "Alle Daten durch den Inhalt des Archivs ersetzen?`r`nDer aktuelle Stand wird vorher gesichert. Danach startet das Widget neu." -Title "Import")) { return }
+        [void](Backup-DataFiles -Reason "vor_import")
+        Copy-DataSet -From $tmp -To $script:DataDir
+        Write-WidgetLog "Data imported: $($ofd.FileName)"
+        Restart-Widget
+    } catch {
+        Write-WidgetLog "Import failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox -Text "Import fehlgeschlagen: $($_.Exception.Message)" -Title "Import"
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Switch-PortableMode {
+    # portable.txt next to the script = data in <program folder>\data
+    $flag = Join-Path $script:ScriptDir "portable.txt"
+    $portDir = Join-Path $script:ScriptDir "data"
+    $localDir = Join-Path $env:LOCALAPPDATA "TerminalWidget"
+    if ($script:IsPortable) {
+        if (-not (Confirm-Action -Text ("Portabel-Modus beenden?`r`nDie Daten werden nach {0} kopiert, danach startet das Widget neu." -f $localDir) -Title "Portabel")) { return }
+        try {
+            if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Path $localDir -Force | Out-Null }
+            [void](Backup-DataFiles -Reason "vor_portabel_aus")
+            Copy-DataSet -From $script:DataDir -To $localDir
+            Remove-Item -Path $flag -Force
+        } catch { Show-InfoBox -Text "Fehlgeschlagen: $($_.Exception.Message)" -Title "Portabel"; return }
+    } else {
+        if (-not (Confirm-Action -Text ("Portabel-Modus einschalten?`r`nDie Daten werden nach {0} kopiert (z. B. für einen USB-Stick), danach startet das Widget neu. Autostart zeigt weiter auf diesen Ordner." -f $portDir) -Title "Portabel")) { return }
+        try {
+            if (-not (Test-Path $portDir)) { New-Item -ItemType Directory -Path $portDir -Force | Out-Null }
+            Copy-DataSet -From $script:DataDir -To $portDir
+            Set-Content -Path $flag -Value "Daten liegen im Unterordner data (TerminalWidget portabel). Datei löschen = wieder %LOCALAPPDATA%." -Encoding UTF8
+        } catch { Show-InfoBox -Text "Fehlgeschlagen (Ordner schreibgeschützt?): $($_.Exception.Message)" -Title "Portabel"; return }
+    }
+    Restart-Widget
+}
+
+# ---- CSV import ----
+function Read-TextFileGuess {
+    # UTF-8 (with or without BOM), else Windows-1252 (German broker exports)
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    try { return $utf8.GetString($bytes).TrimStart([char]0xFEFF) } catch { return [System.Text.Encoding]::GetEncoding(1252).GetString($bytes) }
+}
+
+function Show-CsvImportDialog {
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "CSV / Text (*.csv;*.txt)|*.csv;*.txt|Alle Dateien (*.*)|*.*"
+    $ofd.Title = "Broker-Export (CSV) wählen"
+    if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $csv = $null
+    try { $csv = ConvertFrom-CsvText (Read-TextFileGuess $ofd.FileName) } catch { Write-WidgetLog "CSV read failed: $($_.Exception.Message)" "ERROR" }
+    if ($null -eq $csv -or @($csv.Headers).Count -lt 2 -or @($csv.Rows).Count -eq 0) {
+        Show-InfoBox -Text "In der Datei wurde keine Tabelle gefunden (Kopfzeile + Zeilen, getrennt mit ; , oder Tab)." -Title "CSV-Import"
+        return
+    }
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title ("CSV-Import - {0} -> Depot '{1}'" -f (Split-Path -Leaf $ofd.FileName), (Get-DepotName ([string]$script:Config.ActiveDepot))) -W (S 1000) -H (S 640)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 860), (S 480))
+    $aTLR = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $aAll = $aTLR -bor [System.Windows.Forms.AnchorStyles]::Bottom
+    $aBL = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+    $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+    $info = New-Object System.Windows.Forms.Label
+    $info.SetBounds((S 12), (S 8), (S 976), (S 20)); $info.Anchor = $aTLR; $info.ForeColor = $p.Muted
+    $info.Text = "Spalten zuordnen (automatisch erkannt). Häkchen = wird importiert. Symbol-Spalte ist änderbar. Schon vorhandene Buchungen werden nicht doppelt importiert."
+    $dlg.Controls.Add($info)
+    $guess = Get-CsvColumnGuess -Headers $csv.Headers
+    $fields = Get-CsvFieldNames
+    $combos = @{}
+    $i = 0
+    foreach ($f in $fields.Keys) {
+        $x = (S 12) + ($i % 5) * (S 196)
+        $y = (S 34) + [math]::Floor($i / 5) * (S 30)
+        $l = New-Object System.Windows.Forms.Label
+        $l.SetBounds($x, ($y + (S 3)), (S 74), (S 18)); $l.Text = $fields[$f]
+        $dlg.Controls.Add($l)
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.SetBounds(($x + (S 76)), $y, (S 112), (S 24))
+        $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $cb.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cb.BackColor = $p.Input; $cb.ForeColor = $p.Text
+        [void]$cb.Items.Add("(keine)")
+        foreach ($h in $csv.Headers) { [void]$cb.Items.Add($(if ($h) { $h } else { "(leer)" })) }
+        $cb.SelectedIndex = [int]$guess[$f] + 1
+        $cb.DropDownWidth = S 200
+        $dlg.Controls.Add($cb)
+        $combos[$f] = $cb
+        $i++
+    }
+    $y2 = S 98
+    $lCur = New-Object System.Windows.Forms.Label
+    $lCur.SetBounds((S 12), ($y2 + (S 3)), (S 150), (S 18)); $lCur.Text = "Währung, wenn leer:"
+    $dlg.Controls.Add($lCur)
+    $cbCur = New-Object System.Windows.Forms.ComboBox
+    $cbCur.SetBounds((S 164), $y2, (S 70), (S 24))
+    $cbCur.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbCur.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbCur.BackColor = $p.Input; $cbCur.ForeColor = $p.Text
+    foreach ($c in @("EUR", "USD", "CHF", "GBP")) { [void]$cbCur.Items.Add($c) }
+    $cbCur.SelectedIndex = 0
+    $dlg.Controls.Add($cbCur)
+    $lSuf = New-Object System.Windows.Forms.Label
+    $lSuf.SetBounds((S 250), ($y2 + (S 3)), (S 150), (S 18)); $lSuf.Text = "ISIN bevorzugt an Börse:"
+    $dlg.Controls.Add($lSuf)
+    $cbSuf = New-Object System.Windows.Forms.ComboBox
+    $cbSuf.SetBounds((S 402), $y2, (S 120), (S 24))
+    $cbSuf.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbSuf.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbSuf.BackColor = $p.Input; $cbSuf.ForeColor = $p.Text
+    foreach ($c in @("Heimatbörse", ".DE Xetra", ".F Frankfurt", ".VI Wien", ".SW Zürich", ".L London", ".AS Amsterdam", ".PA Paris")) { [void]$cbSuf.Items.Add($c) }
+    $cbSuf.SelectedIndex = 0
+    $dlg.Controls.Add($cbSuf)
+    Set-DynTip $cbSuf "Bei ISINs: welches Yahoo-Symbol genommen wird. Heimatbörse = erster Treffer (meist US/Heimatmarkt); .DE = Xetra-Kurse in EUR."
+    $btnRes = New-Object System.Windows.Forms.Button
+    $btnRes.SetBounds((S 534), ($y2 - (S 1)), (S 150), (S 26))
+    Style-FlatButton -Btn $btnRes -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnRes.Text = "ISINs auflösen"
+    $dlg.Controls.Add($btnRes)
+    $chkReb = New-Object System.Windows.Forms.CheckBox
+    $chkReb.SetBounds((S 700), $y2, (S 290), (S 24)); $chkReb.Anchor = $aTLR
+    $chkReb.Text = "Positionen danach aus Buchungen berechnen"; $chkReb.Checked = $true
+    $chkReb.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $dlg.Controls.Add($chkReb)
+    Set-DynTip $chkReb "Stück und EK der betroffenen Positionen werden aus allen Buchungen neu berechnet (Durchschnittskosten, Splits berücksichtigt)" "REBUILD"
+    $g = New-Object System.Windows.Forms.DataGridView
+    $g.SetBounds((S 12), (S 132), (S 976), (S 450)); $g.Anchor = $aAll
+    Style-DataGrid -Grid $g
+    $g.ReadOnly = $false
+    $g.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::CellSelect
+    $chkCol = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $chkCol.Name = "Use"; $chkCol.HeaderText = ""; $chkCol.FillWeight = [float](S 30)
+    [void]$g.Columns.Add($chkCol)
+    foreach ($cd in @(@("Date", "Datum", 90), @("Type", "Art", 80), @("Ident", "Ticker / ISIN", 130), @("Sym", "Symbol", 90), @("Shares", "Stück", 80), @("Price", "Kurs / Betrag", 100), @("Fee", "Gebühr", 70), @("Cur", "Whg", 50), @("Note", "Hinweis", 220))) {
+        $ci = $g.Columns.Add($cd[0], $cd[1])
+        $g.Columns[$ci].FillWeight = [float](S $cd[2])
+        $g.Columns[$ci].ReadOnly = ($cd[0] -ne "Sym")
+    }
+    $g.Columns["Sym"].DefaultCellStyle.ForeColor = $p.Accent
+    $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $dlg.Controls.Add($g)
+    $lSum = New-Object System.Windows.Forms.Label
+    $lSum.SetBounds((S 12), (S 594), (S 700), (S 34)); $lSum.Anchor = $aBL -bor [System.Windows.Forms.AnchorStyles]::Right; $lSum.ForeColor = $p.Muted
+    $dlg.Controls.Add($lSum)
+    $btnImp = New-Object System.Windows.Forms.Button
+    $btnImp.SetBounds((S 794), (S 598), (S 94), (S 28)); $btnImp.Anchor = $aBR
+    Style-FlatButton -Btn $btnImp -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $btnImp.Text = "Importieren"
+    $dlg.Controls.Add($btnImp)
+    $btnCa = New-Object System.Windows.Forms.Button
+    $btnCa.SetBounds((S 894), (S 598), (S 94), (S 28)); $btnCa.Anchor = $aBR
+    Style-FlatButton -Btn $btnCa -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $btnCa.Text = "Abbrechen"
+    $btnCa.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCa)
+    $dlg.CancelButton = $btnCa
+
+    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Imported = 0 }
+    $script:CsvCtl.Fill = {
+        $cc = $script:CsvCtl
+        $map = @{}
+        foreach ($f in $cc.Combos.Keys) { $map[$f] = $cc.Combos[$f].SelectedIndex - 1 }
+        $cc.Rows = @(ConvertFrom-BrokerRows -Rows $cc.Csv.Rows -Map $map -DefaultCurrency ([string]$cc.Cur.SelectedItem))
+        $existing = $script:Transactions.ToArray()
+        $cc.Grid.Rows.Clear()
+        $nOk = 0; $nDup = 0; $nIsin = 0
+        foreach ($b in $cc.Rows) {
+            $sym = if (Test-Isin $b.Ident) { [string]$cc.IsinMap[$b.Ident] } else { $b.Ident }
+            $note = $b.Note
+            $use = $b.Ok
+            if ($b.Ok -and -not $sym) { $note = "ISIN noch nicht aufgelöst"; $use = $false; $nIsin++ }
+            elseif ($b.Ok -and (Test-DuplicateTransaction -Existing $existing -New ([PSCustomObject]@{ Date = $b.Date; Ticker = $sym; Type = $b.Type; Shares = $b.Shares; Price = $b.Price }))) { $note = "schon vorhanden"; $use = $false; $nDup++ }
+            if ($use) { $nOk++ }
+            $ri = $cc.Grid.Rows.Add($use, (Format-IsoDateDe $b.Date), $b.Type, $b.Ident, $sym, ("{0:N4}" -f $b.Shares), ("{0:N4}" -f $b.Price), ("{0:N2}" -f $b.Fee), $b.Currency, $note)
+            if (-not $b.Ok) { $cc.Grid.Rows[$ri].DefaultCellStyle.ForeColor = $script:Pal.Muted }
+        }
+        $cc.Sum.Text = "{0} Zeilen: {1} zum Import, {2} schon vorhanden, {3} ISIN offen, {4} übersprungen (Art/Datum/Stück fehlen, z. B. Ein-/Auszahlungen)." -f $cc.Rows.Count, $nOk, $nDup, $nIsin, @($cc.Rows | Where-Object { -not $_.Ok }).Count
+    }
+    foreach ($cb in @($combos.Values) + @($cbCur)) { $cb.Add_SelectionChangeCommitted({ & $script:CsvCtl.Fill }) }
+    $btnRes.Add_Click({
+        $cc = $script:CsvCtl
+        $isins = @($cc.Rows | Where-Object { Test-Isin $_.Ident } | ForEach-Object { $_.Ident } | Sort-Object -Unique | Where-Object { -not $cc.IsinMap.ContainsKey($_) })
+        if ($isins.Count -eq 0) { & $cc.Fill; return }
+        $suf = ([string]$cc.Suf.SelectedItem).Split(' ')[0]
+        if (-not $suf.StartsWith(".")) { $suf = "" }
+        $cc.Sum.Text = "Suche {0} ISIN(s) bei Yahoo ..." -f $isins.Count
+        $cc.Dlg.Refresh()
+        $urls = @{}
+        foreach ($is in $isins) { $urls[$is] = "https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=10&newsCount=0" -f $is }
+        $res = Invoke-ParallelFetch -Urls @($urls.Values) -TimeoutSec 12
+        foreach ($is in $isins) {
+            $s = Get-YahooSymbolFromSearch -Json $res[$urls[$is]] -PreferSuffix $suf
+            if ($s) { $cc.IsinMap[$is] = $s }
+        }
+        & $cc.Fill
+    })
+    $g.Add_CellEndEdit({
+        param($sender, $e)
+        if ($sender.Columns[$e.ColumnIndex].Name -ne "Sym") { return }
+        $cc = $script:CsvCtl
+        $b = $cc.Rows[$e.RowIndex]
+        $v = ([string]$sender.Rows[$e.RowIndex].Cells["Sym"].Value).Trim().ToUpper()
+        $sender.Rows[$e.RowIndex].Cells["Sym"].Value = $v
+        if ((Test-Isin $b.Ident) -and $v) { $cc.IsinMap[$b.Ident] = $v }
+        if ($v -and $b.Ok) { $sender.Rows[$e.RowIndex].Cells["Use"].Value = $true }
+    })
+    $btnImp.Add_Click({
+        $cc = $script:CsvCtl
+        $cc.Grid.EndEdit() | Out-Null
+        $n = 0
+        $syms = New-Object System.Collections.Generic.HashSet[string]
+        for ($k = 0; $k -lt $cc.Rows.Count; $k++) {
+            $row = $cc.Grid.Rows[$k]
+            if (-not [bool]$row.Cells["Use"].Value) { continue }
+            $b = $cc.Rows[$k]
+            $sym = ([string]$row.Cells["Sym"].Value).Trim().ToUpper()
+            if (-not $b.Ok -or -not $sym) { continue }
+            $script:Transactions.Add([PSCustomObject]@{
+                Id = [Guid]::NewGuid().ToString("N"); Date = $b.Date; Ticker = $sym; Type = $b.Type
+                Shares = [double]$b.Shares; Price = [double]$b.Price; Fee = [double]$b.Fee; Currency = $b.Currency
+                Realized = 0.0; Note = "CSV-Import " + $cc.File
+            })
+            [void]$syms.Add($sym)
+            $n++
+        }
+        if ($n -eq 0) { $cc.Sum.Text = "Nichts ausgewählt."; return }
+        [void](Backup-DataFiles -Reason "vor_csv_import")
+        Save-Transactions
+        Write-WidgetLog ("CSV import: {0} bookings from {1}" -f $n, $cc.File)
+        if ($cc.Reb.Checked) {
+            foreach ($s in $syms) { [void](Invoke-PositionRebuild -Ticker $s -Owner $cc.Dlg -Silent) }
+        }
+        $cc.Imported = $n
+        $cc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $cc.Dlg.Close()
+    })
+    $dlg.Add_Shown({ & $script:CsvCtl.Fill })
+    [void]$dlg.ShowDialog($form)
+    $n = [int]$script:CsvCtl.Imported
+    $script:CsvCtl = $null
+    $dlg.Dispose()
+    if ($n -gt 0) {
+        Set-TransientStatus ("{0} Buchungen importiert" -f $n) 5
+        Refresh-AllMarketData
+        Update-AllUiViews
+    }
 }
 
 function Show-CurrencyMismatchNotice {
@@ -9396,6 +9941,21 @@ function Show-SettingsDialog {
 
     $btnLog = New-Object System.Windows.Forms.Button
     $btnLog.SetBounds((S 266), $by, (S 100), (S 28))
+    # v4.5: restore / export / import / portable
+    $mkDataBtn = {
+        param([string]$T, [int]$X, [string]$Tip, [scriptblock]$Act)
+        $b = New-Object System.Windows.Forms.Button
+        $b.SetBounds($X, ($by + (S 36)), (S 130), (S 28))
+        Style-FlatButton -Btn $b -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
+        $b.Text = $T
+        $b.Add_Click($Act)
+        $dlg.Controls.Add($b)
+        Set-DynTip $b $Tip
+    }
+    & $mkDataBtn "Wiederherstellen ..." (S 14) "Ein Backup zurückspielen (täglich wird automatisch gesichert)" { $script:SettingsAfter = { Show-RestoreDialog }; $script:SettingsCtl.Dlg.Close() }
+    & $mkDataBtn "Daten exportieren ..." (S 150) "Alle Daten als ZIP sichern (z. B. für einen anderen PC)" { Export-DataZip }
+    & $mkDataBtn "Daten importieren ..." (S 286) "Einen ZIP-Export einlesen (ersetzt alle Daten, vorher Backup)" { $script:SettingsAfter = { Import-DataZip }; $script:SettingsCtl.Dlg.Close() }
+    & $mkDataBtn $(if ($script:IsPortable) { "Portabel beenden ..." } else { "Portabel machen ..." }) (S 422) $(if ($script:IsPortable) { "Daten liegen im Programmordner (data). Zurück nach %LOCALAPPDATA%." } else { "Daten in den Programmordner (data) verschieben, z. B. für einen USB-Stick" }) { $script:SettingsAfter = { Switch-PortableMode }; $script:SettingsCtl.Dlg.Close() }
     Style-FlatButton -Btn $btnLog -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
     $btnLog.Text = "Log öffnen"
     $btnLog.Add_Click({
@@ -9441,10 +10001,15 @@ function Show-SettingsDialog {
     $dlg.Controls.Add($btnOk)
     $dlg.AcceptButton = $btnOk
     $dlg.CancelButton = $btnCancel
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 42)))
+    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 78)))
 
+    $script:SettingsAfter = $null
     $res = $dlg.ShowDialog($form)
     $script:SettingsCtl = $null
+    # v4.5: data actions run after the settings window is gone (changes there are discarded)
+    $after = $script:SettingsAfter
+    $script:SettingsAfter = $null
+    if ($null -ne $after) { $dlg.Dispose(); & $after; return }
     if ($res -ne [System.Windows.Forms.DialogResult]::OK) { $dlg.Dispose(); return }
 
     $needRefresh = ([int]$nSmaF.Value -ne [int]$cfg.SmaFastPeriod) -or ([int]$nSmaS.Value -ne [int]$cfg.SmaSlowPeriod) -or ([int]$nRsi.Value -ne [int]$cfg.RsiPeriod)
@@ -9620,7 +10185,7 @@ NVDA DVD      Dividenden         NVDA EE     Termine
 NVDA ALRT TRAIL 8 / >= 150 / TAG- 3 / 52H / VOL 2
 NVDA WL / CMP / TX   Watchlist / Vergleich / Transaktion
 PORT  ANA  DVD  CAL  TOP  FX  LOG  REP  TF 3M  LAYOUT TERMINAL
-THEME OLED  SET  PUSH  GLOS  ABOUT
+THEME OLED  SET  PUSH  GLOS  ABOUT  PF <Depot>  IMP  BAK
 
 Alarme: Kurs, Tag%, RSI, SMA, Trailing-Stopp, EK%, 52W-Hoch/-Tief,
 Volumen-Spitze, Depotwert und Depot-Tag%. "Verlauf" zeigt alle
@@ -9809,6 +10374,17 @@ $cmiCompareOff.Add_Click({ Set-CompareTicker -Symbol "" })
 $cmiZoomReset.Add_Click({ Reset-ChartZoom })
 
 # Portfolio Grid & Editor Events
+Update-DepotCombo
+$cmbDepot.Add_SelectionChangeCommitted({
+    if ($script:DepotComboBusy) { return }
+    $ix = $cmbDepot.SelectedIndex
+    $list = @(Get-DepotList)
+    if ($ix -lt $list.Count) { Switch-Depot $list[$ix].Id; return }
+    $act = $ix - $list.Count
+    Update-DepotCombo
+    switch ($act) { 0 { New-Depot } 1 { Rename-ActiveDepot } 2 { Remove-ActiveDepot } }
+})
+
 $cmbPortSort.Add_SelectedIndexChanged({
     # choosing a preset ends a header-click sort
     $script:PfSort.Col = ""; $script:PfSort.Step = 0
@@ -10659,6 +11235,7 @@ $uiTimer.Add_Tick({
             $script:NextEventsCheck = $nowTick.AddMinutes(10)
             Update-EventsIfStale
             Check-EarningsNotifications
+            Invoke-DailyBackup
         }
     } catch {
         Write-WidgetLog "UI tick failed: $($_.Exception.Message)" "WARN"

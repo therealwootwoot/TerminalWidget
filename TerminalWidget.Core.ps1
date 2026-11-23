@@ -2040,7 +2040,7 @@ function ConvertTo-IsoDate {
     param([string]$Text)
     $t = ([string]$Text).Trim()
     if (-not $t) { return "" }
-    $formats = [string[]]@("dd.MM.yyyy", "d.M.yyyy", "dd.MM.yy", "d.M.yy", "yyyy-MM-dd", "dd/MM/yyyy", "d/M/yyyy")
+    $formats = [string[]]@("dd.MM.yyyy", "d.M.yyyy", "dd.MM.yy", "d.M.yy", "yyyy-MM-dd", "dd/MM/yyyy", "d/M/yyyy", "yyyyMMdd", "yyyy/MM/dd", "dd-MM-yyyy")
     $d = [DateTime]::MinValue
     if ([DateTime]::TryParseExact($t, $formats, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) {
         return $d.ToString("yyyy-MM-dd")
@@ -2536,6 +2536,9 @@ function Get-TerminalFunctions {
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
         "HELP"   = @{ Scope = "G";  Desc = "Tastenkürzel und Befehle" }
         "ABOUT"  = @{ Scope = "G";  Desc = "Version, Pfade, Update-Prüfung" }
+        "PF"     = @{ Scope = "G";  Desc = "Depot wechseln: PF <Name> (ohne Name: neues Depot)" }
+        "IMP"    = @{ Scope = "G";  Desc = "Broker-CSV importieren" }
+        "BAK"    = @{ Scope = "G";  Desc = "Backup wiederherstellen" }
     }
 }
 
@@ -2599,7 +2602,7 @@ function ConvertFrom-AlertShorthand {
 
 function Get-CommandSuggestions {
     # Autocomplete: @(@{ Text; Desc }) for what has been typed so far
-    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12)
+    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12, [string[]]$Depots = @())
     $out = New-Object System.Collections.Generic.List[PSObject]
     $seen = New-Object System.Collections.Generic.HashSet[string]
     $add = {
@@ -2627,7 +2630,7 @@ function Get-CommandSuggestions {
         $opts = switch ($first) {
             "TF"     { @("1D", "5D", "1M", "3M", "6M", "1Y") }
             "LAYOUT" { @("TERMINAL", "STANDARD", "COMPACT", "TICKER") }
-            "ALRT"   { @() }
+            "PF"     { @($Depots | ForEach-Object { ([string]$_).ToUpperInvariant() }) }
             default  { @() }
         }
         $part = if ($tok.Count -ge 2 -and -not $endsSpace) { $tok[1] } else { "" }
@@ -2732,4 +2735,235 @@ function Get-LatestTagVersion {
         if (-not $best -or (Compare-AppVersion $v $best) -gt 0) { $best = $v }
     }
     return $best
+}
+
+# ==============================================================================
+# v4.5: broker CSV import, depots
+# ==============================================================================
+function Get-CsvDelimiter {
+    # ; , or TAB - whichever splits the first lines most consistently
+    param([string[]]$Lines)
+    $sample = @($Lines | Where-Object { $_ -and $_.Trim() } | Select-Object -First 10)
+    $best = ";"; $bestScore = -1
+    foreach ($d in @(";", ",", "`t", "|")) {
+        $counts = @($sample | ForEach-Object { @(Split-CsvLine -Line $_ -Delimiter $d).Count })
+        if ($counts.Count -eq 0) { continue }
+        $max = ($counts | Measure-Object -Maximum).Maximum
+        if ($max -lt 2) { continue }
+        $same = @($counts | Where-Object { $_ -eq $max }).Count
+        $score = $same * 100 + $max
+        if ($score -gt $bestScore) { $bestScore = $score; $best = $d }
+    }
+    return $best
+}
+
+function Split-CsvLine {
+    # One CSV line -> fields (quotes, doubled quotes inside quotes)
+    param([string]$Line, [string]$Delimiter = ";")
+    $out = New-Object System.Collections.Generic.List[string]
+    $sb = New-Object System.Text.StringBuilder
+    $inQ = $false
+    $d = [char]$Delimiter
+    for ($i = 0; $i -lt $Line.Length; $i++) {
+        $ch = $Line[$i]
+        if ($inQ) {
+            if ($ch -eq '"') {
+                if ($i + 1 -lt $Line.Length -and $Line[$i + 1] -eq '"') { [void]$sb.Append('"'); $i++ }
+                else { $inQ = $false }
+            } else { [void]$sb.Append($ch) }
+        } elseif ($ch -eq '"') { $inQ = $true }
+        elseif ($ch -eq $d) { $out.Add($sb.ToString().Trim()); [void]$sb.Clear() }
+        else { [void]$sb.Append($ch) }
+    }
+    $out.Add($sb.ToString().Trim())
+    return $out.ToArray()
+}
+
+function ConvertFrom-CsvText {
+    # -> @{ Delimiter; Headers = string[]; Rows = @(string[]) }; the header is the
+    # first line with as many fields as the widest line (skips broker preambles)
+    param([string]$Text)
+    $lines = @(([string]$Text) -split "`r?`n" | Where-Object { $_.Trim() })
+    $res = @{ Delimiter = ";"; Headers = @(); Rows = @() }
+    if ($lines.Count -eq 0) { return $res }
+    $d = Get-CsvDelimiter -Lines $lines
+    $split = @($lines | ForEach-Object { ,(Split-CsvLine -Line $_ -Delimiter $d) })
+    $max = (@($split | ForEach-Object { $_.Count }) | Measure-Object -Maximum).Maximum
+    $h = 0
+    while ($h -lt $split.Count -and $split[$h].Count -lt [math]::Max(2, $max - 1)) { $h++ }
+    if ($h -ge $split.Count) { return $res }
+    $res.Delimiter = $d
+    $res.Headers = @($split[$h] | ForEach-Object { ([string]$_).Trim().Trim([char]0xFEFF) })
+    $rows = @()
+    for ($i = $h + 1; $i -lt $split.Count; $i++) { if (@($split[$i] | Where-Object { $_ }).Count -gt 0) { $rows += ,$split[$i] } }
+    $res.Rows = $rows
+    return $res
+}
+
+function Get-CsvFieldNames {
+    return [ordered]@{
+        Date = "Datum"; Type = "Art"; Ident = "Ticker / ISIN"; Shares = "Stück"; Price = "Kurs"
+        Amount = "Betrag"; Fee = "Gebühr"; Tax = "Steuer"; Currency = "Währung"; Name = "Name"
+    }
+}
+
+function Get-CsvColumnGuess {
+    # Header names -> @{ Field = column index or -1 }
+    param([string[]]$Headers)
+    $pat = [ordered]@{
+        Date     = '^(datum|date|buchungstag|buchungsdatum|handelstag|ausführungsdatum|ausfuehrungsdatum|valuta|trade ?date|transaction ?date|zeit|time)'
+        Type     = '^(typ|type|art|transaktion|transaktionsart|geschäftsart|geschaeftsart|buchungsart|transaction ?type|action|vorgang|aktion)'
+        Ident    = '^(isin|symbol|ticker|wertpapier ?kennnummer|wkn|instrument)'
+        Shares   = '^(stück|stueck|stk|anzahl|menge|quantity|shares|nominale|units|anteile)'
+        Price    = '^(kurs($|[\s\(/])|preis|price|ausführungskurs|ausfuehrungskurs|execution ?price|t\. ?price|price ?per ?share)'
+        Amount   = '^(betrag|amount|gesamt|total|kurswert|wert$|value|net ?amount|proceeds|summe)'
+        Fee      = '^(gebühr|gebuehr|gebühren|gebuehren|provision|fee|fees|commission|comm|kosten|spesen)'
+        Tax      = '^(steuer|steuern|tax|taxes|quellensteuer|kapitalertragsteuer)'
+        Currency = '^(währung|waehrung|currency|whg|ccy)'
+        Name     = '^(name|bezeichnung|wertpapier|titel|description|beschreibung)'
+    }
+    $map = @{}
+    foreach ($f in $pat.Keys) { $map[$f] = -1 }
+    $used = @{}
+    # ISIN columns win over name columns for the identifier
+    foreach ($f in $pat.Keys) {
+        for ($i = 0; $i -lt @($Headers).Count; $i++) {
+            if ($used.ContainsKey($i)) { continue }
+            $h = ([string]$Headers[$i]).Trim().ToLowerInvariant()
+            if ($h -match $pat[$f]) { $map[$f] = $i; $used[$i] = $true; break }
+        }
+    }
+    return $map
+}
+
+function ConvertFrom-CsvNumber {
+    # "1.234,56" / "1,234.56" / "-12,5" / "12 EUR" -> double; NaN if not a number
+    param([string]$Raw)
+    $t = ([string]$Raw).Trim() -replace '[^\d,\.\-+]', ''
+    if (-not $t -or $t -eq '-' -or $t -eq '+') { return [double]::NaN }
+    $lc = $t.LastIndexOf(','); $ld = $t.LastIndexOf('.')
+    if ($lc -ge 0 -and $ld -ge 0) {
+        if ($lc -gt $ld) { $t = $t.Replace('.', '').Replace(',', '.') } else { $t = $t.Replace(',', '') }
+    } elseif ($lc -ge 0) {
+        # "1,234" with exactly 3 digits after a single comma and more before: thousands
+        $parts = $t.Split(',')
+        if ($parts.Count -gt 2) { $t = $t.Replace(',', '') } else { $t = $t.Replace(',', '.') }
+    } elseif ($ld -ge 0) {
+        $parts = $t.Split('.')
+        if ($parts.Count -gt 2) { $t = $t.Replace('.', '') }
+    }
+    $v = 0.0
+    if ([double]::TryParse($t, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $v }
+    return [double]::NaN
+}
+
+function ConvertFrom-CsvType {
+    # Broker wording -> Kauf / Verkauf / Dividende / "" (skip)
+    param([string]$Raw)
+    $t = ([string]$Raw).Trim().ToLowerInvariant()
+    if (-not $t) { return "" }
+    if ($t -match 'dividend|ausschüttung|ausschuettung|ertrag|distribution|coupon|zins') { return "Dividende" }
+    if ($t -match 'verkauf|sell|^s$|^sld$|^sale') { return "Verkauf" }
+    if ($t -match 'kauf|buy|^b$|^bot$|sparplan|savings ?plan|purchase|einbuchung') { return "Kauf" }
+    return ""
+}
+
+function Test-Isin {
+    param([string]$Text)
+    return ([string]$Text).Trim().ToUpperInvariant() -match '^[A-Z]{2}[A-Z0-9]{9}\d$'
+}
+
+function ConvertFrom-BrokerRows {
+    # Rows + column map -> @(@{ Date; Type; Ident; Name; Shares; Price; Fee; Currency; Ok; Note })
+    # Price = per share for buys/sells, total gross amount for dividends (like the widget's own bookings)
+    param([array]$Rows, [hashtable]$Map, [string]$DefaultCurrency = "EUR")
+    $get = { param($R, [string]$F) $i = [int]$Map[$F]; if ($i -ge 0 -and $i -lt @($R).Count) { return [string]$R[$i] } return "" }
+    $out = @()
+    foreach ($r in @($Rows)) {
+        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = "" }
+        $dRaw = ((& $get $r "Date").Trim()) -replace '[T ,;].*$', ''
+        $o.Date = ConvertTo-IsoDate $dRaw
+        $o.Ident = (& $get $r "Ident").Trim().ToUpperInvariant()
+        $o.Name = (& $get $r "Name").Trim()
+        $cur = Get-NormalizedCurrencyCode (& $get $r "Currency")
+        if ($cur) { $o.Currency = $cur }
+        $sh = ConvertFrom-CsvNumber (& $get $r "Shares")
+        $px = ConvertFrom-CsvNumber (& $get $r "Price")
+        $am = ConvertFrom-CsvNumber (& $get $r "Amount")
+        $fe = ConvertFrom-CsvNumber (& $get $r "Fee")
+        $tx = ConvertFrom-CsvNumber (& $get $r "Tax")
+        $typ = if ([int]$Map["Type"] -ge 0) { ConvertFrom-CsvType (& $get $r "Type") } else { "" }
+        if (-not $typ -and [int]$Map["Type"] -lt 0 -and -not [double]::IsNaN($sh) -and $sh -ne 0) { $typ = if ($sh -lt 0) { "Verkauf" } else { "Kauf" } }
+        $o.Type = $typ
+        $o.Fee = if ([double]::IsNaN($fe)) { 0.0 } else { [math]::Abs($fe) }
+        if (-not [double]::IsNaN($tx) -and $o.Type -ne "Dividende") { $o.Fee += [math]::Abs($tx) }
+        $o.Shares = if ([double]::IsNaN($sh)) { 0.0 } else { [math]::Abs($sh) }
+        if ($o.Type -eq "Dividende") {
+            $o.Price = if (-not [double]::IsNaN($am) -and $am -ne 0) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px) -and $o.Shares -gt 0) { [math]::Abs($px) * $o.Shares } else { 0.0 }
+            if (-not [double]::IsNaN($tx)) { $o.Fee += [math]::Abs($tx) }
+        } else {
+            if (-not [double]::IsNaN($px) -and $px -ne 0) { $o.Price = [math]::Abs($px) }
+            elseif (-not [double]::IsNaN($am) -and $o.Shares -gt 0) {
+                # amount usually includes the fee: buys paid amount + fee, sells receive amount - fee
+                $net = [math]::Abs($am)
+                $gross = if ($o.Type -eq "Kauf") { $net - $o.Fee } else { $net + $o.Fee }
+                if ($gross -le 0) { $gross = $net }
+                $o.Price = $gross / $o.Shares
+            }
+        }
+        $why = @()
+        if (-not $o.Type) { $why += "Art unbekannt" }
+        if (-not $o.Date) { $why += "Datum fehlt" }
+        if (-not $o.Ident) { $why += "Ticker/ISIN fehlt" }
+        if ($o.Type -ne "Dividende" -and $o.Shares -le 0) { $why += "Stück fehlen" }
+        if ($o.Price -le 0) { $why += "Kurs/Betrag fehlt" }
+        $o.Ok = ($why.Count -eq 0)
+        $o.Note = $why -join ", "
+        $out += [PSCustomObject]$o
+    }
+    return $out
+}
+
+function Test-DuplicateTransaction {
+    # Same date, ticker, type, shares and price (0.5 % tolerance) as an existing booking
+    param([array]$Existing, $New)
+    foreach ($t in @($Existing)) {
+        if ([string]$t.Date -ne [string]$New.Date -or ([string]$t.Ticker).ToUpper() -ne ([string]$New.Ticker).ToUpper() -or [string]$t.Type -ne [string]$New.Type) { continue }
+        if ([math]::Abs([double]$t.Shares - [double]$New.Shares) -gt 1e-6 * [math]::Max(1, [double]$New.Shares)) { continue }
+        $p = [math]::Max(1e-9, [math]::Abs([double]$New.Price))
+        if ([math]::Abs([double]$t.Price - [double]$New.Price) / $p -le 0.005) { return $true }
+    }
+    return $false
+}
+
+function Get-YahooSymbolFromSearch {
+    # First equity / ETF / fund symbol of a search response; prefers $PreferSuffix (e.g. ".DE")
+    param($Json, [string]$PreferSuffix = "")
+    $items = @(ConvertFrom-YahooSearch $Json | Where-Object { $_.QuoteType -in @("EQUITY", "ETF", "MUTUALFUND") })
+    if ($items.Count -eq 0) { return "" }
+    if ($PreferSuffix) { foreach ($i in $items) { if ($i.Symbol.EndsWith($PreferSuffix.ToUpperInvariant())) { return $i.Symbol } } }
+    return $items[0].Symbol
+}
+
+function ConvertTo-DepotId {
+    # Display name -> folder-safe id
+    param([string]$Name)
+    $s = ([string]$Name).Trim().ToLowerInvariant()
+    $s = $s.Replace('ä', 'ae').Replace('ö', 'oe').Replace('ü', 'ue').Replace('ß', 'ss')
+    $s = ($s -replace '[^a-z0-9]+', '-').Trim('-')
+    if (-not $s) { $s = "depot" }
+    if ($s.Length -gt 40) { $s = $s.Substring(0, 40).Trim('-') }
+    return $s
+}
+
+function Get-BackupInfo {
+    # backups\yyyyMMdd_HHmmss_reason -> @{ When (DateTime); Reason }
+    param([string]$FolderName)
+    $o = @{ When = [DateTime]::MinValue; Reason = "" }
+    if ($FolderName -match '^(\d{8}_\d{6})_?(.*)$') {
+        $d = [DateTime]::MinValue
+        if ([DateTime]::TryParseExact($Matches[1], "yyyyMMdd_HHmmss", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { $o.When = $d }
+        $o.Reason = ([string]$Matches[2]).Replace('_', ' ')
+    }
+    return $o
 }
