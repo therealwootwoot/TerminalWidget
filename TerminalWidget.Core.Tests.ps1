@@ -1507,3 +1507,60 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         $p.ExitCode | Should -Be 0
     }
 }
+
+# ==============================================================================
+# v4.8
+# ==============================================================================
+Describe "Log scale and chart markers (v4.8)" {
+    It "maps prices linearly" {
+        Get-PriceFrac 150 100 100 | Should -Be 0.5
+        Get-PriceFromFrac 0.5 100 100 | Should -Be 150
+    }
+    It "maps prices logarithmically" {
+        # 10 .. 1000: 100 sits in the middle
+        [math]::Round((Get-PriceFrac 100 10 990 $true), 6) | Should -Be 0.5
+        [math]::Round((Get-PriceFromFrac 0.5 10 990 $true), 6) | Should -Be 100
+        Get-PriceFrac 0 10 990 $true | Should -BeLessThan 0
+        Get-PriceFrac 50 -10 100 $true | Should -Be 0.6
+    }
+    It "round-trips" {
+        foreach ($v in @(12.5, 77.0, 640.0)) {
+            [math]::Round((Get-PriceFromFrac (Get-PriceFrac $v 10 990 $true) 10 990 $true), 6) | Should -Be $v
+        }
+    }
+    It "pads in log space" {
+        $r = Get-LogPaddedRange 100 400
+        $r.Min | Should -BeLessThan 100
+        $r.Max | Should -BeGreaterThan 400
+        [math]::Round([math]::Log(100 / $r.Min), 6) | Should -Be ([math]::Round([math]::Log($r.Max / 400), 6))
+        Get-LogPaddedRange 0 10 | Should -BeNullOrEmpty
+    }
+    It "reads dividend events of a chart result" {
+        $r = '{"events":{"dividends":{"1700000000":{"amount":0.04,"date":1700000000},"1690000000":{"amount":0.04,"date":1690000000}}}}' | ConvertFrom-Json
+        $d = @(ConvertFrom-ChartDividendEvents $r)
+        $d.Count | Should -Be 2
+        $d[0].Ts | Should -Be 1690000000
+        @(ConvertFrom-ChartDividendEvents ('{"meta":{}}' | ConvertFrom-Json)).Count | Should -Be 0
+    }
+    It "finds the nearest bar" {
+        $bars = [long[]]@(1000, 2000, 3000)
+        Get-NearestBarIndex -BarTsMs $bars -TsMs 2400 -MaxGapMs 600 | Should -Be 1
+        Get-NearestBarIndex -BarTsMs $bars -TsMs 9000 -MaxGapMs 600 | Should -Be -1
+    }
+    It "reads the version file" {
+        Get-LatestVersionFromJson ('{"version":"4.10"}' | ConvertFrom-Json) | Should -Be "4.10"
+        Get-LatestVersionFromJson ('{"v":1}' | ConvertFrom-Json) | Should -Be ""
+        Get-LatestVersionFromJson $null | Should -Be ""
+    }
+}
+
+Describe "Release files (v4.8)" {
+    It "has version.json matching the widget version" {
+        $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
+        $vf = Join-Path $PSScriptRoot "version.json"
+        if (-not (Test-Path $ui) -or -not (Test-Path $vf)) { Set-ItResult -Skipped -Because "repository files not next to the tests"; return }
+        $line = @(Get-Content -Path $ui -Encoding UTF8 | Where-Object { $_ -match '^\$script:AppVersion\s*=' })[0]
+        $app = [regex]::Match($line, '"([^"]+)"').Groups[1].Value
+        Get-LatestVersionFromJson (Get-Content $vf -Raw | ConvertFrom-Json) | Should -Be $app
+    }
+}
