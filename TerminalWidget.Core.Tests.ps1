@@ -543,7 +543,7 @@ Describe "Glossary and tooltips (v4.0)" {
         if (-not (Test-Path $ui)) { Set-ItResult -Skipped -Because "TerminalWidget.ps1 not next to the tests"; return }
         $keys = @(Get-GlossaryEntries | ForEach-Object { $_.Key })
         # quoted UPPERCASE tokens on tooltip / legend lines; label texts excluded
-        $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK")
+        $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK", "EN", "DE")
         $used = New-Object System.Collections.Generic.HashSet[string]
         foreach ($line in (Get-Content -Path $ui -Encoding UTF8)) {
             if ($line -notmatch 'Set-Tip|Set-DynTip|addLeg|Legends\.Add|GlossaryShort|Spark = "SPARK"|addNum|addCombo|addCheck') { continue }
