@@ -437,7 +437,7 @@ function Backup-DataFiles {
     # Returns the backup folder, or "" when there was nothing to copy / it failed.
     param([string]$Reason = "manuell")
     try {
-        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json", "alert-log.json", "cash.json", "savingsplans.json", "drawings.json") |
+        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json", "alert-log.json", "cash.json", "savingsplans.json", "drawings.json", "notes.json") |
             ForEach-Object { Join-Path $script:DataDir $_ } | Where-Object { Test-Path $_ })
         if ($files.Count -eq 0) { return "" }
         $safe = ($Reason -replace '[^A-Za-z0-9_.-]', '_')
@@ -884,6 +884,35 @@ if ($null -ne $rawProfiles) {
             ManualSector = [string]$v.ManualSector; ManualCountry = [string]$v.ManualCountry
         }
     }
+}
+
+# v5.5: free-text note per ticker (thesis / reason for buying) in notes.json
+$script:NotesPath = Join-Path $script:DataDir "notes.json"
+$script:Notes = @{}
+$rawNotes = Load-JsonState -Path $script:NotesPath -DefaultValue $null
+if ($null -ne $rawNotes) {
+    foreach ($prop in $rawNotes.PSObject.Properties) {
+        if ($null -ne $prop.Value -and [string]$prop.Value.Text) {
+            $script:Notes[$prop.Name.ToUpper()] = [PSCustomObject]@{ Text = [string]$prop.Value.Text; Updated = [string]$prop.Value.Updated }
+        }
+    }
+}
+
+function Get-TickerNote {
+    param([string]$Ticker)
+    $n = $script:Notes[([string]$Ticker).ToUpper()]
+    if ($null -eq $n) { return "" }
+    return [string]$n.Text
+}
+
+function Set-TickerNote {
+    param([string]$Ticker, [string]$Text)
+    $u = ([string]$Ticker).ToUpper()
+    if (-not $u) { return }
+    $t = ConvertTo-NoteText $Text
+    if ($t) { $script:Notes[$u] = [PSCustomObject]@{ Text = $t; Updated = (Get-Date).ToString("yyyy-MM-dd HH:mm") } }
+    else { [void]$script:Notes.Remove($u) }
+    Save-JsonState -Path $script:NotesPath -Data $script:Notes
 }
 
 function Save-Profiles {
@@ -11662,6 +11691,15 @@ function Show-TickerAnalysis {
     $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
     Style-FlatButton -Btn $ok -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     $dlg.Controls.Add($ok); $dlg.CancelButton = $ok
+    # v5.5: note to the ticker
+    $bNote = New-Object System.Windows.Forms.Button
+    $bNote.SetBounds((S 858), (S 622), (S 100), (S 28)); $bNote.Anchor = $aB -bor $aR
+    Style-FlatButton -Btn $bNote -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $bNote.Text = $(if (Get-TickerNote $sym) { "Notiz " + [string][char]0x270E } else { "Notiz ..." })
+    $bNote.Tag = $sym
+    Set-DynTip $bNote $(if (Get-TickerNote $sym) { Get-NoteSnippet (Get-TickerNote $sym) -Max 300 } else { "Eigene Notiz zum Ticker: These, Kaufgrund, Ziele" })
+    $bNote.Add_Click({ param($sender, $e) Show-NoteDialog -Ticker ([string]$sender.Tag); $sender.Text = $(if (Get-TickerNote ([string]$sender.Tag)) { "Notiz " + [string][char]0x270E } else { "Notiz ..." }) })
+    $dlg.Controls.Add($bNote)
     # the chart grows with the window width (left half)
     $dlg.Add_Resize({
         param($sender, $e)
@@ -11971,6 +12009,8 @@ function Invoke-TerminalCommand {
                 Apply-ThemeToAllControls
                 Set-TransientStatus ("Design: {0}" -f $script:Config.UiStyle) 3
             }
+            "HEALTH" { Show-HealthReport }
+            "DIAG"   { [void](Export-Diagnostics) }
             "SET"    { $null = Show-SettingsDialog -Search ((@($c.Args) -join " ").Trim()) }
             "MENU"   { return (Invoke-MenuEntry ((@($c.Args) -join " ").Trim())) }
             "PUSH"   { [void](Show-PushDialog) }
@@ -12031,6 +12071,11 @@ function Invoke-TerminalCommand {
             Set-TransientStatus ("Alarm angelegt: {0}" -f (Format-AlertLine -Alert $script:Alerts[$script:Alerts.Count - 1])) 5
         }
         "WL"   { [void](Add-SymbolToWatchlist -RawSymbol $sym) }
+        "NOTE" {
+            $rest = (@($c.Args) -join " ").Trim()
+            if ($rest) { Set-TickerNote -Ticker $sym -Text $rest; Set-TransientStatus ("Notiz zu {0} gespeichert" -f $sym) 3 }
+            else { Show-NoteDialog -Ticker $sym }
+        }
         "CMP"  { Switch-CompareTicker -Symbol $sym; if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" } }
         "TX"   { Show-TransactionDialog -Ticker $sym }
     }
@@ -14111,6 +14156,10 @@ function Show-SettingsDialog {
     [void](& $addButton -Text "Daten importieren ..." -Width (S 170) -SameRow -Tip "Einen ZIP-Export einlesen (ersetzt alle Daten, vorher Backup)" -Act { $script:SettingsAfter = { Import-DataZip }; $script:SettingsCtl.Dlg.Close() })
     $lay.LastBtn = $null
     [void](& $addButton -Text $(if ($script:IsPortable) { "Portabel beenden ..." } else { "Portabel machen ..." }) -Width (S 170) -Tip $(if ($script:IsPortable) { "Daten liegen im Programmordner (data). Zurück nach %LOCALAPPDATA%." } else { "Daten in den Programmordner (data) verschieben, z. B. für einen USB-Stick" }) -Words "USB Stick" -Act { $script:SettingsAfter = { Switch-PortableMode }; $script:SettingsCtl.Dlg.Close() })
+    & $addSection "Fehlersuche"
+    [void](& $addButton -Text "Zustand prüfen (HEALTH)" -Width (S 200) -Tip "Prüft Datendateien, Backups, Datenquelle, Schriften und das Log" -Words "Health Diagnose Fehler" -Act { Show-HealthReport })
+    [void](& $addButton -Text "Diagnose exportieren ..." -Width (S 200) -SameRow -Tip "ZIP mit Log, Einstellungen ohne Zugangsdaten und dem Zustand - für Fehlerberichte. Keine Depot-Daten." -Words "DIAG Fehlerbericht Log" -Act { [void](Export-Diagnostics) })
+    $lay.LastBtn = $null
     & $addNote ("Version {0} - Daten: {1}" -f $script:AppVersion, $script:DataDir) 1 | Out-Null
 
     # ---- index for Ctrl+K: built from the real window, then thrown away ----
@@ -14524,6 +14573,144 @@ function Import-SettingsFile {
     if (Confirm-Action -Text "Einstellungen übernommen. Das Widget startet jetzt neu, damit alles wirkt." -Title "Einstellungen importieren") { Restart-Widget }
     else { Apply-ThemeToAllControls }
     return $true
+}
+
+# ---- v5.5: note per ticker ----
+function Show-NoteDialog {
+    param([string]$Ticker)
+    $sym = ([string]$Ticker).Trim().ToUpper()
+    if (-not $sym) { return }
+    $p = $script:Pal
+    $dlg = New-DialogForm -Title ("Notiz - {0}" -f $sym) -W (S 520) -H (S 330)
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 380), (S 240))
+    $aAll = [System.Windows.Forms.AnchorStyles]"Top,Bottom,Left,Right"
+    $aBR = [System.Windows.Forms.AnchorStyles]"Bottom,Right"
+    $l = New-Object System.Windows.Forms.Label
+    $l.SetBounds((S 12), (S 10), (S 490), (S 18)); $l.ForeColor = $p.Muted
+    $n0 = $script:Notes[$sym]
+    $l.Text = if ($null -ne $n0 -and $n0.Updated) { "{0} ({1} {2})" -f (Tr "These, Kaufgrund, Ziele - nur für dich"), (Tr "zuletzt"), $n0.Updated } else { Tr "These, Kaufgrund, Ziele - nur für dich" }
+    $dlg.Controls.Add($l)
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.SetBounds((S 12), (S 32), (S 494), (S 220)); $tb.Anchor = $aAll
+    $tb.Multiline = $true; $tb.AcceptsReturn = $true; $tb.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $tb.BackColor = $p.Input; $tb.ForeColor = $p.Text; $tb.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tb.MaxLength = 4000
+    $tb.Text = Get-TickerNote $sym
+    $dlg.Controls.Add($tb)
+    $bDel = New-Object System.Windows.Forms.Button
+    $bDel.SetBounds((S 12), (S 262), (S 100), (S 28)); $bDel.Anchor = [System.Windows.Forms.AnchorStyles]"Bottom,Left"
+    Style-FlatButton -Btn $bDel -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
+    $bDel.Text = "Löschen"
+    $bDel.Add_Click({ $script:NoteTb.Text = "" })
+    $dlg.Controls.Add($bDel)
+    $bOk = New-Object System.Windows.Forms.Button
+    $bOk.SetBounds((S 300), (S 262), (S 100), (S 28)); $bOk.Anchor = $aBR
+    Style-FlatButton -Btn $bOk -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $bOk.Text = "Speichern"; $bOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($bOk)
+    $bCa = New-Object System.Windows.Forms.Button
+    $bCa.SetBounds((S 406), (S 262), (S 100), (S 28)); $bCa.Anchor = $aBR
+    Style-FlatButton -Btn $bCa -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $bCa.Text = "Abbrechen"; $bCa.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($bCa)
+    $dlg.CancelButton = $bCa
+    $script:NoteTb = $tb
+    $dlg.Add_Shown({ $script:NoteTb.Focus() | Out-Null; $script:NoteTb.SelectionStart = $script:NoteTb.Text.Length })
+    Apply-Language $dlg
+    $res = $dlg.ShowDialog($form)
+    $txt = $tb.Text
+    $script:NoteTb = $null
+    $dlg.Dispose()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+        Set-TickerNote -Ticker $sym -Text $txt
+        Set-TransientStatus $(if ($txt.Trim()) { "Notiz zu $sym gespeichert" } else { "Notiz zu $sym gelöscht" }) 3
+    }
+}
+
+# ---- v5.5: HEALTH and diagnostics ----
+function Get-HealthChecks {
+    $checks = New-Object System.Collections.Generic.List[object]
+    $add = { param($N, $St, $D) $checks.Add([PSCustomObject]@{ Name = $N; State = $St; Detail = $D }) }
+    & $add "Version" "INFO" ("{0}, PowerShell {1}" -f $script:AppVersion, $PSVersionTable.PSVersion)
+    & $add "Datenordner" "INFO" $script:DataDir
+    # data files: present ones must parse
+    $bad = @(); $okN = 0
+    foreach ($fn in @(Get-DataFileNames)) {
+        $fp = Join-Path $script:DataDir $fn
+        if (-not (Test-Path $fp)) { continue }
+        try { [void]([IO.File]::ReadAllText($fp) | ConvertFrom-Json); $okN++ } catch { $bad += $fn }
+    }
+    if ($bad.Count -gt 0) { & $add "Datendateien" "ERR" ("nicht lesbar: {0}" -f ($bad -join ", ")) } else { & $add "Datendateien" "OK" ("{0} Dateien lesbar" -f $okN) }
+    try {
+        $probe = Join-Path $script:DataDir ("health_" + [Guid]::NewGuid().ToString("N") + ".tmp")
+        [IO.File]::WriteAllText($probe, "x"); Remove-Item $probe -Force
+        & $add "Schreibrechte" "OK" "Datenordner beschreibbar"
+    } catch { & $add "Schreibrechte" "ERR" $_.Exception.Message }
+    # backups
+    $newest = $null; $nB = 0
+    if (Test-Path $script:BackupDir) {
+        $bd = @(Get-ChildItem -Path $script:BackupDir -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+        $nB = $bd.Count
+        if ($nB -gt 0) { $newest = $bd[0].LastWriteTime }
+    }
+    $bh = Get-BackupHealth -Newest $newest
+    & $add "Backups" $bh.State $(if ($null -eq $newest) { "keine Backups" } else { "{0} vorhanden, neuestes vor {1:N1} Tagen" -f $nB, $bh.Days })
+    # data source
+    $nq = $script:QuoteStore.Count
+    $fresh = @($script:QuoteStore.Values | Where-Object { $null -ne $_ -and -not [bool]$_.FromCache }).Count
+    $st = if ($nq -eq 0) { "WARN" } elseif ($fresh -eq 0) { "WARN" } else { "OK" }
+    & $add "Datenquelle (Yahoo)" $st ("{0} Kurse, davon {1} live, {2} aus dem Cache" -f $nq, $fresh, ($nq - $fresh))
+    # fonts
+    & $add "Symbol-Schrift" $(if ($script:IconFont) { "OK" } else { "WARN" }) $(if ($script:IconFont) { [string]$script:IconFont } else { "nicht gefunden - Knöpfe zeigen Text" })
+    $monoOk = ([string]$script:Config.MonoFont -eq "Consolas" -or $script:InstalledFonts -contains [string]$script:Config.MonoFont)
+    & $add "Zahlen-Schrift" $(if ($monoOk) { "OK" } else { "WARN" }) ([string]$script:Config.MonoFont)
+    # log
+    if (Test-Path $script:LogPath) {
+        $lf = Get-Item $script:LogPath
+        $errN = @(Get-Content -Path $script:LogPath -Tail 400 -ErrorAction SilentlyContinue | Where-Object { $_ -match '\[ERROR\]' }).Count
+        & $add "Log" $(if ($errN -gt 0) { "WARN" } else { "OK" }) ("{0:N0} KB, {1} Fehler in den letzten 400 Zeilen" -f ($lf.Length / 1KB), $errN)
+    }
+    return $checks.ToArray()
+}
+
+function Show-HealthReport {
+    $txt = Format-HealthReport -Checks (Get-HealthChecks) -Title (Tr "Zustand")
+    $script:LastHealthText = $txt
+    if ($script:SmokeMode) { Write-WidgetLog ("HEALTH`r`n" + $txt); return }
+    Show-HelpTextDialog -Title ("{0} - {1}" -f (Tr "Zustand"), $script:AppTitle) -Text ($txt + "`r`n`r`n" + (Tr "OK = in Ordnung, !! = Warnung, XX = Fehler. DIAG exportiert eine Diagnose für Fehlerberichte."))
+}
+
+function Export-Diagnostics {
+    # ZIP: log, config without secrets, health report, version - for bug reports
+    param([string]$Path = "")
+    if (-not $Path) {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "ZIP-Archiv (*.zip)|*.zip"
+        $sfd.FileName = "TerminalWidget_Diagnose_{0}.zip" -f (Get-Date -Format "yyyyMMdd_HHmm")
+        if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { $sfd.Dispose(); return "" }
+        $Path = $sfd.FileName
+        $sfd.Dispose()
+    }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tw_diag_" + [Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        if (Test-Path $script:LogPath) { Copy-Item -Path $script:LogPath -Destination (Join-Path $tmp "widget.log") -Force }
+        [IO.File]::WriteAllText((Join-Path $tmp "config-ohne-zugangsdaten.json"), ((Get-DiagnosticConfig $script:Config) | ConvertTo-Json -Depth 8), $utf8)
+        [IO.File]::WriteAllText((Join-Path $tmp "zustand.txt"), (Format-HealthReport -Checks (Get-HealthChecks)), $utf8)
+        $info = "Version {0}`r`nPowerShell {1}`r`nWindows {2}`r`nDPI {3}`r`nBildschirme {4}`r`nErstellt {5}" -f $script:AppVersion, $PSVersionTable.PSVersion, [Environment]::OSVersion.VersionString, $script:DpiScale, [System.Windows.Forms.Screen]::AllScreens.Count, (Get-Date -Format "yyyy-MM-dd HH:mm")
+        [IO.File]::WriteAllText((Join-Path $tmp "version.txt"), $info, $utf8)
+        if (Test-Path $Path) { Remove-Item $Path -Force }
+        Compress-Archive -Path (Join-Path $tmp "*") -DestinationPath $Path -Force
+        Write-WidgetLog "Diagnostics exported: $Path"
+        Set-TransientStatus ("Diagnose gespeichert: {0} (ohne Depot-Daten und Zugangsdaten)" -f [IO.Path]::GetFileName($Path)) 6
+        return $Path
+    } catch {
+        Write-WidgetLog "Diagnostics export failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox -Text ("Diagnose fehlgeschlagen: {0}" -f $_.Exception.Message) -Title "Diagnose"
+        return ""
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 function Show-GlossaryDialog {
@@ -15648,6 +15835,8 @@ $script:HoverTimer.Add_Tick({
     $hp = $script:HoverPending
     if ($null -eq $hp -or -not [bool]$script:Config.HoverCards) { return }
     $script:HoverSym = [string]$hp.Sym
+    # v5.5: room for the note
+    $pnlHover.Height = if (Get-TickerNote $script:HoverSym) { S 210 } else { S 172 }
     $pt = $form.PointToClient([System.Windows.Forms.Cursor]::Position)
     $x = $pt.X + (S 18); $y = $pt.Y + (S 14)
     if ($x + $pnlHover.Width -gt $form.ClientSize.Width - (S 4)) { $x = $pt.X - $pnlHover.Width - (S 12) }
@@ -15747,6 +15936,15 @@ $pnlHover.Add_Paint({
             if ($lab -or -not [double]::IsNaN($up)) { $lines += ("{0} {1}{2}" -f (Tr "Analysten:"), $lab, $(if (-not [double]::IsNaN($up)) { " (Ziel {0:+0;-0}%)" -f $up } else { "" })) }
         }
         foreach ($ln in $lines) { if ($y -lt $h - (S 16)) { $g.DrawString($ln, $fontUi, $txt, $x0, $y); $y += S 17 } }
+        # v5.5: the note (two lines at most)
+        $nt = Get-TickerNote $sym
+        if ($nt -and $y -lt $h - (S 20)) {
+            $nr = New-Object System.Drawing.RectangleF([float]$x0, [float]($y + (S 2)), [float]($w - 2 * $x0), [float]([math]::Min((S 34), $h - $y - (S 4))))
+            $sf = New-Object System.Drawing.StringFormat
+            $sf.Trimming = [System.Drawing.StringTrimming]::EllipsisWord
+            $g.DrawString(([string][char]0x270E + " " + (Get-NoteSnippet $nt -Max 160)), $fontUi, $mut, $nr, $sf)
+            $sf.Dispose()
+        }
     } finally { $txt.Dispose(); $mut.Dispose(); $acc.Dispose(); $upB.Dispose() }
 })
 
@@ -15760,6 +15958,7 @@ $miRowNews  = $rowMenu.Items.Add("Nachrichten (News-Tab)")
 $miRowCmp   = $rowMenu.Items.Add("Im Chart vergleichen")
 $miRowDes   = $rowMenu.Items.Add("Beschreibung (DES)")
 $miRowTa    = $rowMenu.Items.Add("Ticker-Analyse: Signale + Kennzahlen (TA)")
+$miRowNote  = $rowMenu.Items.Add("Notiz ...")
 $miRowSep   = New-Object System.Windows.Forms.ToolStripSeparator
 [void]$rowMenu.Items.Add($miRowSep)
 $miRowRemove = $rowMenu.Items.Add("Aus der Watchlist entfernen")
@@ -15784,6 +15983,7 @@ $miRowCmp.Add_Click({
 })
 $miRowDes.Add_Click({ Show-DescriptionDialog $script:RowMenuSym })
 $miRowTa.Add_Click({ Show-TickerAnalysis $script:RowMenuSym })
+$miRowNote.Add_Click({ Show-NoteDialog -Ticker $script:RowMenuSym })
 $miRowRemove.Add_Click({ Remove-SymbolFromWatchlist -Symbol $script:RowMenuSym })
 $script:RowMenuHandler = {
     param($sender, $e)

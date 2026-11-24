@@ -2252,6 +2252,51 @@ Describe "Settings pages (v5.3)" {
     }
 }
 
+Describe "Notes, health, diagnostics (v5.5)" {
+    It "stores notes trimmed with Windows line breaks and a length limit" {
+        ConvertTo-NoteText "  Kaufgrund`nKI-Rechenzentren  " | Should -Be "Kaufgrund`r`nKI-Rechenzentren"
+        (ConvertTo-NoteText ("x" * 5000)).Length | Should -Be 4000
+        ConvertTo-NoteText "   " | Should -Be ""
+    }
+    It "shortens a note to one line" {
+        Get-NoteSnippet "a`r`n  b" | Should -Be "a b"
+        $s = Get-NoteSnippet ("wort " * 50) -Max 20
+        $s.Length | Should -BeLessOrEqual 20
+        $s | Should -Match ([string][char]0x2026 + '$')
+    }
+    It "rates the newest backup by age" {
+        $now = [DateTime]"2026-11-24 12:00"
+        (Get-BackupHealth -Newest $now.AddHours(-30) -Now $now).State | Should -Be "OK"
+        (Get-BackupHealth -Newest $now.AddDays(-5) -Now $now).State | Should -Be "WARN"
+        (Get-BackupHealth -Newest $now.AddDays(-20) -Now $now).State | Should -Be "ERR"
+        (Get-BackupHealth -Newest $null -Now $now).State | Should -Be "ERR"
+    }
+    It "summarises the health checks" {
+        $ok = Format-HealthReport -Checks @([PSCustomObject]@{ Name = "Daten"; State = "OK"; Detail = "7" })
+        $ok | Should -Match "alles in Ordnung"
+        $bad = Format-HealthReport -Checks @([PSCustomObject]@{ Name = "A"; State = "ERR"; Detail = "x" }, [PSCustomObject]@{ Name = "B"; State = "WARN"; Detail = "y" })
+        $bad | Should -Match "1 Fehler, 1 Warnung"
+        $bad | Should -Match "XX  A"
+    }
+    It "removes secrets and personal lists from the diagnostic config" {
+        $c = [PSCustomObject]@{ Theme = "Dark"; PushTokenEnc = "geheim"; PushTopic = ""; Watchlist = @("NVDA"); Depots = @() }
+        $d = Get-DiagnosticConfig $c
+        $d.Theme | Should -Be "Dark"
+        $d.PushTokenEnc | Should -Be "(entfernt)"
+        $d.PushTopic | Should -Be ""
+        $d.Watchlist | Should -Be "(entfernt)"
+        $c.PushTokenEnc | Should -Be "geheim"
+    }
+    It "exports notes, cash, savings plans and drawings with the data" {
+        foreach ($f in @("notes.json", "cash.json", "savingsplans.json", "drawings.json")) { @(Get-DataFileNames) | Should -Contain $f }
+    }
+    It "knows NOTE, HEALTH and DIAG" {
+        (ConvertFrom-TerminalCommand "NVDA NOTE").Func | Should -Be "NOTE"
+        (ConvertFrom-TerminalCommand "HEALTH").Kind | Should -Be "Global"
+        (ConvertFrom-TerminalCommand "DIAG").Kind | Should -Be "Global"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

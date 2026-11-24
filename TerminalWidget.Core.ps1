@@ -1207,7 +1207,9 @@ function Get-DataMigrationAction {
 }
 
 function Get-DataFileNames {
-    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json")
+    # v5.5: cash, savings plans, drawings and notes travel with export / import too
+    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json",
+        "cash.json", "savingsplans.json", "drawings.json", "notes.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -2816,6 +2818,7 @@ function Get-TerminalFunctions {
         "EE"     = @{ Scope = "GT"; Desc = "Termine: Quartalszahlen, Ex-Tag, Zahltag" }
         "ALRT"   = @{ Scope = "GT"; Desc = "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" }
         "WL"     = @{ Scope = "T";  Desc = "Zur Watchlist hinzufügen" }
+        "NOTE"   = @{ Scope = "T";  Desc = "Notiz zum Ticker (Kaufgrund, These)" }
         "CMP"    = @{ Scope = "GT"; Desc = "Vergleich im Chart (CMP ohne Ticker = aus)" }
         "TX"     = @{ Scope = "GT"; Desc = "Transaktion erfassen / Historie" }
         "PORT"   = @{ Scope = "G";  Desc = "Portfolio" }
@@ -2831,6 +2834,8 @@ function Get-TerminalFunctions {
         "STYLE"  = @{ Scope = "G";  Desc = "Design umschalten: STYLE / STYLE FRESH / STYLE REFINED" }
         "SET"    = @{ Scope = "G";  Desc = "Einstellungen (SET <Suchwort> springt zur Einstellung)" }
         "MENU"   = @{ Scope = "G";  Desc = "Menüeintrag ausführen (MENU <Name>)" }
+        "HEALTH" = @{ Scope = "G";  Desc = "Zustand prüfen: Datendateien, Backups, Datenquelle, Schriften" }
+        "DIAG"   = @{ Scope = "G";  Desc = "Diagnose als ZIP exportieren (Log, Einstellungen ohne Zugangsdaten, Zustand)" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
         "HELP"   = @{ Scope = "G";  Desc = "Tastenkürzel und Befehle" }
@@ -4796,4 +4801,63 @@ function ConvertFrom-SettingsExport {
     $r.Ok = ($r.Settings.Count -gt 0)
     if (-not $r.Ok) { $r.Error = "Die Datei enthält keine bekannten Einstellungen." }
     return $r
+}
+
+# ------------------------------------------------------------------------------
+# v5.5: per-ticker notes, health check, diagnostics
+# ------------------------------------------------------------------------------
+function ConvertTo-NoteText {
+    # what is stored: trimmed, Windows line breaks, at most 4000 characters
+    param([string]$Text)
+    $t = ([string]$Text) -replace "`r`n", "`n" -replace "`r", "`n"
+    $t = $t.Trim()
+    if ($t.Length -gt 4000) { $t = $t.Substring(0, 4000) }
+    return ($t -replace "`n", "`r`n")
+}
+
+function Get-NoteSnippet {
+    # one line for the hover card / tooltips
+    param([string]$Text, [int]$Max = 120)
+    $t = (([string]$Text) -replace '\s+', ' ').Trim()
+    if ($t.Length -le $Max) { return $t }
+    return ($t.Substring(0, [math]::Max(1, $Max - 1)).TrimEnd() + [string][char]0x2026)
+}
+
+function Get-BackupHealth {
+    # newest backup age -> OK (< 2 days) / WARN (< 8 days) / ERR
+    param($Newest, [DateTime]$Now = (Get-Date))
+    if ($null -eq $Newest) { return [PSCustomObject]@{ State = "ERR"; Days = [double]::NaN } }
+    $d = ($Now - [DateTime]$Newest).TotalDays
+    $st = if ($d -lt 2) { "OK" } elseif ($d -lt 8) { "WARN" } else { "ERR" }
+    return [PSCustomObject]@{ State = $st; Days = $d }
+}
+
+function Format-HealthReport {
+    # Checks: @(@{ Name; State = OK / WARN / ERR / INFO; Detail })
+    param($Checks, [string]$Title = "Zustand")
+    $sym = @{ "OK" = "OK  "; "WARN" = "!!  "; "ERR" = "XX  "; "INFO" = "    " }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $nW = 0; $nE = 0
+    foreach ($c in @($Checks)) {
+        if ($null -eq $c) { continue }
+        $st = [string]$c.State
+        if ($st -eq "WARN") { $nW++ } elseif ($st -eq "ERR") { $nE++ }
+        $pre = if ($sym.ContainsKey($st)) { $sym[$st] } else { "    " }
+        $lines.Add(("{0}{1,-24} {2}" -f $pre, [string]$c.Name, [string]$c.Detail).TrimEnd())
+    }
+    $head = if ($nE -gt 0) { "{0}: {1} Fehler, {2} Warnung(en)" -f $Title, $nE, $nW } elseif ($nW -gt 0) { "{0}: {1} Warnung(en)" -f $Title, $nW } else { "{0}: alles in Ordnung" -f $Title }
+    return (@($head, "") + $lines.ToArray()) -join "`r`n"
+}
+
+function Get-DiagnosticConfig {
+    # config for a bug report: secrets and personal lists removed
+    param($Config)
+    $c = $Config | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    foreach ($k in @("PushTokenEnc", "PushTopic", "PushChatId", "PushServer", "TwelveDataKeyEnc", "FinnhubKeyEnc")) {
+        if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = $(if ([string]$c.$k) { "(entfernt)" } else { "" }) }
+    }
+    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups")) {
+        if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
+    }
+    return $c
 }
