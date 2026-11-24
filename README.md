@@ -9,7 +9,7 @@ A desktop stock widget for Windows written in PowerShell (WinForms). It runs any
 1. Keep all files in one folder.
 2. Double-click `TerminalWidget_Start.bat`. It starts Windows PowerShell 5.1 with a hidden console.
 
-Your data (settings, portfolio, alerts, transactions, profiles, event dates, alert history) lives in `%LOCALAPPDATA%\TerminalWidget`, never in this folder. When upgrading from v3 ("Financial Terminal Widget") it is copied over automatically; see [docs/UPGRADE-v4.0.md](docs/UPGRADE-v4.0.md). What changed in each version: [v5.1](docs/CHANGES-v5.1.md), [v5.0](docs/CHANGES-v5.0.md), [v4.9.5](docs/CHANGES-v4.9.5.md), [v4.9](docs/CHANGES-v4.9.md), [v4.8](docs/CHANGES-v4.8.md), [v4.4-4.7](docs/CHANGES-v4.4-4.7.md), [v4.3](docs/CHANGES-v4.3.md), [v4.2](docs/CHANGES-v4.2.md), [v4.1](docs/CHANGES-v4.1.md).
+Your data (settings, portfolio, alerts, transactions, profiles, event dates, alert history) lives in `%LOCALAPPDATA%\TerminalWidget`, never in this folder. When upgrading from v3 ("Financial Terminal Widget") it is copied over automatically; see [docs/UPGRADE-v4.0.md](docs/UPGRADE-v4.0.md). What changed in each version: [v5.2](docs/CHANGES-v5.2.md), [v5.1](docs/CHANGES-v5.1.md), [v5.0](docs/CHANGES-v5.0.md), [v4.9.5](docs/CHANGES-v4.9.5.md), [v4.9](docs/CHANGES-v4.9.md), [v4.8](docs/CHANGES-v4.8.md), [v4.4-4.7](docs/CHANGES-v4.4-4.7.md), [v4.3](docs/CHANGES-v4.3.md), [v4.2](docs/CHANGES-v4.2.md), [v4.1](docs/CHANGES-v4.1.md).
 
 ## Files
 

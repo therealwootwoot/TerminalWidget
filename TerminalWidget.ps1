@@ -935,21 +935,6 @@ if ($null -ne $rawEvents) {
     }
 }
 
-function ConvertTo-StoredFund {
-    # v5.1: fundamentals as plain numbers (NaN -> null, so the JSON stays valid)
-    param($F)
-    if ($null -eq $F) { return $null }
-    $o = [ordered]@{}
-    foreach ($f in (Get-FundamentalFields)) {
-        $pp = $F.PSObject.Properties[$f[0]]
-        $x = [double]::NaN
-        if ($null -ne $pp -and $null -ne $pp.Value -and [string]$pp.Value -ne "") { try { $x = [double]$pp.Value } catch { } }
-        $o[$f[0]] = if ([double]::IsNaN($x) -or [double]::IsInfinity($x)) { $null } else { $x }
-    }
-    $o["Currency"] = [string]$F.Currency
-    return [PSCustomObject]$o
-}
-
 function Save-Events {
     $out = @{}
     foreach ($k in @($script:Events.Keys)) {
@@ -4261,10 +4246,13 @@ $script:RoundBtnPaint = {
         $br.Dispose(); if ($null -ne $pn) { $pn.Dispose() }
         $fg = if ($sender.Enabled) { $sender.ForeColor } else { $script:Pal.Muted }
         $tf = [System.Windows.Forms.TextFormatFlags]
-        $flags = $tf::VerticalCenter -bor $tf::SingleLine -bor $tf::EndEllipsis -bor $tf::NoPrefix
+        # icon buttons (one glyph) get no padding and no ellipsis
+        $short = ([string]$sender.Text).Length -le 2
+        $flags = $tf::VerticalCenter -bor $tf::SingleLine -bor $tf::NoPrefix
+        if (-not $short) { $flags = $flags -bor $tf::EndEllipsis }
         $ta = [string]$sender.TextAlign
         $flags = $flags -bor $(if ($ta -like "*Left") { $tf::Left } elseif ($ta -like "*Right") { $tf::Right } else { $tf::HorizontalCenter })
-        $pad = S 4
+        $pad = if ($short) { 0 } else { S 4 }
         $tr = New-Object System.Drawing.Rectangle($pad, 0, [math]::Max(1, $w - 2 * $pad), $h)
         [System.Windows.Forms.TextRenderer]::DrawText($g, $sender.Text, $sender.Font, $tr, $fg, $flags)
     } catch { }
@@ -11632,11 +11620,11 @@ function Show-TickerAnalysis {
         $c0 = $script:TaCtl
         if ($null -eq $c0) { return }
         $w2 = [int](($sender.ClientSize.Width - (S 36)) / 2)
-        foreach ($ctl in @($c0.Chart, $c0.TGrid, $c0.TSum)) { $ctl.Width = $w2 }
+        foreach ($ctl in @($c0.Chart, $c0.TGrid, $c0.TSum, $c0.TLabel)) { $ctl.Width = $w2 }
         foreach ($ctl in @($c0.FGrid, $c0.FNote, $c0.FLabel)) { $ctl.Left = $w2 + (S 24); $ctl.Width = $sender.ClientSize.Width - $w2 - (S 36) }
     })
     $chart.Add_Paint({ param($sender, $e) try { Draw-TickerAnalysisChart -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "TA chart: $($_.Exception.Message)" "WARN" } })
-    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
+    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; TLabel = $lt; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
     $dlg.Add_Shown({
         Update-TickerAnalysis
         $c0 = $script:TaCtl
@@ -14200,6 +14188,11 @@ NVDA TA         Ticker analysis: signals, support / resistance,
                 (also right-click a ticker or the chart)
 P               Beitrag (contribution, dividends, scenario),
                 Vergleich (indices, rolling 12M, sectors vs. MSCI World)
+
+New in 5.2
+STYLE           Refined / Fresh design (also Settings > Design:
+                row height, zebra rows, icons, ticker bar speed)
+THEME GRAPHITE  neutral grey theme; accent colour "Windows"
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -14310,6 +14303,11 @@ NVDA TA         Ticker-Analyse: Signale, Unterstützung / Widerstand,
                 (auch Rechtsklick auf Ticker oder Chart)
 P               Beitrag (je Position, Dividenden, Szenario),
                 Vergleich (Indizes, rollierend 12 M, Sektoren vs. MSCI World)
+
+Neu in 5.2
+STYLE           Design Refined / Fresh (auch Einstellungen > Design:
+                Zeilenhöhe, Zebra-Zeilen, Symbole, Tempo der Laufleiste)
+THEME GRAPHITE  neutrales Grau; Akzentfarbe "Windows"
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }

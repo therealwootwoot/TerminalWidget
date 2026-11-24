@@ -4560,7 +4560,7 @@ function Get-UiSpec {
         HeaderH    = $(if ($fresh) { 30 } else { 26 })
         FillAlpha  = $(if ($fresh) { 95 } else { 64 })
         LineWidth  = $(if ($fresh) { 2.2 } else { 1.9 })
-        CellPad    = $(if ($fresh) { 6 } else { 2 })
+        CellPad    = $(if ($fresh) { 4 } else { 2 })
     }
 }
 
@@ -4580,4 +4580,20 @@ function ConvertFrom-AbgrDword {
     param([long]$Value)
     $v = $Value -band 0xFFFFFFFFL
     return @([int]($v -band 0xFF), [int](($v -shr 8) -band 0xFF), [int](($v -shr 16) -band 0xFF))
+}
+
+function ConvertTo-StoredFund {
+    # v5.1: fundamentals as plain numbers (NaN -> null, so the JSON stays valid)
+    param($F)
+    if ($null -eq $F) { return $null }
+    $o = [ordered]@{}
+    # (loop variable must not be $f: PowerShell names are case-insensitive)
+    foreach ($fd in (Get-FundamentalFields)) {
+        $pp = $F.PSObject.Properties[$fd[0]]
+        $x = [double]::NaN
+        if ($null -ne $pp -and $null -ne $pp.Value -and [string]$pp.Value -ne "") { try { $x = [double]$pp.Value } catch { } }
+        $o[$fd[0]] = if ([double]::IsNaN($x) -or [double]::IsInfinity($x)) { $null } else { $x }
+    }
+    $o["Currency"] = [string]$F.Currency
+    return [PSCustomObject]$o
 }

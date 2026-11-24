@@ -2075,6 +2075,13 @@ Describe "Analysis (v5.1)" {
         ($rows | Where-Object { $_.Key -eq "ProfitMargin" }).Peer | Should -Be "-"
         ($rows | Where-Object { $_.Key -eq "MarketCap" }).Value | Should -Be "2.5 Mrd. EUR"
     }
+    It "keeps fundamentals when they are stored (v5.2 fix)" {
+        $st = ConvertTo-StoredFund ([PSCustomObject]@{ TrailingPE = 30.5; MarketCap = 2.5e9; ForwardPE = [double]::NaN; Currency = "EUR" })
+        $st.TrailingPE | Should -Be 30.5
+        $st.ForwardPE | Should -BeNullOrEmpty
+        $st.Currency | Should -Be "EUR"
+        ((Get-FundamentalRows -Fund $st) | Where-Object { $_.Key -eq "TrailingPE" }).Value | Should -Be "30.50"
+    }
     It "compares sectors with the MSCI World" {
         $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{ topHoldings = [PSCustomObject]@{ sectorWeightings = @([PSCustomObject]@{ technology = [PSCustomObject]@{ raw = 0.25 } }, [PSCustomObject]@{ realestate = [PSCustomObject]@{ raw = 0.02 } }) } }) } }
         $ref = ConvertFrom-YahooSectorWeights -Summary $sum
