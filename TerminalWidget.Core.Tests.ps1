@@ -414,7 +414,8 @@ Describe "Layouts and themes (v4.0)" {
     It "cycles the theme through Terminal and back to Dark" {
         Get-NextTheme "Light" | Should -Be "Terminal"
         Get-NextTheme "Terminal" | Should -Be "Graphite"
-        Get-NextTheme "Graphite" | Should -Be "Dark"
+        Get-NextTheme "Graphite" | Should -Be "Contrast"
+        Get-NextTheme "Contrast" | Should -Be "Dark"
         Get-NextTheme "unknown" | Should -Be "Dark"
     }
 }
@@ -2457,6 +2458,92 @@ Describe "Trading212 import (v5.5)" {
         $b[0].Fee | Should -Be 0
         $b[0].Note | Should -Match "nicht umgerechnet"
         $b[0].Ok | Should -BeTrue
+    }
+}
+
+Describe "Analysis without new providers (v5.7)" {
+    It "builds weekly bars from daily bars" {
+        $d = @("2026-01-05", "2026-01-06", "2026-01-09", "2026-01-12", "2026-01-16")
+        $w = ConvertTo-WeeklyBars -Dates $d -Close @(10, 11, 12, 13, 9) -High @(10, 15, 12, 13, 14) -Low @(9, 10, 8, 12, 9) -Volume @(1, 1, 1, 2, 2)
+        @($w.Dates) -join "," | Should -Be "2026-01-09,2026-01-16"
+        @($w.Close) -join "," | Should -Be "12,9"
+        $w.High[0] | Should -Be 15; $w.Low[0] | Should -Be 8; $w.Volume[1] | Should -Be 4
+    }
+    It "explains daily vs. weekly signals in one sentence" {
+        (Get-TimeframeVerdict -Daily 4 -Weekly 3).Tone | Should -Be 1
+        (Get-TimeframeVerdict -Daily 4 -Weekly -3).Text | Should -Match "Erholung"
+        (Get-TimeframeVerdict -Daily -4 -Weekly 5).Text | Should -Match "Rücksetzer"
+        (Get-TimeframeVerdict -Daily 0 -Weekly 0).Text | Should -Match "Kein klares Bild"
+        (Get-TimeframeVerdict -Daily 4 -Weekly 0 -HasWeekly $false).Text | Should -Match "Wochendaten"
+    }
+    It "finds signal changes between two days" {
+        $old = [PSCustomObject]@{ Day = "2026-11-23"; Score = 0; Close = @(100, 101); Support = 95.0; Resistance = 105.0 }
+        $up = @(Get-SignalChanges -Old $old -New ([PSCustomObject]@{ Day = "2026-11-24"; Score = 4; Close = @(101, 106) }))
+        @($up | ForEach-Object { $_.Kind }) -join "," | Should -Be "Up,AboveResistance"
+        $down = @(Get-SignalChanges -Old $old -New ([PSCustomObject]@{ Day = "2026-11-24"; Score = -3; Close = @(101, 94) }))
+        @($down | ForEach-Object { $_.Kind }) -join "," | Should -Be "Down,BelowSupport"
+        @(Get-SignalChanges -Old $old -New ([PSCustomObject]@{ Day = "2026-11-23"; Score = 4; Close = @(1, 2) })).Count | Should -Be 0
+        @(Get-SignalChanges -Old $null -New $old).Count | Should -Be 0
+    }
+    It "marks 50/200 crossings" {
+        $cl = @(1..400 | ForEach-Object { if ($_ -lt 220) { 300.0 - $_ } else { 80.0 + ($_ - 220) * 2 } })
+        $m = @(Get-MaCrossMarkers -Closes $cl -Dates @(1..400 | ForEach-Object { "d$_" }))
+        $m.Count | Should -Be 1
+        $m[0].Kind | Should -Be "Golden"
+        @(Get-MaCrossMarkers -Closes @(1.0, 2.0) -Dates @("a", "b")).Count | Should -Be 0
+    }
+    It "reads a peer list" {
+        (ConvertTo-PeerList "amd, INTC nvda;amd x!" -Self "NVDA") -join "," | Should -Be "AMD,INTC"
+        @(ConvertTo-PeerList "").Count | Should -Be 0
+        @(ConvertTo-PeerList ((1..20 | ForEach-Object { "T$_" }) -join " ")).Count | Should -Be 15
+    }
+    It "keeps one valuation snapshot per day and compares with it" {
+        $h = @()
+        foreach ($i in 1..25) { $h = Add-FundSnapshot -History $h -Fund ([PSCustomObject]@{ TrailingPE = 20.0 + $i; DivYield = 0.01 }) -Day ("2026-01-{0:00}" -f $i) }
+        $h = Add-FundSnapshot -History $h -Fund ([PSCustomObject]@{ TrailingPE = 50.0 }) -Day "2026-01-25"
+        $h.Count | Should -Be 25
+        $h[-1].TrailingPE | Should -Be 50
+        $r = @(Get-ValuationVsHistory -History $h -Fund ([PSCustomObject]@{ TrailingPE = 50.0 }))
+        $pe = @($r | Where-Object { $_.Key -eq "TrailingPE" })[0]
+        $pe.Rank | Should -BeGreaterThan 90
+        $pe.Note | Should -Match "teuer"
+        $pe.Since | Should -Be "2026-01-01"
+        @($r | Where-Object { $_.Key -eq "DivYield" })[0].Rank | Should -Be 50
+        @(Get-ValuationVsHistory -History @($h | Select-Object -First 5) -Fund $null).Count | Should -Be 0
+        (Add-FundSnapshot -History @() -Fund ([PSCustomObject]@{ MarketCap = 1 }) -Day "2026-01-01").Count | Should -Be 0
+    }
+    It "reads RSS and Atom feeds and ignores DTD tricks" {
+        $rss = '<?xml version="1.0"?><rss version="2.0"><channel><title>Wirtschaft</title><item><title>NVIDIA &amp; Co legen zu</title><link>https://example.at/a?x=1</link><pubDate>Tue, 24 Nov 2026 10:00:00 +0100</pubDate></item><item><title>Ohne Link</title><link>javascript:alert(1)</link></item></channel></rss>'
+        $it = @(ConvertFrom-RssFeed -Text $rss)
+        $it.Count | Should -Be 2
+        $it[0].Title | Should -Be "NVIDIA & Co legen zu"
+        $it[0].Publisher | Should -Be "Wirtschaft"
+        $it[0].Time.Year | Should -Be 2026
+        $it[1].Link | Should -Be ""
+        $atom = '<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><title>Hallo</title><link href="https://x.y/1"/><updated>2026-11-24T09:00:00Z</updated></entry></feed>'
+        @(ConvertFrom-RssFeed -Text $atom)[0].Link | Should -Be "https://x.y/1"
+        @(ConvertFrom-RssFeed -Text '<!DOCTYPE r [<!ENTITY e SYSTEM "file:///c:/windows/win.ini">]><rss><channel><item><title>&e;</title></item></channel></rss>').Count | Should -Be 0
+        @(ConvertFrom-RssFeed -Text '{"json": 1}').Count | Should -Be 0
+    }
+    It "merges RSS into the news feed and finds our tickers by name" {
+        Get-NewsNameKey "NVIDIA Corporation" | Should -Be "nvidia"
+        Get-NewsNameKey "Apple Inc." | Should -Be "apple"
+        $feed = @([PSCustomObject]@{ Key = "https://y.com/1"; Title = "Alt"; Publisher = "Yahoo"; Link = "https://y.com/1"; Time = [DateTime]"2026-11-23 08:00"; Syms = @("NVDA") })
+        $rss = @([PSCustomObject]@{ Title = "Nvidia mit Rekord"; Publisher = "Standard"; Link = "https://s.at/2"; Time = [DateTime]"2026-11-24 09:00"; Tickers = @() },
+                 [PSCustomObject]@{ Title = "Doppelt"; Publisher = "Standard"; Link = "https://y.com/1?utm=x"; Time = [DateTime]"2026-11-24 09:00"; Tickers = @() })
+        $m = @(Add-RssToFeed -Feed $feed -RssItems $rss -NameMap @{ NVDA = "nvidia" } -Now ([DateTime]"2026-11-24 12:00"))
+        $m.Count | Should -Be 2
+        $m[0].Title | Should -Be "Nvidia mit Rekord"
+        @($m[0].Syms) -join "," | Should -Be "NVDA"
+        (ConvertTo-FeedList "https://a.b/rss, ftp://x  https://c.d/feed;https://a.b/rss") -join " " | Should -Be "https://a.b/rss https://c.d/feed"
+    }
+    It "builds data URLs in one place and names the provider" {
+        Get-ProviderUrl -Kind "Daily" -Symbol "SAP.DE" | Should -Be "https://query1.finance.yahoo.com/v8/finance/chart/SAP.DE?interval=1d&range=1y"
+        Get-ProviderUrl -Kind "Search" -Symbol "NVDA" -NewsCount 5 | Should -Match "newsCount=5"
+        Get-ProviderOfUrl "https://query1.finance.yahoo.com/v8/x" | Should -Be "Yahoo"
+        Get-ProviderOfUrl "https://www.derstandard.at/rss/wirtschaft" | Should -Be "RSS: derstandard.at"
+        (ConvertFrom-TerminalCommand "NVDA PEER AMD").Func | Should -Be "PEER"
+        Get-ThemeNames | Should -Contain "Contrast"
     }
 }
 
