@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.9"
+$script:AppVersion    = "4.9.5"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -522,6 +522,15 @@ $defaultConfig = [PSCustomObject]@{
     FontScale             = 100               # 90 / 100 / 110 / 120 % (from the next start)
     AlignNumbersRight     = $true             # numbers right-aligned in the lists
     RoundCorners          = $true             # Windows 11 rounded window corners
+    # v4.9.5
+    NewsMuted             = @()               # muted news sources (publisher names)
+    NewsKeywords          = ""                # "downgrade, übernahme" -> push for held tickers
+    NewsKeywordWatch      = $false            # keywords also for watchlist tickers
+    NewsKeywordLastAt     = ""                # newest item already checked for keywords (ISO)
+    TrayFollowsDepot      = $true             # tray icon colour = depot day result
+    PrivacyMode           = $false            # F9: hide amounts, keep percentages
+    RecentTickers         = @()               # last opened tickers (search list)
+    ShowPrevClose         = $true             # dotted previous-close line in the chart
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -793,16 +802,20 @@ function ConvertTo-EventNumber {
     try { return [double]$V } catch { return [double]::NaN }
 }
 
+$script:EventNumberFields = @("DividendRate", "DividendYield", "TrailingRate", "TargetMean", "TargetHigh", "TargetLow", "RecMean", "Analysts")
 function New-EventEntry {
     param($V = $null)
     $e = [PSCustomObject]@{
         EarningsDate = ""; EarningsEnd = ""; ExDividendDate = ""; DividendDate = ""
         DividendRate = [double]::NaN; DividendYield = [double]::NaN; TrailingRate = [double]::NaN
         FetchedAt = ""; NotifiedEarnings = ""
+        TargetMean = [double]::NaN; TargetHigh = [double]::NaN; TargetLow = [double]::NaN; RecMean = [double]::NaN; Analysts = [double]::NaN; RecKey = ""
     }
     if ($null -ne $V) {
-        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings")) { if ($null -ne $V.$f) { $e.$f = [string]$V.$f } }
-        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) { $e.$f = ConvertTo-EventNumber $V.$f }
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "RecKey")) { if ($null -ne $V.$f) { $e.$f = [string]$V.$f } }
+        foreach ($f in $script:EventNumberFields) { $e.$f = ConvertTo-EventNumber $V.$f }
+        # v4.9.5: entries from before the analyst data are fetched again once
+        if ($null -eq $V.PSObject.Properties["RecKey"]) { $e.FetchedAt = "" }
     }
     return $e
 }
@@ -819,8 +832,8 @@ function Save-Events {
     foreach ($k in @($script:Events.Keys)) {
         $e = $script:Events[$k]
         $o = [ordered]@{}
-        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings")) { $o[$f] = [string]$e.$f }
-        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) {
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "RecKey")) { $o[$f] = [string]$e.$f }
+        foreach ($f in $script:EventNumberFields) {
             $n = [double]$e.$f
             $o[$f] = if ([double]::IsNaN($n) -or [double]::IsInfinity($n)) { $null } else { $n }
         }
@@ -837,8 +850,8 @@ function Set-EventEntry {
     $old = $script:Events[$u]
     $e = New-EventEntry
     if ($null -ne $Cal) {
-        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate")) { $e.$f = [string]$Cal.$f }
-        foreach ($f in @("DividendRate", "DividendYield", "TrailingRate")) { $e.$f = ConvertTo-EventNumber $Cal.$f }
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "RecKey")) { $e.$f = [string]$Cal.$f }
+        foreach ($f in $script:EventNumberFields) { $e.$f = ConvertTo-EventNumber $Cal.$f }
     } elseif ($null -ne $old) {
         $e = New-EventEntry $old
     }
@@ -1358,7 +1371,8 @@ $script:ProfileWorkerScript = {
     $res = @{}
     # v4.2: calendarEvents / summaryDetail = earnings and dividend dates
     $evOnly = [bool]$Box.EventsOnly
-    $mods = if ($evOnly) { "calendarEvents%2CsummaryDetail" } else { "assetProfile%2CquoteType%2CcalendarEvents%2CsummaryDetail" }
+    # v4.9.5: financialData = analyst targets + consensus
+    $mods = if ($evOnly) { "calendarEvents%2CsummaryDetail%2CfinancialData" } else { "assetProfile%2CquoteType%2CcalendarEvents%2CsummaryDetail%2CfinancialData" }
     $get = {
         param([string]$U)
         try {
@@ -2400,15 +2414,22 @@ try {
     $ifc.Dispose()
 } catch { }
 $script:MonoFamily = Resolve-MonoFont -Wanted ([string]$script:Config.MonoFont) -Installed $script:InstalledFonts
+# The size setting only scales the lists (grid cells + row height) and the
+# chart labels: buttons, labels and input boxes have fixed pixel sizes and
+# would clip larger text.
 $fsc = [int]$script:Config.FontScale
-$fontTicker = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 10.5 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontPrice  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 13.0 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontUi     = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc))
-$fontUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontMono   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc))
-$fontMonoBold = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$script:GridRowScale = $fsc / 100.0
+$fontTicker = New-Object System.Drawing.Font($script:MonoFamily, 10.5, [System.Drawing.FontStyle]::Bold)
+$fontPrice  = New-Object System.Drawing.Font($script:MonoFamily, 13.0, [System.Drawing.FontStyle]::Bold)
+$fontUi     = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$fontUiBold = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$fontMono   = New-Object System.Drawing.Font($script:MonoFamily, 8.5)
 $fontAxis   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc))
 $fontBadge  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontGrid       = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc))
+$fontGridBold   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontGridUi     = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc))
+$fontGridUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
 
 $script:GdiCache = @{}
 
@@ -2824,11 +2845,18 @@ function Render-ChartAndRsi {
         }
     }
 
-    # Previous Close Dashed Line (1D)
-    if ($script:ActivePrevClose -gt 0 -and $script:Config.Timeframe -eq "1d") {
+    # Previous Close Dashed Line (1D; v4.9.5: also 5D, with a "Vortag" label, switchable)
+    if ($script:ActivePrevClose -gt 0 -and $script:Config.Timeframe -in @("1d", "5d") -and [bool]$script:Config.ShowPrevClose) {
         $prevY = [int]($priceRect.Bottom - ((Get-PriceFrac ($script:ActivePrevClose) $minP $spanP $isLog) * $priceRect.Height))
         if ($prevY -ge $priceRect.Top -and $prevY -le $priceRect.Bottom) {
             $g.DrawLine($c["dashPen"], $priceRect.Left, $prevY, $priceRect.Right, $prevY)
+            $pcTxt = "{0} {1:N2}" -f (Tr "Vortag"), $script:ActivePrevClose
+            $pcSz = $g.MeasureString($pcTxt, $fontAxis)
+            $pcY = $prevY - [int][math]::Ceiling($pcSz.Height) - 1
+            if ($pcY -lt $priceRect.Top) { $pcY = $prevY + 2 }
+            $pcBr = New-Object System.Drawing.SolidBrush($script:Pal.Muted)
+            $g.DrawString($pcTxt, $fontAxis, $pcBr, ($priceRect.Left + (S 4)), $pcY)
+            $pcBr.Dispose()
         }
     }
 
@@ -3517,7 +3545,7 @@ function Update-ChartCacheSignature {
         $lblLivePrice.Text, $lblDayChange.Text, $lblDayAbs.Text, $lblExtQuote.Text, $lblHeaderName.Text,
         $cfg.ShowLevels, (@(Get-ChartLevels | ForEach-Object { "{0:N4}{1}{2}" -f $_.Price, $_.Kind, $_.Hit }) -join ","),
         $cfg.CompareTicker, $script:CompareSig, $script:ViewCount, $script:ViewOffset,
-        $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType
+        $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType, [bool]$cfg.ShowPrevClose
     ) -join "|"
     if ($sig -ne $script:ChartSignature) {
         $script:ChartSignature = $sig
@@ -3647,7 +3675,10 @@ $script:EnText = @{
     "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
     "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
     # v4.9: news tab, fonts, frame
-    "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße (ab Neustart)" = "Font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
+    "> Befehl" = "> Command"; "> Befehl     Strg+K" = "> Command    Ctrl+K"; "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße Listen + Chart (ab Neustart)" = "List + chart font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
+    # v4.9.5
+    "Rechtsklick: Quelle ausblenden" = "Right-click: mute source"; "Artikel öffnen" = "Open article"; "Link kopieren" = "Copy link"; "Quelle ausblenden" = "Mute source"; "Link kopiert" = "Link copied"; "Quelle ausgeblendet:" = "Source muted:"; "zurück in den Einstellungen" = "undo in Settings"; "Alarm-Wörter" = "Alert words"; "Alarm-Wörter auch für Watchlist-Ticker" = "Alert words for watchlist tickers too"; "Ausgeblendete Quellen zeigen" = "Show muted sources"; "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" = "Tray icon in the colour of the depot's day (not the ticker)"; "Beitrag heute" = "Today's contribution"; "Privat (F9)" = "Private (F9)"; "Privat-Modus: Beträge und Stückzahlen ausgeblendet. F9 = wieder zeigen." = "Privacy mode: amounts and shares hidden. F9 = show again."; "Privat-Modus: erst F9 drücken, dann bearbeiten" = "Privacy mode: press F9 first, then edit"; "Weitere Positionen: unten Ticker, Stück und EK eintragen - oder:" = "More positions: enter ticker, shares and cost below - or:"; "+ Kauf buchen ..." = "+ Book a buy ..."; "Broker-CSV importieren ..." = "Import broker CSV ..."; "Analysten" = "Analysts"; "1 Stunde pausieren" = "Pause for 1 hour"; "4 Stunden pausieren" = "Pause for 4 hours"; "Bis morgen 08:00 pausieren" = "Pause until tomorrow 08:00"; "Pause beenden" = "End pause"; "Löschen (Entf)" = "Delete (Del)"; "Chart öffnen" = "Open chart"; "Alarm anlegen ..." = "Create alert ..."; "Kauf / Verkauf buchen ..." = "Book buy / sell ..."; "Nachrichten (News-Tab)" = "News (news tab)"; "Im Chart vergleichen" = "Compare in chart"; "Beschreibung (DES)" = "Description (DES)"; "Aus der Watchlist entfernen" = "Remove from watchlist"; "Vortag" = "Prev. close"; "Vortages-Schluss als Linie (1D / 5D)" = "Previous close as a line (1D / 5D)"
+    "Ganze Seite" = "Full page"; "Tab nochmal klicken, F1 oder Esc = zurück" = "click the tab again, F1 or Esc = back"; "Privat-Modus: Beträge ausblenden (F9)" = "Privacy mode: hide amounts (F9)"
 }
 
 function Tr {
@@ -3806,6 +3837,10 @@ $miRefresh = $trayMenu.Items.Add("Jetzt aktualisieren (F5)")
 $miClickThrough = New-Object System.Windows.Forms.ToolStripMenuItem("Durchklicken (Maus geht durch)")
 [void]$trayMenu.Items.Add($miClickThrough)
 $miClickThrough.Add_Click({ Set-ClickThrough (-not $script:ClickThrough) })
+# v4.9.5: privacy mode also from the tray (F9 needs Fn on many laptops)
+$miPrivacy = New-Object System.Windows.Forms.ToolStripMenuItem("Privat-Modus: Beträge ausblenden (F9)")
+[void]$trayMenu.Items.Add($miPrivacy)
+$miPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) })
 [void]$trayMenu.Items.Add("-")
 $miExit    = $trayMenu.Items.Add("Beenden")
 $trayIcon.ContextMenuStrip = $trayMenu
@@ -3825,7 +3860,7 @@ function Style-DataGrid {
     $Grid.EnableHeadersVisualStyles = $false
     $Grid.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
     $Grid.ColumnHeadersHeight = S 26
-    $Grid.RowTemplate.Height = S 25
+    $Grid.RowTemplate.Height = S ([math]::Round(25 * $script:GridRowScale))
 
     $hdrStyle = New-Object System.Windows.Forms.DataGridViewCellStyle
     $hdrStyle.BackColor = $script:Pal.Input
@@ -3838,7 +3873,7 @@ function Style-DataGrid {
     $cellStyle.ForeColor = $script:Pal.Text
     $cellStyle.SelectionBackColor = $script:Pal.Hover
     $cellStyle.SelectionForeColor = $script:Pal.Text
-    $cellStyle.Font = $fontMono
+    $cellStyle.Font = $fontGrid
     $Grid.DefaultCellStyle = $cellStyle
 }
 
@@ -4230,6 +4265,7 @@ foreach ($td in $tabDefs) {
     $b.Tag = $td.Key
     $pnlNav.Controls.Add($b)
     $tabButtons[$td.Key] = $b
+    if ($td.Key -ne "Chart") { Set-Tip $b ("{0} - {1}" -f $td.Label, "Terminal-Layout: nochmal klicken = als ganze Seite (Shift+F-Taste), Esc = zurück") }
     $tabX += (S ($td.W + 5))
 }
 
@@ -4263,7 +4299,7 @@ Set-Tip $cmbRefresh "Auto-Refresh Intervall" "REFRESH"
 
 $btnThemeCycle = New-Object System.Windows.Forms.Button
 $btnThemeCycle.Location = New-Object System.Drawing.Point((S ($script:NavX + 96)), (S 2))
-$btnThemeCycle.Size = New-Object System.Drawing.Size((S 54), (S 27))
+$btnThemeCycle.Size = New-Object System.Drawing.Size((S 66), (S 27))
 Style-FlatButton -Btn $btnThemeCycle -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnThemeCycle.Font = $fontUi
 $btnThemeCycle.Text = $script:Config.Theme
@@ -4271,7 +4307,7 @@ $pnlNav.Controls.Add($btnThemeCycle)
 Set-Tip $btnThemeCycle "Theme wechseln: Dark / OLED / Light / Terminal (Taste T)" "THEME"
 
 $btnSettings = New-Object System.Windows.Forms.Button
-$btnSettings.Location = New-Object System.Drawing.Point((S ($script:NavX + 154)), (S 2))
+$btnSettings.Location = New-Object System.Drawing.Point((S ($script:NavX + 166)), (S 2))
 $btnSettings.Size = New-Object System.Drawing.Size((S 30), (S 27))
 Style-FlatButton -Btn $btnSettings -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnSettings.Font = $fontUiBold
@@ -4280,7 +4316,7 @@ $pnlNav.Controls.Add($btnSettings)
 Set-Tip $btnSettings "Einstellungen (Taste S)"
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point((S ($script:NavX + 188)), (S 6))
+$lblStatus.Location = New-Object System.Drawing.Point((S ($script:NavX + 200)), (S 6))
 $lblStatus.Size = New-Object System.Drawing.Size((S 222), (S 20))
 $lblStatus.Font = $fontMono
 $lblStatus.ForeColor = $script:Pal.Muted
@@ -4291,7 +4327,7 @@ $pnlNav.Controls.Add($lblStatus)
 
 # v4.4: command line button (Ctrl+K)
 $btnCmd = New-Object System.Windows.Forms.Button
-$btnCmd.SetBounds((S ($script:NavX + 188)), (S 3), (S 170), (S 24))
+$btnCmd.SetBounds((S ($script:NavX + 200)), (S 3), (S 170), (S 24))
 Style-FlatButton -Btn $btnCmd -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnCmd.Font = $fontMono
 $btnCmd.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
@@ -4299,6 +4335,24 @@ $btnCmd.Text = "> Befehl     Strg+K"
 $pnlNav.Controls.Add($btnCmd)
 Set-Tip $btnCmd "Befehlszeile wie im Terminal: NVDA GP, NVDA DES, NVDA N, CAL, TOP, PORT, NVDA ALRT TRAIL 8 ... (Strg+K)"
 $btnCmd.Add_Click({ Show-CommandPalette })
+
+# v4.9.5: data source health dot (green / amber / red) left of the status text
+$script:HealthLevel = ""
+$pnlHealth = New-Object System.Windows.Forms.Panel
+$pnlHealth.SetBounds((S ($script:NavX + 380)), (S 10), (S 12), (S 12))
+$pnlHealth.BackColor = $script:Pal.BodyBg
+Enable-DoubleBuffering -Control $pnlHealth
+$pnlHealth.Add_Paint({
+    param($sender, $e)
+    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $c = switch ($script:HealthLevel) { "ERR" { $colRed } "WARN" { $amber } "OK" { $colGreen } default { $script:Pal.Muted } }
+    $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $br = New-Object System.Drawing.SolidBrush($c)
+    $d = [math]::Min($sender.Width, $sender.Height) - 2
+    $e.Graphics.FillEllipse($br, 1, 1, $d, $d)
+    $br.Dispose()
+})
+$pnlNav.Controls.Add($pnlHealth)
 Set-Tip $lblStatus "Wechselkurse und Stand der letzten Aktualisierung" "STAND"
 
 # ==============================================================================
@@ -4335,6 +4389,18 @@ $cmiLog = New-Object System.Windows.Forms.ToolStripMenuItem("Logarithmische Skal
 $cmiLog.CheckOnClick = $true
 $cmiLog.Checked = [bool]$script:Config.LogScale
 [void]$chartContextMenu.Items.Add($cmiLog)
+# v4.9.5: previous close line (1D / 5D)
+$cmiPrevClose = New-Object System.Windows.Forms.ToolStripMenuItem("Vortages-Schluss als Linie (1D / 5D)")
+$cmiPrevClose.CheckOnClick = $true
+$cmiPrevClose.Checked = [bool]$script:Config.ShowPrevClose
+$cmiPrevClose.Add_Click({
+    $script:Config.ShowPrevClose = $cmiPrevClose.Checked
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-ChartCacheSignature
+    $script:ChartSignature = ""
+    Update-AllUiViews
+})
+[void]$chartContextMenu.Items.Add($cmiPrevClose)
 # "Alarm here" goes on top; its text is set when the menu opens
 $cmiAlertHere = New-Object System.Windows.Forms.ToolStripMenuItem("Alarm hier setzen")
 $chartContextMenu.Items.Insert(0, $cmiAlertHere)
@@ -4700,12 +4766,21 @@ $form.Controls.Add($viewPortfolio)
 
 $lblPortSummary = New-Object System.Windows.Forms.Label
 $lblPortSummary.Location = New-Object System.Drawing.Point((S 10), (S 8))
-$lblPortSummary.Size = New-Object System.Drawing.Size((S 456), (S 22))
+$lblPortSummary.Size = New-Object System.Drawing.Size((S 424), (S 22))
 $lblPortSummary.AutoEllipsis = $true
 $lblPortSummary.Font = $fontMono
 $lblPortSummary.ForeColor = $script:Pal.Text
 $lblPortSummary.Text = "Depotwert: 0.00 $($script:Config.Currency) | Gesamt G/V: +0.00 $($script:Config.Currency) (+0.00%)"
 $viewPortfolio.Controls.Add($lblPortSummary)
+
+# v4.9.5: privacy toggle next to the summary (same as F9)
+$script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+$btnPrivacy = New-Object System.Windows.Forms.Button
+$btnPrivacy.SetBounds((S 438), (S 6), (S 28), (S 24))
+Style-FlatButton -Btn $btnPrivacy -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
+if ($script:IconFont) { $btnPrivacy.Font = New-Object System.Drawing.Font($script:IconFont, 9) } else { $btnPrivacy.Font = $fontUiBold }
+$btnPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) })
+$viewPortfolio.Controls.Add($btnPrivacy)
 
 # v4.5: depot selector
 $cmbDepot = New-Object System.Windows.Forms.ComboBox
@@ -4751,17 +4826,57 @@ Enable-DoubleBuffering -Control $dgvPortfolio
 [void]$dgvPortfolio.Columns.Add("Weight", "Anteil")
 [void]$dgvPortfolio.Columns.Add("Pnl",    "G/V Gesamt")
 [void]$dgvPortfolio.Columns.Add("Day",    "Tag %")
+[void]$dgvPortfolio.Columns.Add("Contrib", "Beitrag heute")   # v4.9.5
 
 $dgvPortfolio.Columns[0].Width = S 68
-$dgvPortfolio.Columns[1].Width = S 82
+$dgvPortfolio.Columns[1].Width = S 70
 $dgvPortfolio.Columns[2].Width = S 66
 $dgvPortfolio.Columns[3].Width = S 74
 $dgvPortfolio.Columns[4].Width = S 74
 $dgvPortfolio.Columns[5].Width = S 92
 $dgvPortfolio.Columns[6].Width = S 56
-$dgvPortfolio.Columns[7].Width = S 146
+$dgvPortfolio.Columns[7].Width = S 132
 $dgvPortfolio.Columns[8].Width = S 68
+$dgvPortfolio.Columns[9].Width = S 84
 $viewPortfolio.Controls.Add($dgvPortfolio)
+
+# v4.9.5: hint with buttons in the empty part of a short portfolio list
+$pnlPortHint = New-Object System.Windows.Forms.Panel
+$pnlPortHint.Size = New-Object System.Drawing.Size((S 520), (S 64))
+$pnlPortHint.BackColor = $script:Pal.Card
+$pnlPortHint.Visible = $false
+$lblPortHint = New-Object System.Windows.Forms.Label
+$lblPortHint.SetBounds(0, 0, (S 520), (S 20))
+$lblPortHint.Font = $fontUi
+$lblPortHint.ForeColor = $script:Pal.Muted
+$lblPortHint.Text = "Weitere Positionen: unten Ticker, Stück und EK eintragen - oder:"
+$pnlPortHint.Controls.Add($lblPortHint)
+$btnHintTx = New-Object System.Windows.Forms.Button
+$btnHintTx.SetBounds(0, (S 26), (S 160), (S 26))
+Style-FlatButton -Btn $btnHintTx -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnHintTx.Font = $fontUiBold
+$btnHintTx.Text = "+ Kauf buchen ..."
+$btnHintTx.Add_Click({ Show-TransactionDialog -Ticker ([string]$script:Config.ActiveTicker) })
+$pnlPortHint.Controls.Add($btnHintTx)
+$btnHintImp = New-Object System.Windows.Forms.Button
+$btnHintImp.SetBounds((S 168), (S 26), (S 170), (S 26))
+Style-FlatButton -Btn $btnHintImp -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
+$btnHintImp.Font = $fontUiBold
+$btnHintImp.Text = "Broker-CSV importieren ..."
+$btnHintImp.Add_Click({ Show-CsvImportDialog })
+$pnlPortHint.Controls.Add($btnHintImp)
+$viewPortfolio.Controls.Add($pnlPortHint)
+$pnlPortHint.BringToFront()
+
+function Update-PortfolioHint {
+    # shown below the rows while there are at most 3 positions and room for it
+    $n = $dgvPortfolio.Rows.Count
+    $top = $dgvPortfolio.Top + $dgvPortfolio.ColumnHeadersHeight + $n * $dgvPortfolio.RowTemplate.Height + (S 24)
+    $show = ($n -le 3) -and (($top + $pnlPortHint.Height) -lt ($dgvPortfolio.Bottom - (S 8)))
+    if ($show) { $pnlPortHint.Location = New-Object System.Drawing.Point(($dgvPortfolio.Left + (S 12)), $top) }
+    if ($pnlPortHint.Visible -ne $show) { $pnlPortHint.Visible = $show }
+}
+$dgvPortfolio.Add_Resize({ Update-PortfolioHint })
 
 
 # Shared sparkline cell painter (portfolio column 1 = "5D Trend", watchlist "Spark")
@@ -4981,6 +5096,8 @@ Enable-DoubleBuffering -Control $dgvWatchlist
 [void]$dgvWatchlist.Columns.Add("Rsi",    "RSI 1h")
 [void]$dgvWatchlist.Columns.Add("Dist",   "52W-H")
 [void]$dgvWatchlist.Columns.Add("Market", "Markt")
+[void]$dgvWatchlist.Columns.Add("Target", "Analysten")   # v4.9.5, hidden by default (header right-click)
+$dgvWatchlist.Columns["Target"].Visible = $false
 
 # Design widths = minimum widths (sum fits the 480 px grid incl. scrollbar)
 $dgvWatchlist.Columns["Sym"].Width    = S 64
@@ -4991,6 +5108,7 @@ $dgvWatchlist.Columns["Ext"].Width    = S 54
 $dgvWatchlist.Columns["Rsi"].Width    = S 44
 $dgvWatchlist.Columns["Dist"].Width   = S 54
 $dgvWatchlist.Columns["Market"].Width = S 56
+$dgvWatchlist.Columns["Target"].Width = S 84
 
 function Apply-GridColumnTips {
     # Column header explanations (v4.0: from the glossary, follow the tooltip mode)
@@ -5007,6 +5125,32 @@ $dgvWatchlist.AllowDrop = $true
 $viewWatch.Controls.Add($dgvWatchlist)
 $dgvPortfolio.Add_CellPainting($script:SparkCellPainter)
 $dgvWatchlist.Add_CellPainting($script:SparkCellPainter)
+# v4.9.5: 52-week range bar under the "52W-H" value (marker = price between low and high)
+$dgvWatchlist.Add_CellPainting({
+    param($sender, $e)
+    if ($e.RowIndex -lt 0 -or $e.ColumnIndex -lt 0 -or $sender.Columns[$e.ColumnIndex].Name -ne "Dist") { return }
+    $sym = [string]$sender.Rows[$e.RowIndex].Cells[0].Value
+    $q = $script:QuoteStore[$sym]
+    if ($null -eq $q) { return }
+    $f = Get-RangePosition -Price ([double]$q.Price) -Low ([double]$q.Low52) -High ([double]$q.High52)
+    if ([double]::IsNaN($f)) { return }
+    $e.Paint($e.ClipBounds, [System.Windows.Forms.DataGridViewPaintParts]::All)
+    $b = $e.CellBounds
+    $x0 = $b.Left + (S 4); $x1 = $b.Right - (S 5)
+    $y = $b.Bottom - (S 5)
+    if ($x1 -le $x0) { $e.Handled = $true; return }
+    $pen = New-Object System.Drawing.Pen($script:Pal.Border, [float](S 2))
+    $e.Graphics.DrawLine($pen, $x0, $y, $x1, $y)
+    $pen.Dispose()
+    $mx = $x0 + [int][math]::Round(($x1 - $x0) * $f)
+    $mc = if ($f -ge 0.85) { $colGreen } elseif ($f -le 0.15) { $colRed } else { $script:Pal.Accent }
+    $br = New-Object System.Drawing.SolidBrush($mc)
+    $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $r = S 3
+    $e.Graphics.FillEllipse($br, ($mx - $r), ($y - $r), (2 * $r), (2 * $r))
+    $br.Dispose()
+    $e.Handled = $true
+})
 
 function Apply-NumberAlignment {
     # v4.9: numbers right-aligned (header too), so digits stay in their
@@ -5014,8 +5158,8 @@ function Apply-NumberAlignment {
     $right = [bool]$script:Config.AlignNumbersRight
     $cell = if ($right) { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight } else { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleLeft }
     $sets = @(
-        @($dgvWatchlist, @("Price", "Day", "Ext", "Rsi", "Dist")),
-        @($dgvPortfolio, @("Shares", "Avg", "Price", "Val", "Weight", "Pnl", "Day"))
+        @($dgvWatchlist, @("Price", "Day", "Ext", "Rsi", "Dist", "Target")),
+        @($dgvPortfolio, @("Shares", "Avg", "Price", "Val", "Weight", "Pnl", "Day", "Contrib"))
     )
     foreach ($set in $sets) {
         foreach ($cn in $set[1]) {
@@ -5122,7 +5266,7 @@ $dgvNews.Columns["Age"].Width  = S 104
 $dgvNews.Columns["Syms"].Width = S 150
 $dgvNews.Columns["Src"].Width  = S 120
 $dgvNews.Columns["Title"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
-$dgvNews.Columns["Title"].DefaultCellStyle.Font = $fontUi
+$dgvNews.Columns["Title"].DefaultCellStyle.Font = $fontGridUi
 foreach ($nc in $dgvNews.Columns) { $nc.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
 $viewNews.Controls.Add($dgvNews)
 $dgvNews.Columns["Age"].ToolTipText  = "Wann die Meldung erschienen ist"
@@ -5192,7 +5336,7 @@ function Update-NewsBadge {
         if (-not $script:NewsWasVisible) { $script:NewsBoldSince = $script:NewsSeenAt }
         Set-NewsSeen (Get-NewsNewest)
     } else {
-        $cnt = Get-NewsUnreadCount -Items $script:NewsItems -Since $script:NewsSeenAt
+        $cnt = Get-NewsUnreadCount -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Since $script:NewsSeenAt
     }
     $script:NewsWasVisible = $vis
     $b = $tabButtons["News"]
@@ -5223,12 +5367,12 @@ function Refresh-NewsGrid {
     # the ages "vor 5 min" need at most one rebuild per minute)
     param([switch]$IfChanged)
     if ($null -eq $dgvNews -or $dgvNews.IsDisposed) { return }
-    $sig = "{0}|{1}|{2}|{3}|{4}|{5}" -f $script:NewsLoadedAt.Ticks, [string]$script:Config.NewsFilter, $script:NewsBoldSince.Ticks, (Get-Date).ToString("yyyyMMddHHmm"), $script:NewsLoading, @($script:NewsItems).Count
+    $sig = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $script:NewsLoadedAt.Ticks, [string]$script:Config.NewsFilter, $script:NewsBoldSince.Ticks, (Get-Date).ToString("yyyyMMddHHmm"), $script:NewsLoading, @($script:NewsItems).Count, (@($script:Config.NewsMuted) -join ","), [bool]$script:Config.PrivacyMode
     if ($IfChanged -and $sig -eq $script:NewsGridSig) { return }
     $script:NewsGridSig = $sig
     $p = $script:Pal
     $hold = @($script:Portfolio.Keys)
-    $items = @(Select-NewsItems -Items $script:NewsItems -Filter ([string]$script:Config.NewsFilter) -Holdings $hold -Watchlist @($script:Config.Watchlist))
+    $items = @(Select-NewsItems -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Filter ([string]$script:Config.NewsFilter) -Holdings $hold -Watchlist @($script:Config.Watchlist))
     $dayPct = @{}
     foreach ($k in @($script:QuoteStore.Keys)) {
         $q = $script:QuoteStore[$k]
@@ -5240,10 +5384,12 @@ function Refresh-NewsGrid {
     try { $first = $dgvNews.FirstDisplayedScrollingRowIndex } catch { }
     $selKey = ""
     if ($dgvNews.SelectedRows.Count -gt 0 -and $null -ne $dgvNews.SelectedRows[0].Tag) { $selKey = [string]$dgvNews.SelectedRows[0].Tag.Key }
+    # v4.9.5: the day move only on the newest item of each ticker
+    $movers = Get-NewsMoverRows -Items $items -DayPct $dayPct -Threshold ([double]$script:Config.NewsMoveThreshold)
     $dgvNews.SuspendLayout()
     $dgvNews.Rows.Clear()
     foreach ($n in $items) {
-        $mv = Get-NewsMover -Syms @($n.Syms) -DayPct $dayPct -Threshold ([double]$script:Config.NewsMoveThreshold)
+        $mv = $movers[[string]$n.Key]
         $symTxt = @($n.Syms | Select-Object -First 4) -join " "
         if (@($n.Syms).Count -gt 4) { $symTxt += " +" + (@($n.Syms).Count - 4) }
         if ($null -ne $mv) { $symTxt = "{0}  {1}{2:+0.0;-0.0}%" -f $symTxt, (Get-ArrowPrefix $mv.Pct), $mv.Pct }
@@ -5254,11 +5400,12 @@ function Refresh-NewsGrid {
         $row.Cells["Src"].Style.ForeColor = $p.Muted
         $row.Cells["Syms"].Style.ForeColor = if ($null -eq $mv) { $p.Accent } elseif ($mv.Pct -ge 0) { $colGreen } else { $colRed }
         if ([DateTime]$n.Time -gt $script:NewsBoldSince) {
-            foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontMonoBold }
-            $row.Cells["Title"].Style.Font = $fontUiBold
+            foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontGridBold }
+            $row.Cells["Title"].Style.Font = $fontGridUiBold
         }
         $tip = Get-NewsTooltip $n
-        foreach ($cn in @("Age", "Src", "Title")) { $row.Cells[$cn].ToolTipText = $tip }
+        foreach ($cn in @("Age", "Title")) { $row.Cells[$cn].ToolTipText = $tip }
+        $row.Cells["Src"].ToolTipText = ([string]$n.Publisher) + "`r`n" + (Tr "Rechtsklick: Quelle ausblenden")
         $row.Cells["Syms"].ToolTipText = if ($null -ne $mv) { "{0} heute {1:+0.0;-0.0}% - Klick öffnet den Ticker" -f $mv.Sym, $mv.Pct } else { "Klick öffnet den Ticker" }
         if ($selKey -and [string]$n.Key -eq $selKey) { $row.Selected = $true }
     }
@@ -5290,10 +5437,43 @@ function Update-NewsInfo {
     $lblNewsInfo.Text = $parts -join "  |  "
 }
 
+function Invoke-NewsKeywordCheck {
+    # v4.9.5: tray + phone push for new headlines with a chosen word about a
+    # held ticker (optionally the watchlist). Each item once: the newest
+    # checked time is kept in the config, the first run only sets it.
+    $kw = @(ConvertTo-KeywordList ([string]$script:Config.NewsKeywords))
+    $newest = Get-NewsNewest
+    $last = [DateTime]::MinValue
+    if ([string]$script:Config.NewsKeywordLastAt) {
+        [void][DateTime]::TryParse([string]$script:Config.NewsKeywordLastAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$last)
+    }
+    if ($kw.Count -gt 0 -and $last -gt [DateTime]::MinValue) {
+        $syms = @($script:Portfolio.Keys)
+        if ([bool]$script:Config.NewsKeywordWatch) { $syms += @($script:Config.Watchlist) }
+        $hits = @(Find-NewsKeywordHits -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Keywords $kw -Symbols $syms -Since $last)
+        foreach ($h in ($hits | Select-Object -Last 3)) {
+            $title = "News {0}: {1}" -f $h.Sym, $h.Keyword
+            $msg = "{0} ({1})" -f [string]$h.Item.Title, [string]$h.Item.Publisher
+            $push = Send-WidgetNotification -Title $title -Message $msg -Kind "News"
+            Add-AlertLogEntry -Alert ([PSCustomObject]@{ Ticker = $h.Sym; Condition = "NEWS"; Note = $h.Keyword }) -Text ([string]$h.Item.Title) -Push $push
+        }
+        if ($hits.Count -gt 3) { Write-WidgetLog ("News keywords: {0} hits, notified the newest 3" -f $hits.Count) }
+    }
+    if ($newest -gt $last) {
+        $script:Config.NewsKeywordLastAt = $newest.ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    }
+}
+
 function Start-NewsLoad {
     # One Yahoo search request per ticker (holdings + watchlist, max 40),
     # merged into one feed in the background
     if ($script:IsClosing -or $script:NewsLoading) { return }
+    # v4.9.5: Yahoo asked us to slow down -> the news wait for the same pause
+    if ((Get-Date) -lt $script:BackoffUntil) {
+        $script:NextNewsLoad = $script:BackoffUntil.AddMinutes(1)
+        return
+    }
     $syms = @(Get-NewsSymbols -Holdings @($script:Portfolio.Keys | Sort-Object) -Watchlist @($script:Config.Watchlist) -Max 40)
     if ($syms.Count -eq 0) {
         $script:NewsItems = @()
@@ -5309,6 +5489,13 @@ function Start-NewsLoad {
     Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
         param($Box, $Ctx)
         $script:NewsLoading = $false
+        if ([bool]$Box.RateLimited) {
+            # same back-off as the price refresh (30 s doubling, max 5 min)
+            $script:BackoffLevel = [math]::Min(5, $script:BackoffLevel + 1)
+            $script:BackoffUntil = (Get-Date).AddSeconds([math]::Min(300, 30 * [math]::Pow(2, $script:BackoffLevel - 1)))
+            $script:NextNewsLoad = $script:BackoffUntil.AddMinutes(1)
+            Write-WidgetLog ("News: rate limit, pause until {0:HH:mm:ss}" -f $script:BackoffUntil) "WARN"
+        }
         $by = @{}
         $ok = 0
         foreach ($s in $Ctx.Urls.Keys) {
@@ -5328,6 +5515,7 @@ function Start-NewsLoad {
                 Set-NewsSeen (Get-NewsNewest)
                 $script:NewsBoldSince = $script:NewsSeenAt
             }
+            Invoke-NewsKeywordCheck
         }
         Update-NewsBadge
         if ($viewNews.Visible) { Refresh-NewsGrid }
@@ -5369,6 +5557,44 @@ $dgvNews.Add_CellClick({
     Switch-ActiveTicker -NewTicker $pick -SkipResolve $true
     Set-TransientStatus ("{0} {1}" -f (Tr "Aktiver Ticker:"), $pick) 3
 })
+# v4.9.5: right-click menu (open, copy link, open ticker, mute source)
+$script:NewsMenuItem = $null
+$newsMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miNewsOpen = $newsMenu.Items.Add("Artikel öffnen")
+$miNewsCopy = $newsMenu.Items.Add("Link kopieren")
+$miNewsTicker = $newsMenu.Items.Add("Ticker öffnen")
+[void]$newsMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miNewsMute = $newsMenu.Items.Add("Quelle ausblenden")
+$miNewsOpen.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) } })
+$miNewsCopy.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and $n.Link) { try { [System.Windows.Forms.Clipboard]::SetText([string]$n.Link); Set-TransientStatus (Tr "Link kopiert") 2 } catch { } } })
+$miNewsTicker.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and @($n.Syms).Count -gt 0) { Switch-ActiveTicker -NewTicker ([string]@($n.Syms)[0]) -SkipResolve $true } })
+$miNewsMute.Add_Click({
+    $n = $script:NewsMenuItem
+    if ($null -eq $n -or -not $n.Publisher) { return }
+    $pub = ([string]$n.Publisher).Trim()
+    $script:Config.NewsMuted = @(@($script:Config.NewsMuted) + @($pub) | Where-Object { $_ } | Sort-Object -Unique)
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-TransientStatus ("{0} '{1}' - {2}" -f (Tr "Quelle ausgeblendet:"), $pub, (Tr "zurück in den Einstellungen")) 5
+    Refresh-NewsGrid
+    Update-NewsBadge
+})
+$dgvNews.Add_CellMouseDown({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right -or $e.RowIndex -lt 0) { return }
+    $n = $sender.Rows[$e.RowIndex].Tag
+    if ($null -eq $n) { return }
+    $sender.ClearSelection()
+    $sender.Rows[$e.RowIndex].Selected = $true
+    $script:NewsMenuItem = $n
+    $miNewsOpen.Enabled = [bool]$n.Link
+    $miNewsCopy.Enabled = [bool]$n.Link
+    $miNewsTicker.Enabled = (@($n.Syms).Count -gt 0)
+    $miNewsTicker.Text = if (@($n.Syms).Count -gt 0) { "{0}: {1}" -f (Tr "Ticker öffnen"), @($n.Syms)[0] } else { Tr "Ticker öffnen" }
+    $miNewsMute.Enabled = [bool]$n.Publisher
+    $miNewsMute.Text = if ($n.Publisher) { "{0}: {1}" -f (Tr "Quelle ausblenden"), [string]$n.Publisher } else { Tr "Quelle ausblenden" }
+    $newsMenu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
+})
+
 $dgvNews.Add_KeyDown({
     param($sender, $e)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $sender.SelectedRows.Count -gt 0) {
@@ -5521,6 +5747,7 @@ $pnlChartControls.Anchor = $aB -bor $aL -bor $aR
 $lblPortSummary.Anchor = $aT -bor $aL -bor $aR
 $cmbPortSort.Anchor    = $aT -bor $aR
 $cmbDepot.Anchor       = $aT -bor $aR
+$btnPrivacy.Anchor     = $aT -bor $aR
 $dgvPortfolio.Anchor   = $anchorAll
 $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
 $lblNachkaufOut.Anchor = $aT -bor $aL -bor $aR
@@ -5594,10 +5821,16 @@ function Update-MainLayout {
     # Navigation bar: status text uses the extra width
     $pnlNav.Width = $W - (S 24)
     # v4.9: the command button gets narrower before the status text vanishes
-    $cmdX = S ($script:NavX + 188)
+    $cmdX = S ($script:NavX + 200)
     $cmdW = [math]::Max((S 110), [math]::Min((S 170), $pnlNav.Width - $cmdX - (S 220)))
     $btnCmd.SetBounds($cmdX, (S 3), $cmdW, (S 24))
+    # v4.9: short label when the button is narrow (the tooltip names Ctrl+K)
+    $cmdTxt = if ($cmdW -lt (S 150)) { "> Befehl" } else { "> Befehl     Strg+K" }
+    $cmdTxt = Tr $cmdTxt
+    if ($btnCmd.Text -ne $cmdTxt) { $btnCmd.Text = $cmdTxt }
     $stX = $cmdX + $cmdW + (S 8)
+    $pnlHealth.SetBounds($stX, (S 10), (S 12), (S 12))
+    $stX += S 16
     $lblStatus.SetBounds($stX, (S 6), [math]::Max(0, $pnlNav.Width - $stX), (S 20))
 
     $vx = S 12
@@ -5608,7 +5841,7 @@ function Update-MainLayout {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
             -ShowWatch ([bool]$script:Config.TerminalShowWatch) -ShowPortfolio ([bool]$script:Config.TerminalShowPortfolio) `
-            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160)
+            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull)
         $on = @{}
         foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio), @("News", $viewNews))) {
             $rect = $r.($pair[0])
@@ -5683,6 +5916,8 @@ function Apply-ThemeToAllControls {
     $lstTickerDropdown.ForeColor   = $p.Text
 
     $pnlNav.BackColor = $p.BodyBg
+    $pnlHealth.BackColor = $p.BodyBg
+    $pnlHealth.Invalidate()
     Style-FlatButton -Btn $btnRefreshNow -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     $cmbRefresh.BackColor = $p.Input
     $cmbRefresh.ForeColor = $p.Muted
@@ -5720,6 +5955,13 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnPortHist -BgColor $p.Input -FgColor $p.Muted  -BorderColor $p.Border
     Style-FlatButton -Btn $btnPortAna  -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     $lblNachkaufOut.ForeColor = $p.Text
+    $btnPrivacy.BackColor = $p.Input
+    $btnPrivacy.FlatAppearance.BorderColor = $p.Border
+    if ($script:StartupDone) { Update-PrivacyIndicator }
+    $pnlPortHint.BackColor = $p.Card
+    $lblPortHint.ForeColor = $p.Muted
+    Style-FlatButton -Btn $btnHintTx  -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    Style-FlatButton -Btn $btnHintImp -BgColor $p.Input -FgColor $p.Muted  -BorderColor $p.Border
 
     $viewWatch.BackColor = $p.Card
     $lblWlTitle.ForeColor = $p.Accent
@@ -5784,15 +6026,24 @@ function Populate-TickerDropdown {
     $curr = $script:Config.Currency
     $fUpper = $FilterText.Trim().ToUpper()
 
+    # v4.9.5: recently opened tickers first (marked), then watchlist + depot
+    $recentSet = New-Object System.Collections.Generic.HashSet[string]
     $localSymbols = New-Object System.Collections.Generic.List[string]
-    foreach ($w in $script:Config.Watchlist) { [void]$localSymbols.Add($w.ToUpper()) }
+    foreach ($r in @($script:Config.RecentTickers)) {
+        if (-not $r) { continue }
+        $ru = ([string]$r).ToUpper()
+        [void]$recentSet.Add($ru)
+        if (-not $localSymbols.Contains($ru)) { [void]$localSymbols.Add($ru) }
+    }
+    foreach ($w in $script:Config.Watchlist) { if (-not $localSymbols.Contains($w.ToUpper())) { [void]$localSymbols.Add($w.ToUpper()) } }
     foreach ($p in $script:Portfolio.Keys) {
         if (-not $localSymbols.Contains($p.ToUpper())) { [void]$localSymbols.Add($p.ToUpper()) }
     }
 
     foreach ($sym in $localSymbols) {
         $q = if ($script:QuoteStore.ContainsKey($sym)) { $script:QuoteStore[$sym] } else { $null }
-        $nameStr = if ($q -and $q.LongName) { $q.LongName } else { $sym }
+        $prN = $script:Profiles[$sym]
+        $nameStr = if ($q -and $q.LongName) { $q.LongName } elseif ($null -ne $prN -and $prN.Name) { [string]$prN.Name } else { $sym }
         if ($fUpper.Length -gt 0 -and $sym -notlike "*$fUpper*" -and $nameStr.ToUpper() -notlike "*$fUpper*") {
             continue
         }
@@ -5804,6 +6055,7 @@ function Populate-TickerDropdown {
         } else {
             $disp  = "{0,-9} | {1}" -f $sym, $nameStr
         }
+        if ($recentSet.Contains($sym) -and $fUpper.Length -eq 0) { $disp = [string][char]0x21BA + " " + $disp } else { $disp = "  " + $disp }
         [void]$lstTickerDropdown.Items.Add([PSCustomObject]@{ Symbol = $sym; Display = $disp })
     }
 
@@ -5836,6 +6088,8 @@ function Populate-TickerDropdown {
 function Set-ActiveTab {
     param([string]$TabName)
     if ($TabName -notin @("Chart", "Portfolio", "Watchlist", "News")) { $TabName = "Chart" }
+    # v4.9.5: another tab while a list is shown as a full page: that one full page, Chart = split view
+    if ($script:TerminalFull -and $TabName -ne $script:TerminalFull) { $script:TerminalFull = if ($TabName -eq "Chart") { "" } else { $TabName } }
     $script:Config.ActiveTab = $TabName
     # Terminal: the Portfolio / Watch / News tabs pick the lower panel
     if ($TabName -in @("Portfolio", "Watchlist", "News")) { $script:Config.TerminalBottom = $TabName }
@@ -5851,6 +6105,46 @@ function Set-ActiveTab {
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     # the tab that just became visible may have missed refreshes while hidden
     if ($form.Visible -and $script:StartupDone) { Update-VisibleTabContent }
+}
+
+# v4.9.5: Terminal layout - a list as a full page. Clicking the tab of a list
+# that is already shown (or Shift+F2/F3/F4, FULL) fills the window with it;
+# Chart, the same tab again or Esc bring the split view back.
+$script:TerminalFull = ""
+function Set-TerminalFull {
+    param([string]$Panel)
+    if ($Panel -and $Panel -notin @("Portfolio", "Watchlist", "News")) { $Panel = "" }
+    if ([string]$script:Config.Layout -ne "Terminal") {
+        # Standard already shows one tab per page
+        $script:TerminalFull = ""
+        if ($Panel) { Set-ActiveTab -TabName $Panel }
+        return
+    }
+    $script:TerminalFull = $Panel
+    if ($Panel) {
+        $script:Config.TerminalBottom = $Panel
+        $script:Config.ActiveTab = $Panel
+        Set-TransientStatus ("{0}: {1} - {2}" -f (Tr "Ganze Seite"), (Tr ([string]$tabButtons[$Panel].Text)), (Tr "Tab nochmal klicken, F1 oder Esc = zurück")) 5
+    }
+    Update-MainLayout
+    if ($form.Visible -and $script:StartupDone) { Update-VisibleTabContent }
+}
+
+function Invoke-TabClick {
+    # tab button / F1-F4: in the Terminal layout a second click on a shown list = full page
+    param([string]$TabName, [bool]$ForceFull = $false)
+    if ([string]$script:Config.Layout -eq "Terminal" -and -not [bool]$script:Config.CompactMode) {
+        if ($TabName -eq "Chart") {
+            if ($script:TerminalFull) { Set-TerminalFull "" ; return }
+        } elseif ($script:TerminalFull -eq $TabName) {
+            Set-TerminalFull ""; return
+        } elseif ($script:TerminalFull -or $ForceFull -or [bool]$script:ViewOn[$TabName]) {
+            Set-TerminalFull $TabName; return
+        }
+    } elseif ($ForceFull -and $TabName -ne "Chart") {
+        Set-ActiveTab -TabName $TabName; return
+    }
+    Set-ActiveTab -TabName $TabName
 }
 
 function Update-VisibleTabContent {
@@ -5934,6 +6228,7 @@ function Apply-Layout {
     param([string]$Layout)
     if ($Layout -notin @(Get-LayoutNames)) { $Layout = "Standard" }
     if ($script:StartupDone) { Save-WindowSize }
+    $script:TerminalFull = ""
     $script:Config.Layout = $Layout
     $isCompact = Test-CompactLayout $Layout
     $isTicker  = ($Layout -eq "Ticker")
@@ -6125,13 +6420,15 @@ function Refresh-PortfolioGrid {
         $avgConv = Convert-CurrencyValue -Amount $p.AvgPrice -FromCurrency $p.Currency -ToCurrency $curr
         $mktConv = $avgConv
         $dayPct  = 0.0
+        $contrib = [double]::NaN
         if ($script:QuoteStore.ContainsKey($sym)) {
             $q = $script:QuoteStore[$sym]
             $mktConv = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $curr
             $dayPct  = $q.ChangePct
             if ($q.PrevClose -gt 0) {
                 $prevConv = Convert-CurrencyValue -Amount $q.PrevClose -FromCurrency $q.Currency -ToCurrency $curr
-                $totDay  += $p.Shares * ($mktConv - $prevConv)
+                $contrib  = $p.Shares * ($mktConv - $prevConv)
+                $totDay  += $contrib
                 $totPrev += $p.Shares * $prevConv
             }
         }
@@ -6152,10 +6449,14 @@ function Refresh-PortfolioGrid {
             PnlAbs = $pnlAbs
             PnlPct = $pnlPct
             DayPct = $dayPct
+            Contrib = $contrib
         })
     }
 
-    $pfMap = @{ "Ticker" = "Ticker"; "Shares" = "Shares"; "Avg" = "Avg"; "Price" = "Price"; "Val" = "Value"; "Weight" = "Value"; "Pnl" = "PnlPct"; "Day" = "DayPct" }
+    $pfMap = @{ "Ticker" = "Ticker"; "Shares" = "Shares"; "Avg" = "Avg"; "Price" = "Price"; "Val" = "Value"; "Weight" = "Value"; "Pnl" = "PnlPct"; "Day" = "DayPct"; "Contrib" = "ContribSort" }
+    # v4.9.5: missing contributions sort last
+    foreach ($r in $rows) { $r | Add-Member -NotePropertyName ContribSort -NotePropertyValue $(if ([double]::IsNaN([double]$r.Contrib)) { [double]::MinValue } else { [double]$r.Contrib }) -Force }
+    $priv = [bool]$script:Config.PrivacyMode
     $sorted = if ($script:PfSort.Col -and $pfMap.ContainsKey($script:PfSort.Col)) {
         $rows | Sort-Object -Property $pfMap[$script:PfSort.Col] -Descending:([bool]$script:PfSort.Desc)
     } else { switch ($cmbPortSort.SelectedIndex) {
@@ -6173,17 +6474,21 @@ function Refresh-PortfolioGrid {
         $sign   = if ($r.PnlAbs -ge 0) { "+" } else { "" }
         $dSign  = if ($r.DayPct -ge 0) { "+" } else { "" }
         $weight = if ($totVal -gt 0) { ($r.Value / $totVal) * 100.0 } else { 0.0 }
+        # v4.9.5: privacy mode hides amounts and shares, keeps percentages
+        $contribTxt = if ([double]::IsNaN([double]$r.Contrib)) { "-" } else { "{0:+#,##0.00;-#,##0.00;0.00}" -f $r.Contrib }
         $idx = $dgvPortfolio.Rows.Add(
             $r.Ticker,
             "",
-            ("{0:N2}" -f $r.Shares),
+            (Protect-Amount ("{0:N2}" -f $r.Shares) $priv),
             ("{0:N2}" -f $r.Avg),
             ("{0:N2}" -f $r.Price),
-            ("{0:N2} {1}" -f $r.Value, $curr),
+            (Protect-Amount ("{0:N2} {1}" -f $r.Value, $curr) $priv),
             ("{0:N1}%" -f $weight),
-            ("{0}{1:N2} ({0}{2:N1}%)" -f $sign, $r.PnlAbs, $r.PnlPct),
-            ("{0}{1:N2}%" -f $dSign, $r.DayPct)
+            $(if ($priv) { "{0}{1:N1}%" -f $sign, $r.PnlPct } else { "{0}{1:N2} ({0}{2:N1}%)" -f $sign, $r.PnlAbs, $r.PnlPct }),
+            ("{0}{1:N2}%" -f $dSign, $r.DayPct),
+            (Protect-Amount $contribTxt $priv)
         )
+        if (-not [double]::IsNaN([double]$r.Contrib)) { $dgvPortfolio.Rows[$idx].Cells[9].Style.ForeColor = if ($r.Contrib -ge 0) { $colGreen } else { $colRed } }
         $dgvPortfolio.Rows[$idx].Cells[7].Style.ForeColor = if ($r.PnlAbs -ge 0) { $colGreen } else { $colRed }
         $dgvPortfolio.Rows[$idx].Cells[8].Style.ForeColor = if ($r.DayPct -ge 0) { $colGreen } else { $colRed }
         if ([bool]$script:Config.ShowArrows) { $dgvPortfolio.Rows[$idx].Cells[8].Value = (Get-ArrowPrefix ([double]$r.DayPct)) + [string]$dgvPortfolio.Rows[$idx].Cells[8].Value }
@@ -6198,6 +6503,7 @@ function Refresh-PortfolioGrid {
     } finally {
         $script:SuppressGridSelection = $false
     }
+    Update-PortfolioHint
 
     $totPnl = $totVal - $totCost
     $totPct = if ($totCost -gt 0) { ($totPnl / $totCost) * 100.0 } else { 0.0 }
@@ -6207,13 +6513,25 @@ function Refresh-PortfolioGrid {
     $dSign = if ($totDay -ge 0) { "+" } else { "" }
     $realYear = Get-RealizedTotal -Year (Get-Date).Year
     $realAll  = Get-RealizedTotal
-    $realTxt  = if ([math]::Abs($realYear) -gt 0.004) { " | Real. {0}: {1:+0.00;-0.00}" -f (Get-Date).Year, $realYear } else { "" }
-    $lblPortSummary.Text = ("Depot: {0:N2} {1} | G/V: {2}{3:N2} ({2}{4:N2}%) | Heute: {5}{6:N2} ({5}{7:N2}%){8}" -f $totVal, $curr, $tSign, $totPnl, $totPct, $dSign, $totDay, $dPct, $realTxt)
+    # v4.9.5: realized this year incl. dividends, with the dividend part
+    $divYear  = Get-RealizedTotal -Year (Get-Date).Year -Type "Dividende"
+    $hasYear  = @($script:Transactions | Where-Object { ([string]$_.Date).StartsWith([string](Get-Date).Year) -and [double]$_.Realized -ne 0 }).Count -gt 0
+    $realTxt  = ""
+    if ($hasYear -and -not $priv) {
+        $realTxt = " | {0}: {1:+0.00;-0.00} real." -f (Get-Date).Year, $realYear
+        if ([math]::Abs($divYear) -gt 0.004) { $realTxt += " (Div. {0:+0.00;-0.00})" -f $divYear }
+    }
+    if ($priv) {
+        $lblPortSummary.Text = ("Depot: {0} | G/V: {1}{2:N2}% | Heute: {3}{4:N2}%  | {5}" -f (Protect-Amount "" $true), $tSign, $totPct, $dSign, $dPct, (Tr "Privat (F9)"))
+    } else {
+        $lblPortSummary.Text = ("Depot: {0:N2} {1} | G/V: {2}{3:N2} ({2}{4:N2}%) | Heute: {5}{6:N2} ({5}{7:N2}%){8}" -f $totVal, $curr, $tSign, $totPnl, $totPct, $dSign, $totDay, $dPct, $realTxt)
+    }
     if ($script:Portfolio.Count -eq 0) {
         # Empty state (v3.0)
         $lblPortSummary.ForeColor = $script:Pal.Muted
         $lblPortSummary.Text = "Noch keine Positionen - unten Ticker, Stück und EK eintragen oder 'Transaktion...' buchen."
     }
+    if ($priv) { Set-DynTip $lblPortSummary (Tr "Privat-Modus: Beträge und Stückzahlen ausgeblendet. F9 = wieder zeigen."); return }
     Set-DynTip $lblPortSummary ("Investiert: {0:N2} {1}`r`nG/V gesamt (offen): {2}{3:N2} {1}`r`nG/V heute:  {4}{5:N2} {1}`r`nRealisiert {6}: {7:+0.00;-0.00} {1}`r`nRealisiert gesamt: {8:+0.00;-0.00} {1}" -f $totCost, $curr, $tSign, $totPnl, $dSign, $totDay, (Get-Date).Year, $realYear, $realAll) "REALIZED"
 }
 
@@ -6328,6 +6646,15 @@ function Refresh-WatchlistAndAlerts {
             $extStr = if ($q.ExtPrice -gt 0) { "{0}{1:N2}%" -f $(if ($q.ExtPct -ge 0) { "+" } else { "" }), $q.ExtPct } else { "-" }
             $ms = Get-MarketState -Tp $q.Tp -NowSec $nowSec
             $mStr = if ($null -ne $ms) { $ms.Short } else { "-" }
+            # v4.9.5: analyst mean target vs. price + consensus
+            $ev = $script:Events[$uSym]
+            $tgtStr = "-"; $tgtTip = ""; $up = [double]::NaN
+            if ($null -ne $ev) {
+                $up = Get-TargetUpside -Target ([double]$ev.TargetMean) -Price ([double]$q.Price)
+                $lab = Get-ConsensusLabel ([string]$ev.RecKey)
+                if (-not [double]::IsNaN($up)) { $tgtStr = ("{0:+0;-0}% {1}" -f $up, $lab).Trim() } elseif ($lab) { $tgtStr = $lab }
+                if ($tgtStr -ne "-") { $tgtTip = Get-AnalystText -Ev $ev -Price ([double]$q.Price) -Currency ([string]$q.Currency) }
+            }
             $idx = $dgvWatchlist.Rows.Add(
                 $uSym,
                 "",
@@ -6336,9 +6663,13 @@ function Refresh-WatchlistAndAlerts {
                 $extStr,
                 $rsiStr,
                 $distStr,
-                $mStr
+                $mStr,
+                $tgtStr
             )
             $row = $dgvWatchlist.Rows[$idx]
+            if (-not [double]::IsNaN($up)) { $row.Cells["Target"].Style.ForeColor = if ($up -ge 0) { $colGreen } else { $colRed } }
+            if ($tgtTip) { $row.Cells["Target"].ToolTipText = $tgtTip }
+            if ($q.High52 -gt 0 -and $q.Low52 -gt 0) { $row.Cells["Dist"].ToolTipText = "52 Wochen: {0:N2} - {1:N2} {2}`r`nAbstand zum Hoch: {3}" -f $q.Low52, $q.High52, $q.Currency, $distStr }
             $eb = Get-TickerEarningsBadge $uSym
             if ($null -ne $eb) {
                 $row.Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
@@ -6367,7 +6698,7 @@ function Refresh-WatchlistAndAlerts {
                 $row.Cells[0].Style.ForeColor = $script:Pal.Accent
             }
         } else {
-            [void]$dgvWatchlist.Rows.Add($uSym, "", "...", "-", "-", "-", "-", "-")
+            [void]$dgvWatchlist.Rows.Add($uSym, "", "...", "-", "-", "-", "-", "-", "-")
         }
     }
     Restore-GridState -Grid $dgvWatchlist -State $gridState
@@ -6454,7 +6785,8 @@ function Get-AlertState {
 function Format-AlertLine {
     param($Alert)
     $kind = Get-AlertKind $Alert.Condition
-    $flag = if (Test-AlertExpired -Alert $Alert) { "[EXP]" } elseif ($Alert.Triggered) { "[HIT]" } else { "[ACT]" }
+    $snz = Test-AlertSnoozed -Alert $Alert
+    $flag = if (Test-AlertExpired -Alert $Alert) { "[EXP]" } elseif ($snz) { "[ZZZ]" } elseif ($Alert.Triggered) { "[HIT]" } else { "[ACT]" }
     $t = [double]$Alert.TargetPrice
     $body = switch ($kind) {
         "PCT"    { "{0} {1:N2}%" -f $Alert.Condition, $t }
@@ -6474,6 +6806,10 @@ function Format-AlertLine {
     $exp = if ($ex.Length -ge 10) { " bis {0}.{1}." -f $ex.Substring(8, 2), $ex.Substring(5, 2) } else { "" }
     $np = if (-not [bool]$Alert.Push -and [string]$script:Config.PushService -ne "Aus") { " (ohne Push)" } else { "" }
     $note = if ($Alert.Note) { " - " + $Alert.Note } else { "" }
+    if ($snz) {
+        $su = [DateTime]::Parse([string]$Alert.SnoozeUntil, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        $np += if ($su.Date -eq (Get-Date).Date) { " (Pause bis {0:HH:mm})" -f $su } else { " (Pause bis {0:dd.MM. HH:mm})" -f $su }
+    }
     return ("{0} {1,-8} {2}{3}{4}{5}{6}" -f $flag, $Alert.Ticker, $body, $re, $exp, $np, $note)
 }
 
@@ -6527,6 +6863,7 @@ function Evaluate-GlobalAlerts {
     $now = Get-Date
     foreach ($a in $script:Alerts) {
         if (Test-AlertExpired -Alert $a -Now $now) { continue }
+        if (Test-AlertSnoozed -Alert $a -Now $now) { continue }   # v4.9.5
         $st = Get-AlertState -Alert $a
         if (-not $st.Ok) { continue }
         $isTrail = ((Get-AlertKind $a.Condition) -eq "TRAIL")
@@ -6721,7 +7058,7 @@ function Send-WidgetNotification {
     if ([string]$script:Config.PushService -eq "Aus" -or -not $want -or -not $AllowPush) { return "aus" }
     if ($quiet) { return "Ruhezeit" }
     $prio = if ($Kind -eq "Alert") { 4 } else { 3 }
-    $tags = if ($Kind -eq "Alert") { @("bell") } else { @("date") }
+    $tags = if ($Kind -eq "Alert") { @("bell") } elseif ($Kind -eq "News") { @("newspaper") } else { @("date") }
     if (Send-PushRequest -Req (Get-PushRequest -Title $Title -Message $Message -Priority $prio -Tags $tags) -Desc $Title) { return "ja" }
     return "Fehler"
 }
@@ -7106,6 +7443,28 @@ function Update-StatusLine {
     if ($warnKey -and $script:LastFxTip -ne "warn:$warnKey") { Set-DynTip $lblStatus $txt $warnKey; $script:LastFxTip = "warn:$warnKey" }
     if ($lblStatus.Text -ne $txt) { $lblStatus.Text = $txt }
     if ($lblStatus.ForeColor -ne $colr) { $lblStatus.ForeColor = $colr }
+    # v4.9.5: health dot
+    $hAge = if ($null -eq $script:LastDataTime) { [double]::NaN } else { ((Get-Date) - $script:LastDataTime).TotalSeconds }
+    $hClosed = $false
+    if (-not [double]::IsNaN($hAge) -and $hAge -gt 2 * [int]$script:Config.RefreshSeconds) { $hClosed = Test-AllPrioClosed }
+    $hl = Get-DataHealth -AgeSec $hAge -RefreshSec ([int]$script:Config.RefreshSeconds) -Offline ([bool]$script:LastFetchOffline) -RateLimited ([bool]$script:LastRateLimited) -ClosedMinutes ([int]$script:Config.ClosedPollMinutes) -AllClosed $hClosed
+    if ($hl -ne $script:HealthLevel) {
+        $script:HealthLevel = $hl
+        $pnlHealth.Invalidate()
+        $stTxt = if ($null -ne $script:LastDataTime) { $script:LastDataTime.ToString("HH:mm:ss") } else { "--:--:--" }
+        $hTip = switch ($hl) {
+            "OK"   { "Datenquelle Yahoo Finance: OK (letzte Aktualisierung $stTxt)" }
+            "WARN" { if ($script:LastRateLimited) { "Yahoo bremst gerade (Rate-Limit) - es geht nach einer Pause automatisch weiter. Letzte Daten: $stTxt" } else { "Daten etwas veraltet oder unvollständig. Letzte Aktualisierung: $stTxt" } }
+            "ERR"  { "Keine Verbindung zu Yahoo Finance oder Daten sehr alt. Letzte Aktualisierung: $stTxt. F5 versucht es sofort." }
+            default { "Noch keine Daten" }
+        }
+        Set-DynTip $pnlHealth $hTip
+    }
+}
+
+function Test-AllPrioClosed {
+    $mst = @(Get-PrioMarketStates)
+    return ($mst.Count -gt 0 -and @($mst | Where-Object { $_ -ne "CLOSED" }).Count -eq 0)
 }
 
 function Update-AllUiViews {
@@ -7195,7 +7554,13 @@ function Update-AllUiViews {
         $dl = Get-TrayDepotLine -Currency $curr
         if ($dl -and ($tt.Length + $dl.Length + 1) -le 63) { $tt = $tt + "`n" + $dl }
         $trayIcon.Text = if ($tt.Length -gt 63) { $tt.Substring(0, 63) } else { $tt }
-        Update-TrayIcon -Key $(if ($q.ChangePct -ge 0) { "up" } else { "down" })
+        # v4.9.5: the tray icon follows the depot's day result (setting), else the ticker
+        $trayKey = if ($q.ChangePct -ge 0) { "up" } else { "down" }
+        if ([bool]$script:Config.TrayFollowsDepot -and $script:Portfolio.Count -gt 0) {
+            $ptT = Get-PortfolioDayTotals -Currency $curr
+            if ($ptT.Ok) { $trayKey = Get-DirectionKey -Pct ([double]$ptT.DayPct) }
+        }
+        Update-TrayIcon -Key $trayKey
     } else {
         $lblLivePrice.Text = "--.-- $curr"
         $lblDayChange.ForeColor = $p.Muted
@@ -7256,6 +7621,8 @@ function Switch-ActiveTicker {
     $clean = $raw
 
     $script:Config.ActiveTicker = $clean
+    # v4.9.5: recent tickers for the search list (saved with the next config write)
+    $script:Config.RecentTickers = @(Add-RecentCommand -Recent @($script:Config.RecentTickers) -Command $clean -Max 10)
     $script:ActiveSeries        = @()
     $script:ActiveLoadError     = ""
     $lblHeaderName.Text         = "Lade $clean..."
@@ -7292,7 +7659,7 @@ function Switch-ActiveTicker {
 foreach ($k in $tabButtons.Keys) {
     $tabButtons[$k].Add_Click({
         param($sender, $e)
-        Set-ActiveTab -TabName ([string]$sender.Tag)
+        Invoke-TabClick -TabName ([string]$sender.Tag)
     })
 }
 
@@ -7380,11 +7747,12 @@ function Add-TransactionRecord {
 
 function Get-RealizedTotal {
     # Sum of realized P/L in the display currency (optionally one year only)
-    param([int]$Year = 0)
+    param([int]$Year = 0, [string]$Type = "")
     $curr = $script:Config.Currency
     $sum = 0.0
     foreach ($t in $script:Transactions) {
         if ($Year -gt 0 -and -not ([string]$t.Date).StartsWith([string]$Year)) { continue }
+        if ($Type -and [string]$t.Type -ne $Type) { continue }
         if ([double]$t.Realized -ne 0) { $sum += Convert-CurrencyValue -Amount $t.Realized -FromCurrency $t.Currency -ToCurrency $curr }
     }
     return $sum
@@ -9361,6 +9729,29 @@ function Show-NewsDialog {
     }
 }
 
+# v4.9.5: analyst target text (tooltip and DES)
+function Get-AnalystText {
+    param($Ev, [double]$Price, [string]$Currency)
+    if ($null -eq $Ev) { return "" }
+    $lines = @()
+    $tm = [double]$Ev.TargetMean
+    if (-not [double]::IsNaN($tm) -and $tm -gt 0) {
+        $up = Get-TargetUpside -Target $tm -Price $Price
+        $line = "Kursziel (Mittel): {0:N2} {1}" -f $tm, $Currency
+        if (-not [double]::IsNaN($up)) { $line += " ({0:+0.0;-0.0}%)" -f $up }
+        $lines += $line
+        if (-not [double]::IsNaN([double]$Ev.TargetLow) -and -not [double]::IsNaN([double]$Ev.TargetHigh)) { $lines += ("Spanne: {0:N2} - {1:N2}" -f [double]$Ev.TargetLow, [double]$Ev.TargetHigh) }
+    }
+    $lab = Get-ConsensusLabel ([string]$Ev.RecKey) -Long
+    if ($lab) {
+        $l2 = "Empfehlung: $lab"
+        if (-not [double]::IsNaN([double]$Ev.RecMean)) { $l2 += " ({0:N1} auf 1 = Kauf ... 5 = Verkauf)" -f [double]$Ev.RecMean }
+        $lines += $l2
+    }
+    if (-not [double]::IsNaN([double]$Ev.Analysts) -and [double]$Ev.Analysts -gt 0) { $lines += ("{0:N0} Analysten (Yahoo Finance)" -f [double]$Ev.Analysts) }
+    return ($lines -join "`r`n")
+}
+
 # ---- DES: description ----
 function Get-DescriptionRows {
     param([string]$Sym)
@@ -9398,6 +9789,22 @@ function Get-DescriptionRows {
         & $add "Zahltag" (Format-IsoDateDe $ev.DividendDate)
         if (-not [double]::IsNaN([double]$ev.DividendRate) -and [double]$ev.DividendRate -gt 0) { & $add "Dividende p.a." ("{0:N2}" -f $ev.DividendRate) }
         if (-not [double]::IsNaN([double]$ev.DividendYield) -and [double]$ev.DividendYield -gt 0) { & $add "Dividendenrendite" ("{0:N2}%" -f ([double]$ev.DividendYield * 100)) }
+        # v4.9.5: analysts
+        $tm = [double]$ev.TargetMean
+        if (-not [double]::IsNaN($tm) -and $tm -gt 0) {
+            $pNow = if ($null -ne $q) { [double]$q.Price } else { [double]::NaN }
+            $upD = Get-TargetUpside -Target $tm -Price $pNow
+            $cc = if ($null -ne $q) { [string]$q.Currency } else { "" }
+            $tTxt = "{0:N2} {1}" -f $tm, $cc
+            if (-not [double]::IsNaN($upD)) { $tTxt += " ({0:+0.0;-0.0}%)" -f $upD }
+            & $add "Kursziel Analysten" $tTxt $(if ([double]::IsNaN($upD)) { $null } else { Get-SignColor $upD })
+            if (-not [double]::IsNaN([double]$ev.TargetLow) -and -not [double]::IsNaN([double]$ev.TargetHigh)) { & $add "Kursziel-Spanne" ("{0:N2} - {1:N2}" -f [double]$ev.TargetLow, [double]$ev.TargetHigh) }
+        }
+        $cl = Get-ConsensusLabel ([string]$ev.RecKey) -Long
+        if ($cl) {
+            $nA = if (-not [double]::IsNaN([double]$ev.Analysts)) { " ({0:N0} Analysten)" -f [double]$ev.Analysts } else { "" }
+            & $add "Empfehlung" ($cl + $nA)
+        }
     }
     if ($script:Portfolio.ContainsKey($Sym)) {
         $pf = $script:Portfolio[$Sym]
@@ -9670,6 +10077,13 @@ function Invoke-TerminalCommand {
                 Update-AllUiViews
             }
             "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "FULL"   {
+                $fp = switch ($arg0) { "PORT" { "Portfolio" } "PORTFOLIO" { "Portfolio" } "WATCH" { "Watchlist" } "WL" { "Watchlist" } "NEWS" { "News" } default { "" } }
+                if ($arg0 -and -not $fp) { return "FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }
+                if ([string]$script:Config.Layout -ne "Terminal" -and $fp) { Set-ActiveTab -TabName $fp; return "" }
+                Set-TerminalFull $fp
+            }
+            "PRIV"   { if ($arg0 -eq "ON") { Set-PrivacyMode $true } elseif ($arg0 -eq "OFF") { Set-PrivacyMode $false } else { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) } }
             "SCALE"  {
                 if ($arg0 -eq "LOG") { Set-LogScale $true } elseif ($arg0 -eq "LIN") { Set-LogScale $false } else { Set-LogScale (-not [bool]$script:Config.LogScale) }
             }
@@ -9911,6 +10325,7 @@ function Get-TrayDepotLine {
     $pt = Get-PortfolioDayTotals -Currency $Currency
     if (-not $pt.Ok) { return "" }
     $d = $pt.Value - $pt.Prev
+    if ([bool]$script:Config.PrivacyMode) { return ("Depot {0:+0.00;-0.00}%" -f $pt.DayPct) }
     return ("Depot {0:+#,##0;-#,##0} {1} ({2:+0.00;-0.00}%)" -f $d, $Currency, $pt.DayPct)
 }
 
@@ -10578,45 +10993,143 @@ $script:Undo = $null
 function Set-Undo {
     param([string]$Kind, $Data, [string]$Text)
     $script:Undo = @{ Kind = $Kind; Data = $Data; Until = (Get-Date).AddSeconds(10) }
+    $script:Redo = $null
     Set-TransientStatus ("{0} - Strg+Z = rückgängig" -f $Text) 10
 }
 
+$script:Redo = $null
 function Invoke-Undo {
     $u = $script:Undo
     if (-not (Test-UndoValid -Undo $u)) { return $false }
     $script:Undo = $null
+    # v4.9.5: remember the state before undoing, so Ctrl+Y can redo it
+    $redoData = $null
     switch ($u.Kind) {
         "Alert" {
             $ix = [math]::Min([int]$u.Data.Index, $script:Alerts.Count)
             $script:Alerts.Insert($ix, $u.Data.Item)
             Save-Alerts
+            $redoData = @{ Item = $u.Data.Item }
         }
         "Position" {
-            $script:Portfolio[[string]$u.Data.Key] = $u.Data.Item
+            $k = [string]$u.Data.Key
+            $redoData = @{ Key = $k; Item = $(if ($script:Portfolio.ContainsKey($k)) { $script:Portfolio[$k] } else { $null }) }
+            $script:Portfolio[$k] = $u.Data.Item
             Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
         }
         "Watchlist" {
+            $redoData = @($script:Config.Watchlist)
             $script:Config.Watchlist = @($u.Data)
             Save-JsonState -Path $script:ConfigPath -Data $script:Config
         }
     }
-    Set-TransientStatus "Wiederhergestellt" 3
+    $script:Redo = @{ Kind = $u.Kind; Data = $redoData; Undo = $u; Until = (Get-Date).AddSeconds(30) }
+    Set-TransientStatus "Wiederhergestellt - Strg+Y = wiederholen" 4
     Refresh-AllMarketData
     Update-AllUiViews
     return $true
 }
 
+function Invoke-Redo {
+    # v4.9.5: Ctrl+Y redoes the last undo (within 30 seconds); Ctrl+Z works again after it
+    $r = $script:Redo
+    if (-not (Test-UndoValid -Undo $r)) { return $false }
+    $script:Redo = $null
+    switch ($r.Kind) {
+        "Alert" {
+            # by reference: PSCustomObjects all compare equal in List.Remove
+            for ($i = 0; $i -lt $script:Alerts.Count; $i++) {
+                if ([object]::ReferenceEquals($script:Alerts[$i], $r.Data.Item)) { $script:Alerts.RemoveAt($i); break }
+            }
+            Save-Alerts
+        }
+        "Position" {
+            $k = [string]$r.Data.Key
+            if ($null -eq $r.Data.Item) { [void]$script:Portfolio.Remove($k) } else { $script:Portfolio[$k] = $r.Data.Item }
+            Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
+        }
+        "Watchlist" {
+            $script:Config.Watchlist = @($r.Data)
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        }
+    }
+    $u = $r.Undo
+    $u.Until = (Get-Date).AddSeconds(10)
+    $script:Undo = $u
+    Set-TransientStatus "Wiederholt - Strg+Z = rückgängig" 4
+    Refresh-AllMarketData
+    Update-AllUiViews
+    return $true
+}
+
+# ---- v4.9.5: copy a list as a table (Ctrl+C) ----
+function Copy-GridAsTable {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $cols = @($Grid.Columns | Where-Object { $_.Visible -and $_.Name -ne "Spark" } | Sort-Object DisplayIndex)
+    if ($cols.Count -eq 0) { return $false }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Grid.Rows) {
+        if ($Grid -eq $dgvNews -and $null -eq $r.Tag) { continue }   # the "loading" line
+        $vals = @($cols | ForEach-Object { [string]$r.Cells[$_.Index].FormattedValue })
+        $rows.Add($vals)
+    }
+    if ($rows.Count -eq 0) { return $false }
+    $txt = ConvertTo-TsvTable -Headers @($cols | ForEach-Object { $_.HeaderText }) -Rows $rows.ToArray()
+    try { [System.Windows.Forms.Clipboard]::SetText($txt) } catch { Set-TransientStatus "Zwischenablage nicht verfügbar" 3; return $true }
+    Set-TransientStatus ("{0} Zeilen kopiert - in Excel oder eine Mail einfügen" -f $rows.Count) 4
+    return $true
+}
+
+# ---- v4.9.5: privacy mode (F9) ----
+function Set-PrivacyMode {
+    param([bool]$On)
+    $script:Config.PrivacyMode = $On
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    $script:LastTrayIconKey = ""
+    Set-TransientStatus $(if ($On) { "Privat-Modus an: Beträge ausgeblendet (F9 = aus)" } else { "Privat-Modus aus" }) 4
+    Update-PrivacyIndicator
+    Update-AllUiViews
+    if ($viewPortfolio.Visible) { Refresh-PortfolioGrid }
+}
+
+function Update-PrivacyIndicator {
+    # eye = amounts shown (click hides), crossed eye = hidden; tray menu tick
+    $on = [bool]$script:Config.PrivacyMode
+    if ($script:IconFont) {
+        $btnPrivacy.Text = if ($on) { [string][char]0xED1A } else { [string][char]0xE7B3 }
+    } else {
+        $btnPrivacy.Text = if ($on) { [string][char]0x2022 } else { "P" }
+    }
+    $btnPrivacy.ForeColor = if ($on) { $script:Pal.Accent } else { $script:Pal.Muted }
+    Set-DynTip $btnPrivacy $(if ($on) { "Privat-Modus an: Beträge ausgeblendet. Klick oder F9 = wieder zeigen." } else { "Beträge ausblenden (Privat-Modus, F9 / Fn+F9), z. B. beim Bildschirm teilen" })
+    $miPrivacy.Checked = $on
+    $b = $tabButtons["Portfolio"]
+    if ($null -eq $b) { return }
+    $want = if ([bool]$script:Config.PrivacyMode) { "Portfolio " + [string][char]0x2022 + [string][char]0x2022 } else { "Portfolio (F2)" }
+    if ($b.Text -ne (Tr $want)) { $b.Text = Tr $want }
+}
+
 # ---- price flash ----
 $script:LastFlashPrice = @{}
+# v4.9.5: the tint holds briefly, then fades back over ~0.6 s
+$script:FlashCells = New-Object System.Collections.Generic.List[object]
 $script:FlashTimer = New-Object System.Windows.Forms.Timer
-$script:FlashTimer.Interval = 900
+$script:FlashTimer.Interval = 50
 $script:FlashTimer.Add_Tick({
-    $script:FlashTimer.Stop()
-    foreach ($pair in @(@($dgvWatchlist, "Price"), @($dgvPortfolio, "Price"))) {
-        $g = $pair[0]
-        if ($null -eq $g.Columns[$pair[1]]) { continue }
-        foreach ($r in $g.Rows) { $r.Cells[$pair[1]].Style.BackColor = [System.Drawing.Color]::Empty }
+    $now = Get-Date
+    for ($i = $script:FlashCells.Count - 1; $i -ge 0; $i--) {
+        $f = $script:FlashCells[$i]
+        $a = Get-FlashAlpha -ElapsedMs (($now - $f.Start).TotalMilliseconds) -HoldMs 300 -FadeMs 600 -Max 0.35
+        try {
+            if ($a -le 0) {
+                $f.Cell.Style.BackColor = [System.Drawing.Color]::Empty
+                $script:FlashCells.RemoveAt($i)
+            } else {
+                $f.Cell.Style.BackColor = Get-BlendColor -A $f.Color -B $script:Pal.Card -T $a
+            }
+        } catch { $script:FlashCells.RemoveAt($i) }
     }
+    if ($script:FlashCells.Count -eq 0) { $script:FlashTimer.Stop() }
 })
 
 function Set-PriceFlash {
@@ -10628,8 +11141,8 @@ function Set-PriceFlash {
     if ($null -eq $old -or [math]::Abs([double]$old - $Price) -lt 1e-9) { return }
     $c = if ($Price -gt [double]$old) { $script:colGreen } else { $script:colRed }
     $Cell.Style.BackColor = Get-BlendColor -A $c -B $script:Pal.Card -T 0.35
-    $script:FlashTimer.Stop()
-    $script:FlashTimer.Start()
+    $script:FlashCells.Add([PSCustomObject]@{ Cell = $Cell; Color = $c; Start = (Get-Date) })
+    if (-not $script:FlashTimer.Enabled) { $script:FlashTimer.Start() }
 }
 
 # ---- own layouts ----
@@ -11050,6 +11563,7 @@ function Show-SettingsDialog {
     $cbUd     = & $addCombo "Farben für Plus / Minus" @(@((Get-UpDownSchemes).Keys) + @("Eigene")) ([string]$cfg.UpDownScheme) "Farbenblind = Blau / Orange. Eigene = frei wählen." "COLORS"
     $chkArrow = & $addCheck "Pfeile vor Veränderungen anzeigen" ([bool]$cfg.ShowArrows) "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" "COLORS"
     $chkFlash = & $addCheck "Kurs kurz einfärben, wenn er sich ändert" ([bool]$cfg.PriceFlash)
+    $chkTrayDepot = & $addCheck "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" ([bool]$cfg.TrayFollowsDepot) "Grün / Rot / Grau nach dem heutigen Ergebnis des Depots. Ohne Positionen: aktiver Ticker."
     $chkSnap  = & $addCheck "Fenster am Bildschirmrand einrasten" ([bool]$cfg.SnapToEdges)
     $lHk = New-Object System.Windows.Forms.Label
     $lHk.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
@@ -11098,13 +11612,43 @@ function Show-SettingsDialog {
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
     $cbMono  = & $addCombo "Schrift für Zahlen (ab Neustart)" $monoOffered ([string]$cfg.MonoFont) "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal."
     $scaleItems = @(Get-FontScaleSteps | ForEach-Object { "$_ %" })
-    $cbScale = & $addCombo "Schriftgröße (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Größer = besser lesbar, braucht aber mehr Platz in den Spalten"
+    $cbScale = & $addCombo "Schriftgröße Listen + Chart (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Vergrößert Tabellen (Zeilenhöhe wächst mit) und Chart-Beschriftung. Knöpfe und Eingabefelder bleiben gleich groß, damit nichts abgeschnitten wird."
     $chkAlignR = & $addCheck "Zahlen rechtsbündig (Watchlist, Portfolio)" ([bool]$cfg.AlignNumbersRight) "Ziffern bleiben beim Aktualisieren an ihrem Platz"
     $chkRound  = & $addCheck "Abgerundete Fensterecken (Windows 11)" ([bool]$cfg.RoundCorners)
 
     & $addSection "Nachrichten (F4)"
     $nNewsMin  = & $addNum "Neu laden alle (Minuten)" 5 240 ([int]$cfg.NewsRefreshMinutes) "Eine Abfrage je Ticker in Depot und Watchlist (max. 40). Sind alle Börsen zu, halb so oft." "" 5
-    $nNewsMove = & $addNum "Ticker markieren ab Tagesbewegung (%)" 0 50 ([int]$cfg.NewsMoveThreshold) "Zeigt bei der Meldung, dass sich der Ticker heute stark bewegt (0 = aus)"
+    $nNewsMove = & $addNum "Ticker markieren ab Tagesbewegung (%)" 0 50 ([int]$cfg.NewsMoveThreshold) "Zeigt bei der neuesten Meldung, dass sich der Ticker heute stark bewegt (0 = aus)"
+    # v4.9.5: keyword alerts + muted sources
+    $lKw = New-Object System.Windows.Forms.Label
+    $lKw.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
+    $lKw.Size = New-Object System.Drawing.Size((S 140), (S 18))
+    $lKw.Text = "Alarm-Wörter"
+    $dlg.Controls.Add($lKw)
+    $tKw = New-Object System.Windows.Forms.TextBox
+    $tKw.SetBounds(($lay.X + (S 170)), $lay.Y, (S 234), (S 22))
+    $tKw.BackColor = $p.Input; $tKw.ForeColor = $p.Text; $tKw.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tKw.Font = $fontMono; $tKw.Text = [string]$cfg.NewsKeywords
+    $dlg.Controls.Add($tKw)
+    $kwTip = "Kommagetrennt, z. B.: downgrade, gewinnwarnung, übernahme, profit warning. Kommt eine Schlagzeile mit so einem Wort zu einem Ticker im Depot, gibt es einen Hinweis (und Handy-Push, falls eingerichtet). Leer = aus."
+    Set-DynTip $tKw $kwTip; Set-DynTip $lKw $kwTip
+    $lay.Y += S 29
+    $chkKwWatch = & $addCheck "Alarm-Wörter auch für Watchlist-Ticker" ([bool]$cfg.NewsKeywordWatch)
+    $script:NewMuted = @($cfg.NewsMuted | Where-Object { $_ })
+    $btnMuted = New-Object System.Windows.Forms.Button
+    $btnMuted.SetBounds(($lay.X + (S 26)), $lay.Y, (S 230), (S 26))
+    Style-FlatButton -Btn $btnMuted -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnMuted.Text = "{0} ({1})" -f "Ausgeblendete Quellen zeigen", @($script:NewMuted).Count
+    $btnMuted.Enabled = (@($script:NewMuted).Count -gt 0)
+    Set-DynTip $btnMuted ("Ausgeblendet: " + $(if (@($script:NewMuted).Count -gt 0) { @($script:NewMuted) -join ", " } else { "keine" }) + ". Klick = alle wieder zeigen. Einzelne Quellen: Rechtsklick in der News-Liste.")
+    $btnMuted.Add_Click({
+        param($sender, $e)
+        $script:NewMuted = @()
+        $sender.Text = "{0} (0)" -f (Tr "Ausgeblendete Quellen zeigen")
+        $sender.Enabled = $false
+    })
+    $dlg.Controls.Add($btnMuted)
+    $lay.Y += S 32
 
     & $addSection "Erklärungen (Maus darüber)"
     $modes = Get-TooltipModes
@@ -11258,6 +11802,7 @@ function Show-SettingsDialog {
     if ($cfg.AccentColor -eq "Eigene" -and -not $cfg.AccentHex) { $cfg.AccentColor = "Sky" }
     $cfg.ShowArrows            = [bool]$chkArrow.Checked
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
+    $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked
     # v4.9
     $newMono  = [string]$cbMono.SelectedItem
@@ -11270,6 +11815,9 @@ function Show-SettingsDialog {
     $newsMinChanged = ([int]$nNewsMin.Value -ne [int]$cfg.NewsRefreshMinutes)
     $cfg.NewsRefreshMinutes    = [int]$nNewsMin.Value
     $cfg.NewsMoveThreshold     = [int]$nNewsMove.Value
+    $cfg.NewsKeywords          = (@(ConvertTo-KeywordList $tKw.Text) -join ", ")
+    $cfg.NewsKeywordWatch      = [bool]$chkKwWatch.Checked
+    $cfg.NewsMuted             = @($script:NewMuted)
     $hkNew = $tHk.Text.Trim()
     $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
     if (-not $hkNew -or $null -ne (ConvertFrom-HotkeyText $hkNew)) { $cfg.GlobalHotkey = $hkNew }
@@ -11391,6 +11939,10 @@ F5              Refresh now
 Ctrl+F          Search ticker
 Ctrl+K          Command line (also numpad /)
 Ctrl+Z          Undo the last deletion (10 seconds)
+Ctrl+Y          Redo (30 seconds)
+Ctrl+C          Copy the whole list as a table
+F9              Privacy mode (hide amounts; Fn+F9 on many laptops)
+Shift+F2/F3/F4  Terminal layout: list as a full page (Esc = back)
 Ctrl+Alt+W      Show / hide the widget from anywhere
 Left / Right    Previous / next watchlist ticker
 1 - 6           Range 1D / 5D / 1M / 3M / 6M / 1Y
@@ -11449,6 +12001,18 @@ Compact   Leiste mit Marktstatus und Laufband
 Standard  Fenster mit Tabs
 Terminal  Chart oben, Watchlist + Portfolio darunter
           (oder die News: F4 / NEWS)
+          Tab einer sichtbaren Liste nochmal klicken
+          (oder Shift+F2/F3/F4) = Liste als ganze Seite,
+          F1 / Esc = zurück
+
+F9 (am Laptop oft Fn+F9) oder Augen-Knopf im Portfolio:
+Privat-Modus (Beträge aus), Ctrl+Y: wiederholen,
+Ctrl+C in einer Liste: ganze Tabelle kopieren.
+Rechtsklick auf einen Ticker (Watchlist / Portfolio):
+Chart, Alarm, Kauf buchen, News, Vergleich, DES.
+Rechtsklick auf einen Alarm: pausieren (1 h / 4 h / morgen).
+Punkt links von der Statuszeile: grün = Daten ok,
+gelb = Pause / veraltet, rot = keine Verbindung.
 
 News (F4): Meldungen zu Depot und Watchlist, neue fett,
 die Zahl am Tab = ungelesen. Doppelklick = Artikel,
@@ -11713,6 +12277,8 @@ $dgvPortfolio.Add_CellEndEdit({
 })
 $dgvPortfolio.Add_CellBeginEdit({
     param($sender, $e)
+    # v4.9.5: no editing of hidden values
+    if ([bool]$script:Config.PrivacyMode) { $e.Cancel = $true; Set-TransientStatus (Tr "Privat-Modus: erst F9 drücken, dann bearbeiten") 4; return }
     # remember the position for Ctrl+Z
     $sym = ([string]$sender.Rows[$e.RowIndex].Cells["Ticker"].Value).ToUpper()
     if ($script:Portfolio.ContainsKey($sym)) {
@@ -12052,6 +12618,53 @@ $btnWlAddSearch.Add_Click({
     }
 })
 
+# v4.9.5: right-click actions on a ticker (watchlist and portfolio)
+$script:RowMenuSym = ""
+$rowMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miRowChart = $rowMenu.Items.Add("Chart öffnen")
+$miRowAlert = $rowMenu.Items.Add("Alarm anlegen ...")
+$miRowBuy   = $rowMenu.Items.Add("Kauf / Verkauf buchen ...")
+$miRowNews  = $rowMenu.Items.Add("Nachrichten (News-Tab)")
+$miRowCmp   = $rowMenu.Items.Add("Im Chart vergleichen")
+$miRowDes   = $rowMenu.Items.Add("Beschreibung (DES)")
+$miRowSep   = New-Object System.Windows.Forms.ToolStripSeparator
+[void]$rowMenu.Items.Add($miRowSep)
+$miRowRemove = $rowMenu.Items.Add("Aus der Watchlist entfernen")
+$miRowChart.Add_Click({ $s0 = $script:RowMenuSym; if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" }; Switch-ActiveTicker -NewTicker $s0 -SkipResolve $true })
+$miRowAlert.Add_Click({
+    $s0 = $script:RowMenuSym
+    Set-ActiveTab -TabName "Watchlist"
+    $txtAlertTicker.Text = $s0
+    [void]$txtAlertPrice.Focus()
+    Set-TransientStatus ("Alarm für {0}: Bedingung und Wert eintragen, dann '+'" -f $s0) 5
+})
+$miRowBuy.Add_Click({ Show-TransactionDialog -Ticker $script:RowMenuSym })
+$miRowNews.Add_Click({ Set-NewsFilter $script:RowMenuSym; Set-ActiveTab -TabName "News" })
+$miRowCmp.Add_Click({
+    $s0 = $script:RowMenuSym
+    if ($s0 -eq ([string]$script:Config.ActiveTicker).ToUpper()) { Set-TransientStatus "Das ist der aktive Ticker - erst einen anderen öffnen" 4; return }
+    Set-CompareTicker -Symbol $s0
+    if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" }
+})
+$miRowDes.Add_Click({ Show-DescriptionDialog $script:RowMenuSym })
+$miRowRemove.Add_Click({ Remove-SymbolFromWatchlist -Symbol $script:RowMenuSym })
+$script:RowMenuHandler = {
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right -or $e.RowIndex -lt 0) { return }
+    $sym = ([string]$sender.Rows[$e.RowIndex].Cells[0].Value).Trim().ToUpper()
+    if (-not $sym) { return }
+    $script:RowMenuSym = $sym
+    $sender.ClearSelection()
+    $sender.Rows[$e.RowIndex].Selected = $true
+    $inWl = (@($script:Config.Watchlist | ForEach-Object { ([string]$_).ToUpper() }) -contains $sym)
+    $miRowRemove.Visible = $inWl -and ($sender -eq $dgvWatchlist)
+    $miRowSep.Visible = $miRowRemove.Visible
+    $miRowChart.Text = "{0}: {1}" -f (Tr "Chart öffnen"), $sym
+    $rowMenu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
+}
+$dgvWatchlist.Add_CellMouseDown($script:RowMenuHandler)
+$dgvPortfolio.Add_CellMouseDown($script:RowMenuHandler)
+
 $dgvWatchlist.Add_CellDoubleClick({
     param($sender, $e)
     if ($e.RowIndex -ge 0) {
@@ -12235,6 +12848,41 @@ $lstAlerts.Add_DoubleClick({
 
 $btnAlertLog.Add_Click({ Show-AlertLogDialog })
 
+# v4.9.5: snooze an alert (right-click in the alert list)
+function Set-AlertSnooze {
+    param([int]$Index, [string]$Kind)
+    if ($Index -lt 0 -or $Index -ge $script:Alerts.Count) { return }
+    $al = $script:Alerts[$Index]
+    $until = Get-SnoozeUntil -Kind $Kind
+    $v = if ($until -gt [DateTime]::MinValue) { $until.ToString("o") } else { "" }
+    $al | Add-Member -NotePropertyName SnoozeUntil -NotePropertyValue $v -Force
+    Save-Alerts
+    Refresh-WatchlistAndAlerts
+    if ($v) { Set-TransientStatus ("Alarm {0} pausiert bis {1:dd.MM. HH:mm}" -f $al.Ticker, $until) 4 } else { Set-TransientStatus ("Alarm {0} wieder aktiv" -f $al.Ticker) 3 }
+}
+$alertMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miSnz1 = $alertMenu.Items.Add("1 Stunde pausieren")
+$miSnz4 = $alertMenu.Items.Add("4 Stunden pausieren")
+$miSnzT = $alertMenu.Items.Add("Bis morgen 08:00 pausieren")
+$miSnzOff = $alertMenu.Items.Add("Pause beenden")
+[void]$alertMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miAlDel = $alertMenu.Items.Add("Löschen (Entf)")
+$miSnz1.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "1h" })
+$miSnz4.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "4h" })
+$miSnzT.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "Tomorrow" })
+$miSnzOff.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "" })
+$miAlDel.Add_Click({ $btnDelAlert.PerformClick() })
+$lstAlerts.Add_MouseUp({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) { return }
+    $i = $sender.IndexFromPoint($e.Location)
+    if ($i -lt 0 -or $i -ge $script:Alerts.Count) { return }
+    $sender.SelectedIndex = $i
+    $snz = Test-AlertSnoozed -Alert $script:Alerts[$i]
+    $miSnzOff.Enabled = $snz
+    $alertMenu.Show($sender, $e.Location)
+})
+
 # Header Ticker Dropdown & Live Search Events
 $btnTickerDrop.Add_Click({
     $lstCurrencyDropdown.Visible = $false
@@ -12380,6 +13028,12 @@ $script:GlobalKeyHandler = {
         Close-ChartFullscreen
         return
     }
+    # v4.9.5: Esc leaves the full-page list (not while a drop-down is open)
+    if (-not $isFs -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:TerminalFull -and -not $lstTickerDropdown.Visible -and -not $lstWlSearchDropdown.Visible) {
+        $e.Handled = $true
+        Set-TerminalFull ""
+        return
+    }
     # Ctrl+F: jump to the ticker search (main window only)
     if (-not $isFs -and $e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
         $e.Handled = $true
@@ -12393,6 +13047,9 @@ $script:GlobalKeyHandler = {
     if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Z -and -not ($sender.ActiveControl -is [System.Windows.Forms.TextBox])) {
         if (Invoke-Undo) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
     }
+    if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Y -and -not ($sender.ActiveControl -is [System.Windows.Forms.TextBox])) {
+        if (Invoke-Redo) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+    }
     # v4.4: Ctrl+K = command line (works in the fullscreen chart too)
     if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::K) {
         $e.Handled = $true
@@ -12400,12 +13057,20 @@ $script:GlobalKeyHandler = {
         Show-CommandPalette
         return
     }
+    # v4.9.5: Ctrl+C in a list copies the whole table (visible columns, display order)
+    if ($e.Control -and -not $e.Alt -and -not $e.Shift -and $e.KeyCode -eq [System.Windows.Forms.Keys]::C) {
+        $gc = $sender.ActiveControl
+        if ($gc -is [System.Windows.Forms.DataGridView] -and -not $gc.IsCurrentCellInEditMode -and $gc.Rows.Count -gt 0) {
+            if (Copy-GridAsTable -Grid $gc) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
+        }
+    }
     # Other Ctrl/Alt combos (Ctrl+C, Alt+F4, ...) are never widget shortcuts
     if ($e.Control -or $e.Alt) { return }
     $ac = $sender.ActiveControl
     $isFKey = $e.KeyCode -in @([System.Windows.Forms.Keys]::F1, [System.Windows.Forms.Keys]::F2, [System.Windows.Forms.Keys]::F3, [System.Windows.Forms.Keys]::F5)
     # v4.9: F4 = News, except in a drop-down (F4 opens it there, as in every Windows list)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::F4 -and -not ($ac -is [System.Windows.Forms.ComboBox])) { $isFKey = $true }
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::F9) { $isFKey = $true }
     # Typing into inputs/lists must not trigger letter shortcuts (F-keys still work)
     if (($ac -is [System.Windows.Forms.TextBox] -or $ac -is [System.Windows.Forms.ComboBox] -or $ac -is [System.Windows.Forms.ListBox]) -and -not $isFKey) { return }
     # Arrow keys belong to the grid when a grid has focus
@@ -12424,10 +13089,11 @@ $script:GlobalKeyHandler = {
     }
 
     switch ($e.KeyCode) {
-        ([System.Windows.Forms.Keys]::F1) { Set-ActiveTab -TabName "Chart"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F2) { Set-ActiveTab -TabName "Portfolio"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F3) { Set-ActiveTab -TabName "Watchlist"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F4) { Set-ActiveTab -TabName "News"; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F1) { Invoke-TabClick -TabName "Chart"; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F2) { Invoke-TabClick -TabName "Portfolio" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F3) { Invoke-TabClick -TabName "Watchlist" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F4) { Invoke-TabClick -TabName "News" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F9) { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F5) {
             Refresh-AllMarketData -Force; Evaluate-GlobalAlerts; Update-AllUiViews; $e.Handled = $true
         }
@@ -12614,8 +13280,7 @@ $uiTimer.Add_Tick({
         }
         # v4.9: news feed (also in the background, for the unread count)
         if ($script:StartupDone -and $nowTick -ge $script:NextNewsLoad) {
-            $mst = @(Get-PrioMarketStates)
-            $allClosed = ($mst.Count -gt 0 -and @($mst | Where-Object { $_ -ne "CLOSED" }).Count -eq 0)
+            $allClosed = Test-AllPrioClosed
             $script:NextNewsLoad = $nowTick.AddMinutes((Get-NewsPollMinutes -Minutes ([int]$script:Config.NewsRefreshMinutes) -AllClosed $allClosed))
             Start-NewsLoad
         }
@@ -12654,6 +13319,7 @@ $form.Add_Shown({
         $form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
     }
     $script:StartupDone = $true
+    Update-PrivacyIndicator
     # Start with focus on a button, not the search box (which used to pop the dropdown open)
     if (-not $script:Config.CompactMode) { $tabButtons[$script:Config.ActiveTab].Select() } else { $btnCompact.Select() }
     Refresh-AllMarketData -Force
@@ -12779,8 +13445,107 @@ function Invoke-SmokeTest {
         Set-ActiveTab -TabName "Chart"; & $pump
     }
     Invoke-SmokeStep "News in Terminal" { Apply-Layout "Terminal"; Set-ActiveTab -TabName "News"; & $pump; Set-ActiveTab -TabName "Watchlist"; Apply-Layout "Standard"; & $pump }
+    # v4.9.5
+    Invoke-SmokeStep "News mute + menu" {
+        Set-ActiveTab -TabName "News"; & $pump
+        $first = @($script:NewsItems | Where-Object { $_.Publisher })[0]
+        if ($null -ne $first) {
+            $script:NewsMenuItem = $first
+            $miNewsMute.PerformClick(); & $pump
+            if (@($script:Config.NewsMuted).Count -lt 1) { throw "source not muted" }
+            $script:Config.NewsMuted = @()
+            Refresh-NewsGrid
+        }
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "News keywords" {
+        $before = $script:AlertLog.Count
+        $script:Config.NewsKeywords = "smoke"
+        $script:Config.NewsKeywordLastAt = (Get-Date).AddDays(-1).ToString("o")
+        $script:NewsItems = @([PSCustomObject]@{ Key = "smoke-kw"; Title = "Smoke test headline"; Publisher = "Test"; Link = ""; Time = (Get-Date).AddMinutes(-1); Syms = @("NVDA") }) + @($script:NewsItems)
+        Invoke-NewsKeywordCheck
+        if ($script:AlertLog.Count -le $before) { throw "no keyword notice logged" }
+        $script:Config.NewsKeywords = ""
+    }
+    Invoke-SmokeStep "Privacy mode" {
+        Set-ActiveTab -TabName "Portfolio"
+        Set-PrivacyMode $true; & $pump
+        if ($lblPortSummary.Text -notmatch [string][char]0x2022) { throw "summary not masked: $($lblPortSummary.Text)" }
+        Set-PrivacyMode $false; & $pump
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Undo + redo" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump   # PerformClick needs a visible button
+        $script:Alerts.Add([PSCustomObject]@{ Id = "r"; Ticker = "MSFT"; Condition = ">="; TargetPrice = 99999.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
+        Refresh-WatchlistAndAlerts
+        $n0 = $script:Alerts.Count
+        $lstAlerts.SelectedIndex = $n0 - 1
+        $btnDelAlert.PerformClick()
+        if (-not (Invoke-Undo)) { throw "undo failed" }
+        if (-not (Invoke-Redo)) { throw "redo failed" }
+        if ($script:Alerts.Count -ne ($n0 - 1)) { throw "redo did not delete again ($($script:Alerts.Count))" }
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Alert snooze" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        if ($script:Alerts.Count -gt 0) {
+            Set-AlertSnooze -Index 0 -Kind "1h"
+            if (-not (Test-AlertSnoozed -Alert $script:Alerts[0])) { throw "not snoozed" }
+            if ([string]$lstAlerts.Items[0] -notlike "*ZZZ*") { throw "list does not show the pause" }
+            Set-AlertSnooze -Index 0 -Kind ""
+        }
+    }
+    Invoke-SmokeStep "Watchlist extras" {
+        $dgvWatchlist.Columns["Target"].Visible = $true
+        Refresh-WatchlistAndAlerts; & $pump
+        $dgvWatchlist.Columns["Target"].Visible = $false
+        Refresh-WatchlistAndAlerts
+        foreach ($mi in @($miRowNews, $miRowCmp, $miRowAlert)) { $script:RowMenuSym = "MSFT"; $mi.PerformClick(); & $pump }
+        Set-CompareTicker -Symbol ""
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Copy table" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        [void](Copy-GridAsTable -Grid $dgvWatchlist)
+        Set-ActiveTab -TabName "Portfolio"; & $pump
+        [void](Copy-GridAsTable -Grid $dgvPortfolio)
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Keys F9 + full page" {
+        $key = { param([System.Windows.Forms.Keys]$K) & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs($K)); & $pump }
+        $was = [bool]$script:Config.PrivacyMode
+        & $key ([System.Windows.Forms.Keys]::F9)
+        if ([bool]$script:Config.PrivacyMode -eq $was) { throw "F9 did not toggle the privacy mode" }
+        & $key ([System.Windows.Forms.Keys]::F9)
+        Set-ActiveTab -TabName "Portfolio"; & $pump   # PerformClick needs a visible button
+        $btnPrivacy.PerformClick(); & $pump
+        if (-not [bool]$script:Config.PrivacyMode) { throw "privacy button did not switch it on" }
+        Set-PrivacyMode $false
+        Apply-Layout "Terminal"; & $pump
+        & $key ([System.Windows.Forms.Keys]::F2 -bor [System.Windows.Forms.Keys]::Shift)
+        if ($script:TerminalFull -ne "Portfolio" -or [bool]$script:ViewOn["Chart"]) { throw "Shift+F2 did not show the portfolio as a full page" }
+        & $key ([System.Windows.Forms.Keys]::Escape)
+        if ($script:TerminalFull -or -not [bool]$script:ViewOn["Chart"]) { throw "Esc did not return to the split view" }
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        $tabButtons["Watchlist"].PerformClick(); & $pump
+        if ($script:TerminalFull -ne "Watchlist") { throw "second click on a shown tab did not open the full page" }
+        $tabButtons["News"].PerformClick(); & $pump
+        if ($script:TerminalFull -ne "News") { throw "full page did not follow the tab" }
+        $tabButtons["Chart"].PerformClick(); & $pump
+        if ($script:TerminalFull) { throw "Chart did not leave the full page" }
+        [void](Invoke-TerminalCommand "FULL PORT"); & $pump
+        [void](Invoke-TerminalCommand "FULL"); & $pump
+        Apply-Layout "Standard"; & $pump
+    }
+    Invoke-SmokeStep "Prev close + health" {
+        Set-Timeframe -Tf "1d"; & $pump
+        $cmiPrevClose.PerformClick(); & $pump
+        $cmiPrevClose.PerformClick(); & $pump
+        Update-StatusLine
+        if (-not $script:HealthLevel) { throw "no health level after refresh" }
+    }
     foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
-    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL", "NEWS DEPOT", "NEWS MSFT", "NEWS", "N")) {
+    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL", "NEWS DEPOT", "NEWS MSFT", "NEWS", "N", "PRIV ON", "PRIV OFF")) {
         Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
     }
     Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
