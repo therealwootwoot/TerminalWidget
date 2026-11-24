@@ -1982,6 +1982,23 @@ Describe "Workspace (v5.0)" {
     }
 }
 
+Describe "Currency (v5.1)" {
+    It "guesses the trading currency from the exchange suffix" {
+        Get-TickerCurrencyGuess "ABBN.SW" | Should -Be "CHF"
+        Get-TickerCurrencyGuess "sap.de" | Should -Be "EUR"
+        Get-TickerCurrencyGuess "NVDA" | Should -Be "USD"
+        Get-TickerCurrencyGuess "VOD.L" | Should -Be "GBP"
+        Get-TickerCurrencyGuess "EURUSD=X" | Should -Be "USD"
+        Get-TickerCurrencyGuess "^GDAXI" | Should -Be ""
+        Get-TickerCurrencyGuess "XYZ.QQ" | Should -Be ""
+    }
+    It "cycles Auto and the fixed currencies with W" {
+        Get-NextCurrencyMode -Current "CHF" -Auto $true | Should -Be "EUR"
+        Get-NextCurrencyMode -Current "EUR" -Auto $false | Should -Be "USD"
+        Get-NextCurrencyMode -Current "GBP" -Auto $false | Should -Be "AUTO"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

@@ -465,6 +465,7 @@ $defaultConfig = [PSCustomObject]@{
     ActiveTicker          = "NVDA"
     ActiveTab             = "Chart"
     Currency              = "EUR"
+    AutoCurrency          = $true             # v5.1: price + chart in the ticker's own currency (depot stays in Currency)
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -1097,6 +1098,7 @@ $script:ActiveBbUpper     = @()
 $script:ActiveBbLower     = @()
 $script:ActivePrevClose   = 0.0
 $script:ActiveNativeCurr  = "USD"
+$script:ChartCur          = "EUR"   # v5.1: currency the active chart series is in
 $script:ActiveLongName    = ""
 $script:ActiveLoadError   = ""
 
@@ -1596,6 +1598,25 @@ function Convert-CurrencyValue {
     return (($val / $fromRate) * $toRate)
 }
 
+# v5.1: currency a ticker's price is shown in. With "Auto" it is the ticker's
+# own trading currency (ABBN.SW in CHF, SAP.DE in EUR); depot values, sums and
+# the portfolio always stay in the base currency $script:Config.Currency.
+function Get-PriceCurrency {
+    param([string]$Symbol)
+    if (-not [bool]$script:Config.AutoCurrency) { return [string]$script:Config.Currency }
+    $u = ([string]$Symbol).ToUpper()
+    $raw = ""
+    if ($script:QuoteStore.ContainsKey($u) -and $script:QuoteStore[$u].Currency) { $raw = [string]$script:QuoteStore[$u].Currency }
+    elseif ($script:Portfolio.ContainsKey($u) -and $script:Portfolio[$u].Currency) { $raw = [string]$script:Portfolio[$u].Currency }
+    if ($raw) {
+        $n = (Normalize-CurrencyAndPrice -Price 1.0 -RawCurrency $raw).Currency
+        if ($n -match '^[A-Z]{3}$') { return $n }
+    }
+    $g = Get-TickerCurrencyGuess $u
+    if ($g) { return $g }
+    return [string]$script:Config.Currency
+}
+
 
 
 
@@ -1851,7 +1872,9 @@ function New-RefreshPlan {
     # Snapshot of what this refresh is for (user may change it mid-flight)
     $active   = $script:Config.ActiveTicker.ToUpper()
     $tf       = [string]$script:Config.Timeframe
-    $dispCurr = [string]$script:Config.Currency
+    $dispCurr = Get-PriceCurrency $active
+    $cfgCur   = [string]$script:Config.Currency
+    $autoCur  = [bool]$script:Config.AutoCurrency
     $extCfg   = [bool]$script:Config.ShowExtended
     $useExt   = $extCfg -and $tf -eq "1d"
     $tfParams = Get-TimeframeParams -Tf $tf
@@ -1939,9 +1962,11 @@ function New-RefreshPlan {
         Active         = $active
         Tf             = $tf
         DispCurr       = $dispCurr
+        CfgCur         = $cfgCur
+        AutoCur        = $autoCur
         ExtCfg         = $extCfg
         UseExt         = $useExt
-        SeriesKey      = "$active|$tf|$dispCurr|$useExt"
+        SeriesKey      = "$active|$tf|$(if ($autoCur) { 'AUTO' } else { $dispCurr })|$useExt"
         Now            = $now
         SlowDue        = [bool]$slowDue
         AllTickers     = @($allTickers)
@@ -2116,7 +2141,7 @@ function Apply-RefreshResults {
 
     # The user switched ticker/timeframe/currency while we were fetching:
     # don't paint stale chart data, refresh again for the new selection.
-    if ($active -ne $script:Config.ActiveTicker.ToUpper() -or $tf -ne $script:Config.Timeframe -or $dispCurr -ne $script:Config.Currency -or $Plan.ExtCfg -ne [bool]$script:Config.ShowExtended) {
+    if ($active -ne $script:Config.ActiveTicker.ToUpper() -or $tf -ne $script:Config.Timeframe -or $Plan.CfgCur -ne [string]$script:Config.Currency -or $Plan.AutoCur -ne [bool]$script:Config.AutoCurrency -or $Plan.ExtCfg -ne [bool]$script:Config.ShowExtended) {
         $script:RefreshPending = $true
         return
     }
@@ -2365,6 +2390,9 @@ function Build-ActiveChartSeries {
     $unit     = (Normalize-CurrencyAndPrice -Price 1.0 -RawCurrency $rawCurr0).Price
 
     $script:ActiveNativeCurr = $normMeta.Currency
+    # v5.1: auto currency follows what Yahoo says the ticker trades in
+    if ($Plan.AutoCur) { $dispCurr = $normMeta.Currency }
+    $script:ChartCur = $dispCurr
     $script:ActiveLongName   = if ($meta0.shortName) { [string]$meta0.shortName } else { $active }
     $script:ActiveGmtOffset  = if ($null -ne $meta0.gmtoffset) { [int]$meta0.gmtoffset } else { 0 }
     $tp0 = Get-TradingPeriodInfo -Meta $meta0
@@ -2787,7 +2815,7 @@ function Draw-MiniSparkline {
 
 function Get-ActiveSeriesKey {
     $useExt = [bool]$script:Config.ShowExtended -and $script:Config.Timeframe -eq "1d"
-    return ("{0}|{1}|{2}|{3}" -f $script:Config.ActiveTicker.ToUpper(), $script:Config.Timeframe, $script:Config.Currency, $useExt)
+    return ("{0}|{1}|{2}|{3}" -f $script:Config.ActiveTicker.ToUpper(), $script:Config.Timeframe, $(if ([bool]$script:Config.AutoCurrency) { "AUTO" } else { $script:Config.Currency }), $useExt)
 }
 
 function Render-ChartAndRsi {
@@ -3277,7 +3305,7 @@ function Render-ChartAndRsi {
                 foreach ($tx in $txA) {
                     $ti = $dayIdx[[string]$tx.Date]
                     if ($null -eq $ti) { continue }
-                    $tpx = Convert-CurrencyValue -Amount ([double]$tx.Price) -FromCurrency ([string]$tx.Currency) -ToCurrency ([string]$script:Config.Currency)
+                    $tpx = Convert-CurrencyValue -Amount ([double]$tx.Price) -FromCurrency ([string]$tx.Currency) -ToCurrency ([string]$script:ChartCur)
                     if ($tpx -le 0) { continue }
                     $tx0 = $priceRect.Left + (([int]$ti / [double]($n - 1)) * $priceRect.Width)
                     $ty0 = $priceRect.Bottom - ((Get-PriceFrac $tpx $minP $spanP $isLog) * $priceRect.Height)
@@ -3556,7 +3584,7 @@ function Format-LevelPrice {
 function Get-ChartLevels {
     # EK of the position + price alerts of the active ticker, in display currency
     $sym  = $script:Config.ActiveTicker.ToUpper()
-    $curr = $script:Config.Currency
+    $curr = [string]$script:ChartCur
     $out = @()
     if ($script:Portfolio.ContainsKey($sym)) {
         $pp = $script:Portfolio[$sym]
@@ -3640,7 +3668,7 @@ function Render-ChartOverlay {
 
     # v5.0: line being drawn (first point fixed, second at the mouse)
     if ($null -ne $script:DrawPending -and $null -ne $script:DrawMouse -and $n -ge 2) {
-        $tmp = [PSCustomObject]@{ Kind = "T"; T1 = [long]$script:DrawPending.T; P1 = [double]$script:DrawPending.P; T2 = [long]$script:DrawMouse.T; P2 = [double]$script:DrawMouse.P; Cur = [string]$script:Config.Currency }
+        $tmp = [PSCustomObject]@{ Kind = "T"; T1 = [long]$script:DrawPending.T; P1 = [double]$script:DrawPending.P; T2 = [long]$script:DrawMouse.T; P2 = [double]$script:DrawMouse.P; Cur = [string]$script:ChartCur }
         $pxT = Get-DrawingPixels -L $L -D $tmp
         $rb = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(250, 204, 21), [float]1.5)
         $rb.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
@@ -3726,7 +3754,7 @@ function Render-ChartOverlay {
     $hudTxt = if ($L.IsCandle) {
         "{0} | O:{1:N2} H:{2:N2} L:{3:N2} C:{4:N2}{5}{6}{7}" -f $hDt, $hPt.Open, $hPt.High, $hPt.Low, $hPt.Close, $hChg, $hVol, $hRsi
     } else {
-        "{0} | C: {1:N2} {2}{3}{4}{5}" -f $hDt, $hPt.Close, $script:Config.Currency, $hChg, $hVol, $hRsi
+        "{0} | C: {1:N2} {2}{3}{4}{5}" -f $hDt, $hPt.Close, $script:ChartCur, $hChg, $hVol, $hRsi
     }
     $hudSz = $g.MeasureString($hudTxt, $fontAxis)
     $hudW = [int][math]::Ceiling($hudSz.Width) + (S 10)
@@ -4311,11 +4339,11 @@ function Update-TickerTape {
     foreach ($k in $script:Portfolio.Keys) { $u = ([string]$k).ToUpper(); if (-not $syms.Contains($u)) { $syms.Add($u) } }
 
     $segs = New-Object System.Collections.Generic.List[PSObject]
-    $sig = "{0}|{1}|{2}" -f $script:Config.Theme, $script:Config.AccentColor, $curr
+    $sig = "{0}|{1}|{2}|{3}" -f $script:Config.Theme, $script:Config.AccentColor, $curr, [bool]$script:Config.AutoCurrency
     foreach ($sym in $syms) {
         if (-not $script:QuoteStore.ContainsKey($sym)) { continue }
         $q = $script:QuoteStore[$sym]
-        $px = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $curr
+        $px = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency (Get-PriceCurrency $sym)
         $pct = [double]$q.ChangePct
         $segs.Add([PSCustomObject]@{ Sym = $sym; Price = ("{0:N2}" -f $px); Pct = ("{0}{1:N2}%" -f $(if ($pct -ge 0) { "+" } else { "" }), $pct); Up = ($pct -ge 0) })
         $sig += "|{0}:{1:N2}:{2:N2}" -f $sym, $px, $pct
@@ -4433,9 +4461,9 @@ $btnCurrency.Location = New-Object System.Drawing.Point((S 544), (S 11))
 $btnCurrency.Size = New-Object System.Drawing.Size((S 62), (S 26))
 Style-FlatButton -Btn $btnCurrency -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Accent
 $btnCurrency.Font = $fontUiBold
-$btnCurrency.Text = "$($script:Config.Currency) $script:DropArrow"
+$btnCurrency.Text = $(if ([bool]$script:Config.AutoCurrency) { "Auto $script:DropArrow" } else { "$($script:Config.Currency) $script:DropArrow" })
 $pnlHeader.Controls.Add($btnCurrency)
-Set-Tip $btnCurrency "Anzeigewährung wechseln (Taste W)" "FX"
+Set-Tip $btnCurrency "Währung (Taste W). Auto = jeder Kurs und der Chart in der Währung des Tickers (ABBN.SW in CHF, SAP.DE in EUR); Depotwerte bleiben in der Basiswährung. EUR/USD/CHF/GBP = alles in dieser Währung (wird auch Basiswährung)." "FX"
 
 $btnPin = New-Object System.Windows.Forms.Button
 $btnPin.Location = New-Object System.Drawing.Point((S 612), (S 11))
@@ -4488,6 +4516,7 @@ $lstCurrencyDropdown.Font = $fontUiBold
 $lstCurrencyDropdown.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $lstCurrencyDropdown.ItemHeight = S 20
 $lstCurrencyDropdown.Visible = $false
+[void]$lstCurrencyDropdown.Items.Add("Auto")
 foreach ($dc in (Get-DisplayCurrencies)) { [void]$lstCurrencyDropdown.Items.Add($dc) }
 $lstCurrencyDropdown.Height = ($lstCurrencyDropdown.Items.Count * (S 20)) + (S 6)
 $form.Controls.Add($lstCurrencyDropdown)
@@ -6484,11 +6513,20 @@ function Apply-ThemeToAllControls {
 
 
 function Set-ActiveCurrency {
+    # v5.1: "AUTO" = prices in the ticker's own currency, depot stays in the
+    # base currency; a fixed currency switches Auto off and becomes the base
     param([string]$NewCurrency)
     $c = $NewCurrency.Trim().ToUpper()
-    if ($c -notin @(Get-DisplayCurrencies)) { return }
-    $script:Config.Currency = $c
-    $btnCurrency.Text = "$c $script:DropArrow"
+    if ($c -like "AUTO*") {
+        $script:Config.AutoCurrency = $true
+        $btnCurrency.Text = "Auto $script:DropArrow"
+        Set-TransientStatus ("Kurse in der Währung des Tickers, Depot in {0}" -f $script:Config.Currency) 4
+    } else {
+        if ($c -notin @(Get-DisplayCurrencies)) { return }
+        $script:Config.AutoCurrency = $false
+        $script:Config.Currency = $c
+        $btnCurrency.Text = "$c $script:DropArrow"
+    }
     $lstCurrencyDropdown.Visible = $false
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     Refresh-AllMarketData
@@ -6528,9 +6566,10 @@ function Populate-TickerDropdown {
         }
         [void]$seen.Add($sym)
         if ($q) {
-            $pConv = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $curr
+            $pcSym = Get-PriceCurrency $sym
+            $pConv = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $pcSym
             $sign  = if ($q.ChangePct -ge 0) { "+" } else { "" }
-            $disp  = "{0,-9} | {1,8:N2} {2} ({3}{4:N1}%) | {5}" -f $sym, $pConv, $curr, $sign, $q.ChangePct, $nameStr
+            $disp  = "{0,-9} | {1,8:N2} {2} ({3}{4:N1}%) | {5}" -f $sym, $pConv, $pcSym, $sign, $q.ChangePct, $nameStr
         } else {
             $disp  = "{0,-9} | {1}" -f $sym, $nameStr
         }
@@ -7131,6 +7170,7 @@ function Refresh-WatchlistAndAlerts {
         $uSym = $sym.ToUpper()
         if ($script:QuoteStore.ContainsKey($uSym)) {
             $q = $script:QuoteStore[$uSym]
+            $curr = Get-PriceCurrency $uSym   # v5.1: own currency per row with Auto
             $pConv = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $curr
             $sign  = if ($q.ChangePct -ge 0) { "+" } else { "" }
             $rsiStr = if (-not [double]::IsNaN($q.Rsi14)) { "{0:N1}" -f $q.Rsi14 } else { "-" }
@@ -7962,9 +8002,10 @@ function Test-AllPrioClosed {
 function Update-AllUiViews {
     if ($script:IsClosing -or $form.IsDisposed) { return }
     $sym  = $script:Config.ActiveTicker.ToUpper()
-    $curr = $script:Config.Currency
+    $curr = Get-PriceCurrency $sym   # v5.1: price in the ticker currency (Auto); depot lines below use $baseCur
+    $baseCur = [string]$script:Config.Currency
     $p    = $script:Pal
-    $btnCurrency.Text = "$curr $script:DropArrow"
+    $btnCurrency.Text = $(if ([bool]$script:Config.AutoCurrency) { "Auto $script:DropArrow" } else { "$baseCur $script:DropArrow" })
 
     if (-not $txtSearch.Focused) {
         $script:SuppressSearchEvent = $true
@@ -8046,13 +8087,13 @@ function Update-AllUiViews {
         $stateTxt = if ($null -ne $ms) { " " + $ms.Short } else { "" }
         $tt = "{0}: {1:N2} {2} ({3}{4:N2}%){5}" -f $sym, $dispPrice, $curr, $sign, $q.ChangePct, $stateTxt
         # v4.4: second line with today's portfolio result
-        $dl = Get-TrayDepotLine -Currency $curr
+        $dl = Get-TrayDepotLine -Currency $baseCur
         if ($dl -and ($tt.Length + $dl.Length + 1) -le 63) { $tt = $tt + "`n" + $dl }
         $trayIcon.Text = if ($tt.Length -gt 63) { $tt.Substring(0, 63) } else { $tt }
         # v4.9.5: the tray icon follows the depot's day result (setting), else the ticker
         $trayKey = if ($q.ChangePct -ge 0) { "up" } else { "down" }
         if ([bool]$script:Config.TrayFollowsDepot -and $script:Portfolio.Count -gt 0) {
-            $ptT = Get-PortfolioDayTotals -Currency $curr
+            $ptT = Get-PortfolioDayTotals -Currency $baseCur
             if ($ptT.Ok) { $trayKey = Get-DirectionKey -Pct ([double]$ptT.DayPct) }
         }
         Update-TrayIcon -Key $trayKey
@@ -10637,7 +10678,7 @@ function Get-DescriptionRows {
     $q = $script:QuoteStore[$Sym]
     $pr = $script:Profiles[$Sym]
     $ev = $script:Events[$Sym]
-    $curr = $script:Config.Currency
+    $curr = Get-PriceCurrency $Sym
     $name = if ($null -ne $pr -and $pr.Name) { [string]$pr.Name } elseif ($null -ne $q) { [string]$q.LongName } else { "" }
     & $add "Name" $name
     if ($null -ne $pr) {
@@ -10811,12 +10852,12 @@ function Show-MoversDialog {
     $list = @($syms | Sort-Object -Property @{ Expression = { [double]$script:QuoteStore[$_].ChangePct } } -Descending)
     $rows = foreach ($s in $list) {
         $q = $script:QuoteStore[$s]
-        $px = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $curr
+        $pcS = Get-PriceCurrency $s; $px = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency (Get-PriceCurrency $s)
         $rv = if ($null -ne $q.RelVol -and -not [double]::IsNaN([double]$q.RelVol)) { "{0:N1}x" -f $q.RelVol } else { "-" }
         $dh = if ([double]$q.High52 -gt 0) { "{0:+0.0;-0.0}%" -f (([double]$q.Price / [double]$q.High52 - 1) * 100) } else { "-" }
         $ms = Get-MarketState -Tp $q.Tp -NowSec ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
         $own = if ($script:Portfolio.ContainsKey($s)) { "P" } else { "" }
-        @{ Cells = @($s, $own, ("{0:N2} {1}" -f $px, $curr), ("{0:+0.00;-0.00}%" -f $q.ChangePct), $rv, $dh, $(if ($null -ne $ms) { $ms.Short } else { "" })); Tag = $s; CellColors = @{ 3 = (Get-SignColor ([double]$q.ChangePct)) } }
+        @{ Cells = @($s, $own, ("{0:N2} {1}" -f $px, $pcS), ("{0:+0.00;-0.00}%" -f $q.ChangePct), $rv, $dh, $(if ($null -ne $ms) { $ms.Short } else { "" })); Tag = $s; CellColors = @{ 3 = (Get-SignColor ([double]$q.ChangePct)) } }
     }
     Show-InfoGrid -Title "Gewinner / Verlierer heute (TOP)" -Columns @("Ticker", "", "Kurs", "Tag", "Volumen", "zum 52W-Hoch", "Markt") -Weights @(90, 30, 120, 80, 80, 100, 70) -RightAlign @(2, 3, 4, 5) -W 680 -H 520 -Footer "Watchlist + Portfolio, sortiert nach Tagesänderung. P = im Portfolio. Doppelklick = Ticker öffnen." -Extra @{ Rows = @($rows) } -OnShown { Set-InfoRows -Rows $script:InfoCtl.Rows } -OnDouble {
         param($Tag)
@@ -13388,7 +13429,7 @@ $btnCurrency.Add_Click({
     $lstTickerDropdown.Visible = $false
     $lstCurrencyDropdown.Visible = -not $lstCurrencyDropdown.Visible
     if ($lstCurrencyDropdown.Visible) {
-        $idx = $lstCurrencyDropdown.Items.IndexOf($script:Config.Currency)
+        $idx = if ([bool]$script:Config.AutoCurrency) { 0 } else { $lstCurrencyDropdown.Items.IndexOf($script:Config.Currency) }
         if ($idx -ge 0) { $lstCurrencyDropdown.SelectedIndex = $idx }
         $lstCurrencyDropdown.BringToFront()
         $lstCurrencyDropdown.Focus()
@@ -13462,8 +13503,9 @@ $cmiCopyPrice.Add_Click({
     $sym = $script:Config.ActiveTicker.ToUpper()
     if ($script:QuoteStore.ContainsKey($sym)) {
         $q = $script:QuoteStore[$sym]
-        $p = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $script:Config.Currency
-        [System.Windows.Forms.Clipboard]::SetText(("{0}: {1:N2} {2}" -f $sym, $p, $script:Config.Currency))
+        $pcc = Get-PriceCurrency $sym
+        $p = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $pcc
+        [System.Windows.Forms.Clipboard]::SetText(("{0}: {1:N2} {2}" -f $sym, $p, $pcc))
     }
 })
 $cmiAddWatch.Add_Click({
@@ -13542,7 +13584,7 @@ function Get-DrawingPixels {
     param($L, $D)
     $pr = $L.PriceRect
     $ts = [long[]]@($L.Series | ForEach-Object { [long]$_.Ts })
-    $fx = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$D.Cur) -ToCurrency ([string]$script:Config.Currency)
+    $fx = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$D.Cur) -ToCurrency ([string]$script:ChartCur)
     $toY = { param([double]$P) $pr.Bottom - ((Get-PriceFrac ($P * $fx) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)) * $pr.Height) }
     $toX = { param([long]$T) $pr.Left + ((Get-FracIndexAtTs -BarTs $ts -Ts $T) / [double]([math]::Max(1, $L.N - 1))) * $pr.Width }
     return [PSCustomObject]@{ X1 = (& $toX $D.T1); Y1 = (& $toY $D.P1); X2 = $(if ($D.Kind -eq "H") { $pr.Right } else { & $toX $D.T2 }); Y2 = $(if ($D.Kind -eq "H") { & $toY $D.P1 } else { & $toY $D.P2 }); Fx = $fx }
@@ -13576,8 +13618,8 @@ function Find-DrawingAt {
 function Add-Drawing {
     param([string]$Kind, $A, $B = $null)
     $u = ([string]$script:Config.ActiveTicker).ToUpper()
-    $nat = if ($script:ActiveNativeCurr) { [string]$script:ActiveNativeCurr } else { [string]$script:Config.Currency }
-    $back = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$script:Config.Currency) -ToCurrency $nat
+    $nat = if ($script:ActiveNativeCurr) { [string]$script:ActiveNativeCurr } else { [string]$script:ChartCur }
+    $back = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$script:ChartCur) -ToCurrency $nat
     $d = [PSCustomObject]@{ Id = [Guid]::NewGuid().ToString("N").Substring(0, 12); Kind = $Kind; T1 = [long]$A.T; P1 = [double]$A.P * $back; T2 = 0L; P2 = 0.0; Cur = $nat }
     if ($null -ne $B) { $d.T2 = [long]$B.T; $d.P2 = [double]$B.P * $back }
     if (-not $script:Drawings.ContainsKey($u)) { $script:Drawings[$u] = New-Object System.Collections.Generic.List[object] }
@@ -13711,9 +13753,9 @@ $chartContextMenu.Add_Opening({
     $cmiAlertHere.Enabled = -not [double]::IsNaN($px) -and $script:QuoteStore.ContainsKey($sym)
     if ($cmiAlertHere.Enabled) {
         $q = $script:QuoteStore[$sym]
-        $cur = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $script:Config.Currency
+        $cur = Convert-CurrencyValue -Amount $q.Price -FromCurrency $q.Currency -ToCurrency $script:ChartCur
         $op = if ($px -ge $cur) { ">=" } else { "<=" }
-        $cmiAlertHere.Text = "Alarm: {0} {1} {2} {3}" -f $sym, $op, (Format-LevelPrice $px), $script:Config.Currency
+        $cmiAlertHere.Text = "Alarm: {0} {1} {2} {3}" -f $sym, $op, (Format-LevelPrice $px), $script:ChartCur
         $cmiAlertHere.Tag = @{ Op = $op; Price = [double](Format-LevelPrice $px -Raw) }
     } else {
         $cmiAlertHere.Text = "Alarm hier setzen (Rechtsklick im Kursbereich)"
@@ -13727,8 +13769,8 @@ $cmiAlertHere.Add_Click({
     $t = $cmiAlertHere.Tag
     if ($null -eq $t) { return }
     $sym = $script:Config.ActiveTicker.ToUpper()
-    if (Add-WidgetAlert -Ticker $sym -Condition $t.Op -Target $t.Price -Currency $script:Config.Currency -NoConfirm) {
-        Set-TransientStatus ("Alarm angelegt: {0} {1} {2:N2} {3}" -f $sym, $t.Op, $t.Price, $script:Config.Currency) 4
+    if (Add-WidgetAlert -Ticker $sym -Condition $t.Op -Target $t.Price -Currency $script:ChartCur -NoConfirm) {
+        Set-TransientStatus ("Alarm angelegt: {0} {1} {2:N2} {3}" -f $sym, $t.Op, $t.Price, $script:ChartCur) 4
         Update-AllUiViews
     }
 })
@@ -14006,7 +14048,7 @@ $btnExportCsv.Add_Click({
         $csvLines.Add("Datum;Open;High;Low;Close;Währung;Volumen")
         foreach ($pt in $script:ActiveSeries) {
             $dtStr = [DateTimeOffset]::FromUnixTimeMilliseconds($pt.Ts).ToLocalTime().ToString("yyyy-MM-dd HH:mm")
-            $csvLines.Add(("{0};{1:F4};{2:F4};{3:F4};{4:F4};{5};{6}" -f $dtStr, $pt.Open, $pt.High, $pt.Low, $pt.Close, $script:Config.Currency, $pt.Volume))
+            $csvLines.Add(("{0};{1:F4};{2:F4};{3:F4};{4:F4};{5};{6}" -f $dtStr, $pt.Open, $pt.High, $pt.Low, $pt.Close, $script:ChartCur, $pt.Volume))
         }
         [System.IO.File]::WriteAllLines($sfd.FileName, $csvLines, [System.Text.Encoding]::UTF8)
     }
@@ -14195,8 +14237,9 @@ $pnlHover.Add_Paint({
         $g.DrawString($nm, $fontUi, $mut, (New-Object System.Drawing.RectangleF([float]($x0 + (S 90)), [float]($y + 2), [float]($w - (S 104)), [float](S 18))))
         $y += S 22
         $curr = [string]$script:Config.Currency
-        $pc = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $curr
-        $g.DrawString(("{0:N2} {1}" -f $pc, $curr), $fontPrice, $txt, $x0, $y)
+        $pcur = Get-PriceCurrency $sym
+        $pc = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $pcur
+        $g.DrawString(("{0:N2} {1}" -f $pc, $pcur), $fontPrice, $txt, $x0, $y)
         $g.DrawString(("{0:+0.00;-0.00}%" -f [double]$q.ChangePct), $fontTicker, $upB, ($x0 + (S 150)), ($y + (S 3)))
         $y += S 26
         # day range (from the quote meta) and 52-week bar
@@ -14382,6 +14425,8 @@ function New-AlertChecked {
         "EKPCT"  { [string]$script:Portfolio[$aSym].Currency }
         # trailing high in the instrument's own currency
         "TRAIL"  { if ($qc) { $qc } else { $script:Config.Currency } }
+        # v5.1: a price alert is entered in the currency the price is shown in
+        "PRICE"  { Get-PriceCurrency $aSym }
         default  { $script:Config.Currency }
     }
     $ok = Add-WidgetAlert -Ticker $aSym -Condition $Cond -Target $Value -Currency $curr -Note $Note -RearmMin $Rearm -ExpiresAt (Get-AlertExpiryDate -Days $ExpDays)
@@ -14451,7 +14496,8 @@ $cmbAlertCond.Add_SelectedIndexChanged({
         $script:AlertAutoValue = $def
     }
     $hint = Get-AlertTargetHint $cond
-    if ($kind -eq "PRICE" -or $kind -eq "PFVAL") { $hint += " ($($script:Config.Currency))" }
+    if ($kind -eq "PFVAL") { $hint += " ($($script:Config.Currency))" }
+    if ($kind -eq "PRICE") { $hint += " ($(Get-PriceCurrency ([string]$txtAlertTicker.Text)))" }
     if ($kind -eq "SMA") { $hint = "Kein Wert nötig: Kurs kreuzt SMA$($script:Config.SmaFastPeriod) (1h)" }
     Set-Tip $txtAlertPrice $hint $(if ($kind -eq "TRAIL") { "TRAIL" } elseif ($kind -eq "VOL") { "RELVOL" } else { "ALERTCOND" })
 })
@@ -14768,7 +14814,7 @@ $script:GlobalKeyHandler = {
             }
         }
         ([System.Windows.Forms.Keys]::W) {
-            Set-ActiveCurrency -NewCurrency (Get-NextDisplayCurrency $script:Config.Currency); $e.Handled = $true
+            Set-ActiveCurrency -NewCurrency (Get-NextCurrencyMode -Current $script:Config.Currency -Auto ([bool]$script:Config.AutoCurrency)); $e.Handled = $true
         }
         ([System.Windows.Forms.Keys]::C) {
             Toggle-CompactLayout; $e.Handled = $true
@@ -15326,6 +15372,24 @@ function Invoke-SmokeTest {
         if ($pnlHover.Visible) { throw "hover card did not hide" }
         Set-ActiveTab -TabName "Chart"
     }
+    # v5.1
+    Invoke-SmokeStep "Auto currency" {
+        Set-ActiveCurrency "EUR"
+        if ((Get-PriceCurrency "NVDA") -ne "EUR") { throw "fixed EUR does not show NVDA in EUR" }
+        Set-ActiveCurrency "AUTO"
+        if ((Get-PriceCurrency "NVDA") -ne "USD" -or (Get-PriceCurrency "SAP.DE") -ne "EUR") { throw "Auto: NVDA $(Get-PriceCurrency 'NVDA'), SAP.DE $(Get-PriceCurrency 'SAP.DE')" }
+        foreach ($pair in @(@("SAP.DE", "EUR"), @("NVDA", "USD"))) {
+            Switch-ActiveTicker -NewTicker $pair[0] -SkipResolve $true
+            for ($i = 0; $i -lt 60 -and ($script:IsRefreshing -or @($script:ActiveSeries).Count -lt 2); $i++) { Start-Sleep -Milliseconds 250; & $pump }
+            Update-AllUiViews; & $pump
+            if (@($script:ActiveSeries).Count -ge 2 -and $script:ChartCur -ne $pair[1]) { throw "$($pair[0]) chart in $($script:ChartCur)" }
+            if ($script:QuoteStore.ContainsKey($pair[0]) -and $lblLivePrice.Text -notlike "* $($pair[1])") { throw "$($pair[0]) header shows '$($lblLivePrice.Text)'" }
+        }
+        if ($btnCurrency.Text -notlike "Auto*") { throw "currency button shows '$($btnCurrency.Text)'" }
+        & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::W)); & $pump
+        if ([bool]$script:Config.AutoCurrency -or [string]$script:Config.Currency -ne "EUR") { throw "W after Auto should give EUR" }
+        Set-ActiveCurrency "AUTO"
+    } 20000
     Invoke-SmokeStep "Prev close + health" {
         Set-Timeframe -Tf "1d"; & $pump
         $cmiPrevClose.PerformClick(); & $pump

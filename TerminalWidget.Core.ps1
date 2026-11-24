@@ -674,6 +674,42 @@ function Get-NextDisplayCurrency {
     return $list[($i + 1) % $list.Count]
 }
 
+function Get-NextCurrencyMode {
+    # v5.1: W key with automatic currency: AUTO -> EUR -> USD -> CHF -> GBP -> AUTO
+    param([string]$Current, [bool]$Auto)
+    $list = @("AUTO") + @(Get-DisplayCurrencies)
+    $cur = if ($Auto) { "AUTO" } else { ([string]$Current).Trim().ToUpper() }
+    $i = [array]::IndexOf($list, $cur)
+    return $list[($i + 1) % $list.Count]
+}
+
+function Get-TickerCurrencyGuess {
+    # v5.1: trading currency from the exchange suffix, until Yahoo has answered
+    param([string]$Symbol)
+    $u = ([string]$Symbol).Trim().ToUpper()
+    if ($u -match '=X$') {
+        $pair = $u -replace '=X$', ''
+        if ($pair.Length -ge 6) { return $pair.Substring(3, 3) } else { return $pair }
+    }
+    if ($u.StartsWith("^")) { return "" }
+    if ($u -notmatch '\.([A-Z]+)$') { return "USD" }
+    switch ($Matches[1]) {
+        { $_ -in @("DE", "F", "BE", "DU", "HM", "HA", "MU", "SG", "PA", "AS", "BR", "MI", "MC", "VI", "HE", "LS", "IR", "AT") } { return "EUR" }
+        "SW" { return "CHF" }
+        "L"  { return "GBP" }
+        "TO" { return "CAD" }
+        "V"  { return "CAD" }
+        "T"  { return "JPY" }
+        "HK" { return "HKD" }
+        "ST" { return "SEK" }
+        "CO" { return "DKK" }
+        "OL" { return "NOK" }
+        "AX" { return "AUD" }
+        "WA" { return "PLN" }
+        default { return "" }
+    }
+}
+
 function Get-NormalizedCurrencyCode {
     # ISO code for a stored or Yahoo currency: GBp/GBX -> GBP, ZAc -> ZAR,
     # ILA -> ILS, otherwise upper case. "" if it is not a 3-letter code.
