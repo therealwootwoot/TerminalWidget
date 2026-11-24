@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.0"
+$script:AppVersion    = "5.1"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -13886,6 +13886,15 @@ Settings        "Search:" at the bottom lights up matches
 Portfolio (v)   Cash account, savings plans
 P               Risk, target weights (rebalancing), heatmap
 Commands        CASH SPAR REBAL RISK HEAT DRAW H/T/F FULL PRIV
+
+New in 5.1
+W               Auto (each price + chart in the ticker's currency,
+                depot stays in the base currency) / EUR / USD / CHF / GBP
+NVDA TA         Ticker analysis: signals, support / resistance,
+                fundamentals vs. your tickers of the same sector
+                (also right-click a ticker or the chart)
+P               Beitrag (contribution, dividends, scenario),
+                Vergleich (indices, rolling 12M, sectors vs. MSCI World)
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -13987,6 +13996,15 @@ Einstellungen   "Suchen:" unten hebt passende Optionen hervor
 Portfolio (v)   Cash-Konto, Sparpläne
 P               Risiko, Ziel-Gewichte (Rebalancing), Heatmap
 Befehle         CASH SPAR REBAL RISK HEAT DRAW H/T/F FULL PRIV
+
+Neu in 5.1
+W               Auto (jeder Kurs + Chart in der Währung des Tickers,
+                Depot bleibt in der Basiswährung) / EUR / USD / CHF / GBP
+NVDA TA         Ticker-Analyse: Signale, Unterstützung / Widerstand,
+                Kennzahlen gegen deine Ticker aus derselben Branche
+                (auch Rechtsklick auf Ticker oder Chart)
+P               Beitrag (je Position, Dividenden, Szenario),
+                Vergleich (Indizes, rollierend 12 M, Sektoren vs. MSCI World)
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
