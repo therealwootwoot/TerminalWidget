@@ -248,7 +248,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.5"
+$script:AppVersion    = "5.7"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -479,6 +479,9 @@ $defaultConfig = [PSCustomObject]@{
     DialogPlacement       = [PSCustomObject]@{} # v5.5: position / size per dialog
     PctAxis               = $false            # v5.5: price axis in % from the first visible bar
     ShowSR                = $false            # v5.5: support / resistance (daily, from TA) in the chart
+    SignalAlerts          = "Depot"           # v5.7: signal-change alerts for Depot / Alle (+ watchlist) / Aus
+    PeerGroups            = [PSCustomObject]@{} # v5.7: own comparison group per ticker
+    NewsFeeds             = ""                # v5.7: extra RSS / Atom feeds (one URL per line)
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -892,6 +895,12 @@ if ($null -ne $rawProfiles) {
     }
 }
 
+# v5.7: valuation snapshots per ticker and day (fund_history.json)
+$script:FundHistPath = Join-Path $script:DataDir "fund_history.json"
+$script:FundHist = @{}
+$rawFh = Load-JsonState -Path $script:FundHistPath -DefaultValue $null
+if ($null -ne $rawFh) { foreach ($prop in $rawFh.PSObject.Properties) { $script:FundHist[$prop.Name.ToUpper()] = @($prop.Value) } }
+
 # v5.5: free-text note per ticker (thesis / reason for buying) in notes.json
 $script:NotesPath = Join-Path $script:DataDir "notes.json"
 $script:Notes = @{}
@@ -932,7 +941,7 @@ function Request-DailyBars {
         Where-Object { -not (Test-DailyCacheFresh -Entry $script:DailyCache[$_] -Day $day) -and -not $script:DailyPending.Contains($_) -and [string]$script:DailyFailed[$_] -ne $day })
     if ($need.Count -eq 0) { if ($null -ne $OnDone) { & $OnDone }; return }
     $map = @{}
-    foreach ($sy in $need) { $map[$sy] = "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1d&range=1y" -f [Uri]::EscapeDataString($sy); [void]$script:DailyPending.Add($sy) }
+    foreach ($sy in $need) { $map[$sy] = Get-ProviderUrl -Kind "Daily" -Symbol $sy -Range "1y"; [void]$script:DailyPending.Add($sy) }
     Start-FetchJob -Urls @($map.Values) -MaxConcurrency 4 -Context @{ Map = $map; Day = $day; OnDone = $OnDone } -OnComplete {
         param($Box, $Ctx)
         foreach ($sy in @($Ctx.Map.Keys)) {
@@ -941,7 +950,10 @@ function Request-DailyBars {
             try { $bars = ConvertFrom-YahooOhlc -Json $Box.Results[$Ctx.Map[$sy]] } catch { $bars = $null }
             if ($null -eq $bars -or @($bars.Close).Count -lt 30) { $script:DailyFailed[$sy] = $Ctx.Day; continue }
             $sig = Get-TechnicalSignals -Closes ([double[]]$bars.Close) -Highs ([double[]]$bars.High) -Lows ([double[]]$bars.Low) -Volumes ([double[]]$bars.Volume)
+            $oldE = $script:DailyCache[$sy]
             $script:DailyCache[$sy] = ConvertTo-DailyCacheEntry -Bars $bars -Sig $sig -Day $Ctx.Day
+            # v5.7: signal changed since the last day -> note (depot / all, see settings)
+            try { Send-SignalChangeAlerts -Sym $sy -Old $oldE -New $script:DailyCache[$sy] } catch { Write-WidgetLog "Signal alert $sy : $($_.Exception.Message)" "WARN" }
         }
         try { Save-DailyCache } catch { Write-WidgetLog "Daily cache: $($_.Exception.Message)" "WARN" }
         Update-ChartCacheSignature
@@ -949,6 +961,35 @@ function Request-DailyBars {
         if ($dgvWatchlist.Columns["Signal"].Visible) { Refresh-WatchlistAndAlerts }
         if ($null -ne $Ctx.OnDone) { & $Ctx.OnDone }
     }
+}
+
+function Test-SignalAlertTicker {
+    param([string]$Sym)
+    $mode = [string]$script:Config.SignalAlerts
+    if ($mode -eq "Aus") { return $false }
+    if ($script:Portfolio.ContainsKey($Sym)) { return $true }
+    return ($mode -eq "Alle" -and @($script:Config.Watchlist | ForEach-Object { ([string]$_).ToUpper() }) -contains $Sym)
+}
+
+function Send-SignalChangeAlerts {
+    param([string]$Sym, $Old, $New)
+    if (-not (Test-SignalAlertTicker $Sym)) { return }
+    $ch = @(Get-SignalChanges -Old $Old -New $New)
+    if ($ch.Count -eq 0) { return }
+    $msg = (@($ch | ForEach-Object { $_.Text }) -join "; ")
+    Write-WidgetLog ("Signal change {0}: {1}" -f $Sym, $msg)
+    if ($script:SmokeMode) { $script:LastSignalAlert = "$Sym|$msg"; return }
+    [void](Send-WidgetNotification -Title ("Signal: {0}" -f $Sym) -Message ($msg + " - " + (Tr "Ticker-Analyse: Rechtsklick > TA")) -Kind "Info" -AllowPush $true)
+}
+
+function Request-DailySignals {
+    # once a day in the background: daily bars of the depot (and the watchlist
+    # with "Alle") so that signal changes are noticed without opening anything
+    $mode = [string]$script:Config.SignalAlerts
+    if ($mode -eq "Aus" -or $script:SmokeMode) { return }
+    $syms = @($script:Portfolio.Keys | ForEach-Object { ([string]$_).ToUpper() })
+    if ($mode -eq "Alle") { $syms += @($script:Config.Watchlist) }
+    if ($syms.Count -gt 0) { Request-DailyBars -Symbols $syms }
 }
 
 function Get-TickerNote {
@@ -1298,7 +1339,8 @@ function Invoke-ParallelFetch {
                     if ($resp.IsSuccessStatusCode) {
                         # Content is already buffered (ResponseContentRead), so .Result does not block
                         $body = $resp.Content.ReadAsStringAsync().Result
-                        $results[$u] = ($body | ConvertFrom-Json)
+                        # v5.7: RSS / XML stays text, everything else is JSON
+                        $results[$u] = if ($body.TrimStart().StartsWith("<")) { $body } else { ($body | ConvertFrom-Json) }
                     } elseif ($code -eq 429) {
                         $script:LastRateLimited = $true
                         Write-WidgetLog "HTTP 429 (rate limited): $u" "WARN"
@@ -1373,7 +1415,7 @@ $script:FetchWorkerScript = {
                         $code = [int]$resp.StatusCode
                         if ($resp.IsSuccessStatusCode) {
                             $body = $resp.Content.ReadAsStringAsync().Result
-                            $results[$u] = ($body | ConvertFrom-Json)
+                            $results[$u] = if ($body.TrimStart().StartsWith("<")) { $body } else { ($body | ConvertFrom-Json) }
                         } elseif ($code -eq 429) {
                             $state.RateLimited = $true
                             $logs.Add("WARN|HTTP 429 (rate limited): $u")
@@ -1470,7 +1512,7 @@ $script:FetchWorkerScript = {
 
 $script:WorkerShared = [hashtable]::Synchronized(@{ Cancel = $false; PreferQ2 = $false })
 $script:FetchJobs    = New-Object System.Collections.Generic.List[PSObject]
-$script:FetchLog     = New-Object System.Collections.Generic.Queue[DateTime]
+$script:FetchLog     = New-Object System.Collections.Generic.Queue[object]   # v5.7: @{ T; P } per request
 $script:WorkerPool   = $null
 try {
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -1533,8 +1575,8 @@ function Start-FetchJob {
     if ($script:IsClosing) { return }
     # v5.5: polling load for HEALTH (requests in the last hour)
     $nowR = Get-Date
-    foreach ($u0 in @($Urls)) { $script:FetchLog.Enqueue($nowR) }
-    while ($script:FetchLog.Count -gt 0 -and ($nowR - $script:FetchLog.Peek()).TotalMinutes -gt 60) { [void]$script:FetchLog.Dequeue() }
+    foreach ($u0 in @($Urls)) { $script:FetchLog.Enqueue([PSCustomObject]@{ T = $nowR; P = (Get-ProviderOfUrl $u0) }) }
+    while ($script:FetchLog.Count -gt 0 -and ($nowR - $script:FetchLog.Peek().T).TotalMinutes -gt 60) { [void]$script:FetchLog.Dequeue() }
     $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = $Context; OnComplete = $OnComplete }
 
@@ -1653,11 +1695,17 @@ function Start-ProfileJob {
             Set-EventEntry -Ticker $sym -Cal $cal
             # v5.1: fundamentals for the ticker analysis
             $fund = if ($null -ne $rr.Summary) { ConvertFrom-YahooFundamentals -Summary $rr.Summary } else { $null }
-            if ($null -ne $fund) { $script:Events[$sym].Fund = ConvertTo-StoredFund $fund }
+            if ($null -ne $fund) {
+                $script:Events[$sym].Fund = ConvertTo-StoredFund $fund
+                # v5.7: one valuation snapshot per day for "vs. own history"
+                $script:FundHist[$sym] = @(Add-FundSnapshot -History $script:FundHist[$sym] -Fund $script:Events[$sym].Fund -Day ((Get-Date).ToString("yyyy-MM-dd")))
+                $script:FundHistDirty = $true
+            }
             $ne++
         }
         if ($n -gt 0) { Save-Profiles; Write-WidgetLog "Profiles updated: $n" }
         if ($ne -gt 0) { Save-Events; Write-WidgetLog "Event dates updated: $ne" }
+        if ($script:FundHistDirty) { $script:FundHistDirty = $false; try { Save-JsonState -Path $script:FundHistPath -Data $script:FundHist } catch { Write-WidgetLog "Fund history: $($_.Exception.Message)" "WARN" } }
         if ($null -ne $Ctx.Then) { & $Ctx.Then }
     }
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = @{ Then = $OnComplete; Raw = $OnRaw }; OnComplete = $done }
@@ -2804,6 +2852,26 @@ function Get-ThemeColors {
                 DwmDark  = 0
             }
         }
+        "Contrast" {
+            # v5.7: high contrast - black, white text, yellow accent, clear borders
+            return @{
+                HeaderBg = [System.Drawing.Color]::FromArgb(0, 0, 0)
+                BodyBg   = [System.Drawing.Color]::FromArgb(0, 0, 0)
+                PanelBg  = [System.Drawing.Color]::FromArgb(0, 0, 0)
+                Card     = [System.Drawing.Color]::FromArgb(10, 10, 10)
+                Input    = [System.Drawing.Color]::FromArgb(0, 0, 0)
+                Hover    = [System.Drawing.Color]::FromArgb(40, 40, 0)
+                Grid     = [System.Drawing.Color]::FromArgb(90, 90, 90)
+                Border   = [System.Drawing.Color]::FromArgb(210, 210, 210)
+                Text     = [System.Drawing.Color]::FromArgb(255, 255, 255)
+                Muted    = [System.Drawing.Color]::FromArgb(225, 225, 225)
+                Accent   = [System.Drawing.Color]::FromArgb(255, 221, 0)
+                Warn     = [System.Drawing.Color]::FromArgb(255, 170, 0)
+                DwmCap   = 0x00000000
+                DwmBdr   = 0x00FFFFFF
+                DwmDark  = 1
+            }
+        }
         "Graphite" {
             # v5.2: neutral grey (no blue tint), close to the Windows 11 dark look
             return @{
@@ -3290,6 +3358,27 @@ function Render-ChartAndRsi {
                 $srBr = New-Object System.Drawing.SolidBrush($lv[2])
                 $g.DrawString($srTxt, $fontAxis, $srBr, [float]($priceRect.Right - $srSz.Width - (S 4)), [float]($sy0 - $srSz.Height - 1))
                 $srBr.Dispose()
+            }
+            # v5.7: 50/200-day crossings (daily data) as triangles at the bottom
+            $mk = @(Get-MaCrossMarkers -Closes ([double[]]$srE.Close) -Dates ([string[]]$srE.Dates))
+            if ($mk.Count -gt 0 -and $n -ge 2) {
+                $md = @{}; foreach ($m0 in $mk) { $md[[string]$m0.Date] = [string]$m0.Kind }
+                $prevD = ""
+                for ($mi = 0; $mi -lt $n; $mi++) {
+                    $dStr = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$series[$mi].Ts).LocalDateTime.ToString("yyyy-MM-dd")
+                    if ($dStr -eq $prevD) { continue }
+                    $prevD = $dStr
+                    if (-not $md.ContainsKey($dStr)) { continue }
+                    $mx = [float]($priceRect.Left + $priceRect.Width * $mi / [math]::Max(1, $n - 1))
+                    $gold = ($md[$dStr] -eq "Golden")
+                    $tc = if ($gold) { $colGreen } else { $colRed }
+                    $tb = New-Object System.Drawing.SolidBrush($tc)
+                    $yb = [float]($priceRect.Bottom - (S 2))
+                    $tri = if ($gold) { [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF($mx, ($yb - (S 9)))), (New-Object System.Drawing.PointF(($mx - (S 5)), $yb)), (New-Object System.Drawing.PointF(($mx + (S 5)), $yb))) } else { [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF($mx, $yb)), (New-Object System.Drawing.PointF(($mx - (S 5)), ($yb - (S 9)))), (New-Object System.Drawing.PointF(($mx + (S 5)), ($yb - (S 9))))) }
+                    $g.FillPolygon($tb, $tri)
+                    $g.DrawString($(if ($gold) { "50/200 " + [string][char]0x2191 } else { "50/200 " + [string][char]0x2193 }), $fontAxis, $tb, [float]($mx + (S 6)), [float]($yb - (S 13)))
+                    $tb.Dispose()
+                }
             }
         }
     }
@@ -4286,6 +4375,25 @@ foreach ($kv in @{
     "nur Positionen dieses Sektors, ohne Cash" = "only positions of this sector, without cash"; "nur Positionen in dieser Währung (Kursänderung in der Basiswährung), ohne Cash" = "only positions in this currency (change in the base currency), without cash"
     "Dynamik %" = "Increase %"; "Pause" = "Pause"; "Jetzt" = "Now"; "Signal" = "Signal"
 }.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
+# v5.7
+foreach ($kv in @{
+    "Wert (Tag)" = "Value (day)"; "Woche" = "Week"; "Tag" = "Day"; "Tageskurse" = "Daily prices"; "Wochenkurse" = "Weekly prices"
+    "Vergleichsgruppe ..." = "Peer group ..."; "eigene Gruppe" = "own group"; "Vergleich = Median deiner Vergleichsgruppe (PEER)" = "Comparison = median of your peer group (PEER)"; "lädt noch" = "still loading"
+    "Bewertung vs. eigene Historie" = "Valuation vs. own history"; "Median" = "Median"; "seit" = "since"; "Tage" = "days"; "ab 20 Tagen Daten" = "from 20 days of data"; "bisher" = "so far"; "Rang" = "rank"
+    "teuer gegenüber der eigenen Historie" = "expensive vs. own history"; "günstig gegenüber der eigenen Historie" = "cheap vs. own history"; "im üblichen Bereich" = "in the usual range"
+    "Rendite hoch gegenüber der eigenen Historie (eher günstig)" = "yield high vs. own history (rather cheap)"; "Rendite niedrig gegenüber der eigenen Historie (eher teuer)" = "yield low vs. own history (rather expensive)"
+    "Tages- und Wochensignale sind positiv: Aufwärtstrend auf beiden Zeitebenen." = "Daily and weekly signals are positive: uptrend on both time frames."
+    "Tages- und Wochensignale sind negativ: Abwärtstrend auf beiden Zeitebenen." = "Daily and weekly signals are negative: downtrend on both time frames."
+    "Kurzfristig positiv, mittelfristig negativ: eher eine Erholung im längeren Abwärtstrend." = "Positive short term, negative medium term: more likely a bounce in a longer downtrend."
+    "Kurzfristig negativ, mittelfristig positiv: eher ein Rücksetzer im längeren Aufwärtstrend." = "Negative short term, positive medium term: more likely a pullback in a longer uptrend."
+    "Kurzfristig positiv, mittelfristig gemischt: der Aufwärtsimpuls ist auf Wochensicht noch nicht bestätigt." = "Positive short term, mixed medium term: the upswing is not confirmed on the weekly chart yet."
+    "Kurzfristig negativ, mittelfristig gemischt: Schwäche, aber auf Wochensicht noch kein klarer Abwärtstrend." = "Negative short term, mixed medium term: weakness, but no clear weekly downtrend yet."
+    "Kurzfristig gemischt, mittelfristig positiv: der längere Aufwärtstrend ist intakt, kurzfristig ohne Richtung." = "Mixed short term, positive medium term: the longer uptrend is intact, no short-term direction."
+    "Kurzfristig gemischt, mittelfristig negativ: der längere Abwärtstrend ist nicht gebrochen." = "Mixed short term, negative medium term: the longer downtrend is not broken."
+    "Kein klares Bild auf beiden Zeitebenen." = "No clear picture on either time frame."; "Zu wenig Wochendaten für die mittelfristige Sicht." = "Not enough weekly data for the medium-term view."
+    "Signal-Wechsel (Ticker-Analyse)" = "Signal changes (ticker analysis)"; "Hinweis bei Signal-Wechsel" = "Notify on signal change"; "Depot + Watchlist" = "Depot + watchlist"; "Aus" = "Off"
+    "Eigene RSS-Feeds (eine Adresse je Zeile)" = "Own RSS feeds (one address per line)"; "Ticker-Analyse: Rechtsklick > TA" = "Ticker analysis: right-click > TA"
+}.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
 
 function Tr {
     param([string]$Text)
@@ -4324,6 +4432,8 @@ function Set-Tip {
     param([System.Windows.Forms.Control]$Ctl, [string]$Text, [string]$Key = "")
     if ($null -eq $Ctl) { return }
     $Text = Tr $Text
+    # v5.7: screen readers - icon buttons get the first part of their tooltip as name
+    if ($Ctl -is [System.Windows.Forms.ButtonBase] -and -not $Ctl.AccessibleName -and $Text) { $Ctl.AccessibleName = (($Text -split '[\.\(\r\n]')[0]).Trim() }
     $script:TipReg[$Ctl] = @{ Text = $Text; Key = $Key }
     $toolTip.SetToolTip($Ctl, (Get-TooltipText -Text $Text -Key $Key -Mode (Get-TipModeNow)))
 }
@@ -6421,7 +6531,7 @@ function Start-NewsLoad {
         return
     }
     $syms = @(Get-NewsSymbols -Holdings @($script:Portfolio.Keys | Sort-Object) -Watchlist @($script:Config.Watchlist) -Max 40)
-    if ($syms.Count -eq 0) {
+    if ($syms.Count -eq 0 -and @(ConvertTo-FeedList ([string]$script:Config.NewsFeeds)).Count -eq 0) {
         $script:NewsItems = @()
         $script:NewsLoadedAt = Get-Date
         Update-NewsBadge
@@ -6429,7 +6539,9 @@ function Start-NewsLoad {
         return
     }
     $urls = @{}
-    foreach ($s in $syms) { $urls[$s] = "https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=0&newsCount=10" -f [Uri]::EscapeDataString($s) }
+    foreach ($s in $syms) { $urls[$s] = Get-ProviderUrl -Kind "Search" -Symbol $s -NewsCount 10 }
+    # v5.7: own RSS / Atom feeds
+    foreach ($fu in @(ConvertTo-FeedList ([string]$script:Config.NewsFeeds))) { $urls["rss:" + $fu] = $fu }
     $script:NewsLoading = $true
     if ($viewNews.Visible) { Update-NewsInfo }
     Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
@@ -6444,9 +6556,12 @@ function Start-NewsLoad {
         }
         $by = @{}
         $ok = 0
+        $rssItems = @()
         foreach ($s in $Ctx.Urls.Keys) {
             $j = $Box.Results[$Ctx.Urls[$s]]
             if ($null -ne $j) { $ok++ }
+            # v5.7: own feeds come back as text
+            if (([string]$s).StartsWith("rss:")) { if ($j -is [string]) { $rssItems += @(ConvertFrom-RssFeed -Text $j -Fallback (Get-ProviderOfUrl $Ctx.Urls[$s])) }; continue }
             $by[$s] = @(ConvertFrom-YahooNews $j)
         }
         if ($ok -eq 0) {
@@ -6455,6 +6570,16 @@ function Start-NewsLoad {
         } else {
             $script:NewsError = ""
             $script:NewsItems = @(Merge-NewsFeed -BySymbol $by -Max 150)
+            if ($rssItems.Count -gt 0) {
+                $nameMap = @{}
+                foreach ($s in $by.Keys) {
+                    $q0 = $script:QuoteStore[$s]
+                    $nm0 = if ($null -ne $q0 -and $q0.LongName) { [string]$q0.LongName } elseif ($null -ne $script:Profiles[$s]) { [string]$script:Profiles[$s].Name } else { "" }
+                    $w0 = Get-NewsNameKey $nm0
+                    if ($w0) { $nameMap[$s] = $w0 }
+                }
+                $script:NewsItems = @(Add-RssToFeed -Feed $script:NewsItems -RssItems $rssItems -NameMap $nameMap -Max 200)
+            }
             $script:NewsLoadedAt = Get-Date
             # first start: nothing counts as unread
             if ($script:NewsSeenAt -eq [DateTime]::MinValue) {
@@ -12049,9 +12174,37 @@ function Show-DescriptionDialog {
 # ---- v5.1: TA / FA <ticker>: technical signals + fundamentals in one window ----
 $script:TaCtl = $null
 
+function Get-PeerGroup {
+    param([string]$Sym)
+    $pg = $script:Config.PeerGroups
+    if ($null -eq $pg -or $pg -is [string]) { return @() }
+    $pp = $pg.PSObject.Properties[([string]$Sym).ToUpper()]
+    if ($null -eq $pp) { return @() }
+    return @(@($pp.Value) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpper() })
+}
+
+function Set-PeerGroup {
+    param([string]$Sym, [string[]]$Peers)
+    $u = ([string]$Sym).ToUpper()
+    if ($null -eq $script:Config.PeerGroups -or $script:Config.PeerGroups -is [string]) { $script:Config.PeerGroups = [PSCustomObject]@{} }
+    if (@($Peers).Count -gt 0) { $script:Config.PeerGroups | Add-Member -NotePropertyName $u -NotePropertyValue @($Peers) -Force }
+    else { $script:Config.PeerGroups.PSObject.Properties.Remove($u) }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    # fundamentals of peers outside depot / watchlist
+    $miss = @(@($Peers) | Where-Object { $null -eq $script:Events[$_] -or $null -eq $script:Events[$_].Fund })
+    if ($miss.Count -gt 0) { Start-ProfileJob -Symbols $miss -EventsOnly $true -OnComplete { if ($null -ne $script:TaCtl) { Update-TickerAnalysis } } }
+}
+
 function Get-FundPeers {
     # other tickers of your depot + watchlist in the same sector with fundamentals
+    # v5.7: an own comparison group (PEER) wins over the sector
     param([string]$Sym)
+    $own = @(Get-PeerGroup $Sym)
+    if ($own.Count -gt 0) {
+        $pf = @(); $nm = @()
+        foreach ($u in $own) { $e = $script:Events[$u]; if ($null -ne $e -and $null -ne $e.Fund) { $pf += $e.Fund; $nm += $u } }
+        return [PSCustomObject]@{ Sector = (Tr "eigene Gruppe"); Peers = $pf; Syms = $nm; Own = $true; Wanted = $own }
+    }
     $sec = ""
     $pr = $script:Profiles[$Sym]
     if ($null -ne $pr) { $sec = [string]$pr.Sector }
@@ -12087,19 +12240,33 @@ function Update-TickerAnalysis {
     if ($null -ne $c.Bars) {
         $sig = Get-TechnicalSignals -Closes ([double[]]$c.Bars.Close) -Highs ([double[]]$c.Bars.High) -Lows ([double[]]$c.Bars.Low) -Volumes ([double[]]$c.Bars.Volume)
         $c.Sig = $sig
+        # v5.7: the same signals on weekly bars + one sentence for both
+        $wb = ConvertTo-WeeklyBars -Dates ([string[]]$c.Bars.Dates) -Close ([double[]]$c.Bars.Close) -High ([double[]]$c.Bars.High) -Low ([double[]]$c.Bars.Low) -Volume ([double[]]$c.Bars.Volume)
+        $wsig = Get-TechnicalSignals -Closes ([double[]]$wb.Close) -Highs ([double[]]$wb.High) -Lows ([double[]]$wb.Low) -Volumes ([double[]]$wb.Volume)
+        $wByKey = @{}
+        foreach ($wr in @($wsig.Rows)) { $wByKey[[string]$wr.Key] = $wr }
+        $c.WSig = $wsig
         foreach ($r in $sig.Rows) {
-            $i = $g.Rows.Add((Tr $r.Name), $r.Value, (Tr $r.Text))
+            $wr = $wByKey[[string]$r.Key]
+            $wTxt = if ($null -eq $wr -or $r.Key -in @("SUP", "RES", "ATR", "VOL")) { "" } elseif ($wr.Score -gt 0) { "+" } elseif ($wr.Score -lt 0) { [string][char]0x2212 } else { [string][char]0x00B7 }
+            $i = $g.Rows.Add((Tr $r.Name), $r.Value, $wTxt, (Tr $r.Text))
             $col = if ($r.Score -gt 0) { $colGreen } elseif ($r.Score -lt 0) { $colRed } else { $p.Muted }
-            $g.Rows[$i].Cells[2].Style.ForeColor = $col
+            $g.Rows[$i].Cells[3].Style.ForeColor = $col
+            if ($null -ne $wr -and $wTxt) {
+                $g.Rows[$i].Cells[2].Style.ForeColor = if ($wr.Score -gt 0) { $colGreen } elseif ($wr.Score -lt 0) { $colRed } else { $p.Muted }
+                $g.Rows[$i].Cells[2].ToolTipText = "{0}: {1} - {2}" -f (Tr "Wochenkurse"), $wr.Value, (Tr $wr.Text)
+            }
         }
         $sc = [int]$sig.Score
-        $c.TSum.ForeColor = if ($sc -ge 3) { $colGreen } elseif ($sc -le -3) { $colRed } else { $script:Pal.Warn }
-        $c.TSum.Text = "{0}: {1}  ({2} {3}, {4} {5}; {6} {7})" -f (Tr "Signale"), (Tr $sig.Summary), $sig.Positive, (Tr "positiv"), $sig.Negative, (Tr "negativ"), (Tr "Kurse in"), $c.Bars.Currency
+        $vd = Get-TimeframeVerdict -Daily $sc -Weekly ([int]$wsig.Score) -HasWeekly (@($wb.Close).Count -ge 30)
+        $c.TSum.ForeColor = if ($vd.Tone -gt 0) { $colGreen } elseif ($vd.Tone -lt 0) { $colRed } else { $script:Pal.Warn }
+        $c.TSum.Text = "{0} {1:+0;-0;0} / {2} {3:+0;-0;0}: {4}" -f (Tr "Tag"), $sc, (Tr "Woche"), [int]$wsig.Score, (Tr $vd.Text)
+        Set-DynTip $c.TSum ("{0}: {1} ({2} {3}, {4} {5})`r`n{6}: {7}`r`n{8} {9}" -f (Tr "Tageskurse"), (Tr $sig.Summary), $sig.Positive, (Tr "positiv"), $sig.Negative, (Tr "negativ"), (Tr "Wochenkurse"), (Tr $wsig.Summary), (Tr "Kurse in"), $c.Bars.Currency)
     } elseif ($c.Failed) {
-        [void]$g.Rows.Add((Tr "Kursverlauf nicht verfügbar"), "", "")
+        [void]$g.Rows.Add((Tr "Kursverlauf nicht verfügbar"), "", "", "")
         $c.TSum.Text = ""
     } else {
-        [void]$g.Rows.Add((Tr "Lade Kursverlauf (2 Jahre) ..."), "", "")
+        [void]$g.Rows.Add((Tr "Lade Kursverlauf (2 Jahre) ..."), "", "", "")
         $c.TSum.Text = ""
     }
     $c.Chart.Invalidate()
@@ -12122,7 +12289,24 @@ function Update-TickerAnalysis {
         $f.Rows[$i].Cells[3].Style.ForeColor = $col
         if ($r.Value -eq "-") { $f.Rows[$i].Cells[1].Style.ForeColor = $p.Muted }
     }
-    $c.FNote.Text = if (@($pe.Syms).Count -ge 2) {
+    # v5.7: valuation vs. own history (snapshots collected since v5.7)
+    $vh = @(Get-ValuationVsHistory -History $script:FundHist[$sym] -Fund $fund)
+    $nSnap = @($script:FundHist[$sym]).Count
+    $hi = $f.Rows.Add((Tr "Bewertung vs. eigene Historie"), "", (Tr "Median"), $(if ($vh.Count -gt 0) { "{0} {1} ({2} {3})" -f (Tr "seit"), (Format-IsoDateDe ([string]$vh[0].Since)), $vh[0].Count, (Tr "Tage") } else { "{0} ({1} {2})" -f (Tr "ab 20 Tagen Daten"), $nSnap, (Tr "bisher") }))
+    $f.Rows[$hi].DefaultCellStyle.Font = $fontUiBold
+    $f.Rows[$hi].DefaultCellStyle.ForeColor = $p.Accent
+    foreach ($r in $vh) {
+        $pct = ($r.Key -eq "DivYield")
+        $fmt = { param($v) if ($pct) { "{0:N2}%" -f ($v * 100) } else { "{0:N1}" -f $v } }
+        $i = $f.Rows.Add(("  " + (Tr $r.Label)), (& $fmt $r.Now), (& $fmt $r.Median), ("{0} ({1} {2}: {3} - {4})" -f (Tr $r.Note), (Tr "Rang"), $r.Rank, (& $fmt $r.Min), (& $fmt $r.Max)))
+        $good = if ($pct) { $r.Rank -ge 80 } else { $r.Rank -le 20 }
+        $bad = if ($pct) { $r.Rank -le 20 } else { $r.Rank -ge 80 }
+        $f.Rows[$i].Cells[3].Style.ForeColor = if ($good) { $colGreen } elseif ($bad) { $colRed } else { $p.Muted }
+    }
+    $c.FNote.Text = if ([bool]$pe.Own) {
+        $miss = @(@($pe.Wanted) | Where-Object { @($pe.Syms) -notcontains $_ })
+        "{0}: {1}{2}" -f (Tr "Vergleich = Median deiner Vergleichsgruppe (PEER)"), (@($pe.Syms) -join ", "), $(if ($miss.Count -gt 0) { " - " + (Tr "lädt noch") + ": " + ($miss -join ", ") } else { "" })
+    } elseif (@($pe.Syms).Count -ge 2) {
         "{0} {1} ({2}): {3}" -f (Tr "Vergleich = Median deiner Ticker aus"), $pe.Sector, @($pe.Syms).Count, ((@($pe.Syms) | Select-Object -First 8) -join ", ")
     } elseif ($pe.Sector) {
         "{0} '{1}' {2}" -f (Tr "Für einen Vergleich fehlen weitere Ticker aus"), $pe.Sector, (Tr "in Depot / Watchlist (mind. 2)")
@@ -12213,7 +12397,7 @@ function Show-TickerAnalysis {
     $tg = New-Object System.Windows.Forms.DataGridView
     $tg.SetBounds((S 12), (S 266), $half, (S 326)); $tg.Anchor = $aT -bor $aB -bor $aL
     Style-DataGrid -Grid $tg
-    foreach ($cd in @(@("Sig", "Signal", 150), @("Val", "Wert", 130), @("Txt", "Einordnung", 210))) { $ci = $tg.Columns.Add($cd[0], $cd[1]); $tg.Columns[$ci].FillWeight = [float](S $cd[2]); $tg.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
+    foreach ($cd in @(@("Sig", "Signal", 140), @("Val", "Wert (Tag)", 110), @("Wk", "Woche", 90), @("Txt", "Einordnung", 190))) { $ci = $tg.Columns.Add($cd[0], $cd[1]); $tg.Columns[$ci].FillWeight = [float](S $cd[2]); $tg.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
     $tg.Columns[1].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
     $tg.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $dlg.Controls.Add($tg)
@@ -12253,6 +12437,14 @@ function Show-TickerAnalysis {
     Set-DynTip $bNote $(if (Get-TickerNote $sym) { Get-NoteSnippet (Get-TickerNote $sym) -Max 300 } else { "Eigene Notiz zum Ticker: These, Kaufgrund, Ziele" })
     $bNote.Add_Click({ param($sender, $e) Show-NoteDialog -Ticker ([string]$sender.Tag); $sender.Text = $(if (Get-TickerNote ([string]$sender.Tag)) { "Notiz " + [string][char]0x270E } else { "Notiz ..." }) })
     $dlg.Controls.Add($bNote)
+    # v5.7: own comparison group
+    $bPeer = New-Object System.Windows.Forms.Button
+    $bPeer.SetBounds((S 718), (S 622), (S 130), (S 28)); $bPeer.Anchor = $aB -bor $aR
+    Style-FlatButton -Btn $bPeer -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $bPeer.Text = "Vergleichsgruppe ..."; $bPeer.Tag = $sym
+    Set-DynTip $bPeer "Eigene Ticker für die Spalte 'Vergleich' statt des Sektors (Befehl NVDA PEER AMD INTC)"
+    $bPeer.Add_Click({ param($sender, $e) [void](Invoke-TerminalCommand (([string]$sender.Tag) + " PEER")) })
+    $dlg.Controls.Add($bPeer)
     # the chart grows with the window width (left half)
     $dlg.Add_Resize({
         param($sender, $e)
@@ -12632,6 +12824,16 @@ function Invoke-TerminalCommand {
             Set-TransientStatus ("Alarm angelegt: {0}" -f (Format-AlertLine -Alert $script:Alerts[$script:Alerts.Count - 1])) 5
         }
         "WL"   { [void](Add-SymbolToWatchlist -RawSymbol $sym) }
+        "PEER" {
+            # v5.7: NVDA PEER AMD INTC TSM / NVDA PEER - (delete) / NVDA PEER (edit)
+            $rest = (@($c.Args) -join " ").Trim()
+            if ($rest -eq "-") { Set-PeerGroup -Sym $sym -Peers @(); Set-TransientStatus ("Vergleichsgruppe von {0} gelöscht - wieder Sektor" -f $sym) 4; return "" }
+            if (-not $rest) { $rest = Read-TextPrompt -Title ("Vergleichsgruppe - {0}" -f $sym) -Prompt "Ticker für den Vergleich, z. B. AMD INTC TSM (leer = Sektor)" -Value ((Get-PeerGroup $sym) -join " ") }
+            $pl = @(ConvertTo-PeerList -Text $rest -Self $sym)
+            Set-PeerGroup -Sym $sym -Peers $pl
+            Set-TransientStatus $(if ($pl.Count -gt 0) { "Vergleichsgruppe {0}: {1}" -f $sym, ($pl -join ", ") } else { "Vergleichsgruppe von {0} gelöscht" -f $sym }) 5
+            if ($null -ne $script:TaCtl -and $script:TaCtl.Sym -eq $sym) { Update-TickerAnalysis }
+        }
         "NOTE" {
             $rest = (@($c.Args) -join " ").Trim()
             if ($rest) { Set-TickerNote -Ticker $sym -Text $rest; Set-TransientStatus ("Notiz zu {0} gespeichert" -f $sym) 3 }
@@ -14655,6 +14857,10 @@ function Show-SettingsDialog {
         $sender.Enabled = $false
     }
     $btnMuted.Enabled = (@($script:NewMuted).Count -gt 0)
+    # v5.7: own feeds
+    $tFeeds = & $addText -Label "Eigene RSS-Feeds (eine Adresse je Zeile)" -Value ([string]$cfg.NewsFeeds) -Tip "RSS- oder Atom-Adressen, z. B. die Wirtschafts-Feeds deiner Zeitung. Meldungen mit dem Namen eines deiner Ticker im Titel werden dem Ticker zugeordnet." -Key "NewsFeeds" -Default ([string]$dc.NewsFeeds) -Width (S 196) -Words "RSS Atom Feed Nachrichten Quelle finanzen derstandard"
+    $tFeeds.Multiline = $true; $tFeeds.Height = S 64; $tFeeds.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical; $tFeeds.Font = $fontUi
+    $lay.Y += S 44
 
     # ================= Alarme & Benachrichtigungen =================
     & $beginPage "Alerts"
@@ -14691,6 +14897,9 @@ function Show-SettingsDialog {
     $kwTip = "Kommagetrennt, z. B.: downgrade, gewinnwarnung, übernahme, profit warning. Kommt eine Schlagzeile mit so einem Wort zu einem Ticker im Depot, gibt es einen Hinweis (und Handy-Push, falls eingerichtet). Leer = aus."
     $tKw = & $addText -Label "Alarm-Wörter" -Value ([string]$cfg.NewsKeywords) -Tip $kwTip -Key "NewsKeywords" -Default ([string]$dc.NewsKeywords) -Width (S 196) -Words "News Schlagzeilen"
     $chkKwWatch = & $addCheck -Label "Alarm-Wörter auch für Watchlist-Ticker" -Value ([bool]$cfg.NewsKeywordWatch) -Key "NewsKeywordWatch" -Default ([bool]$dc.NewsKeywordWatch)
+    & $addSection "Signal-Wechsel (Ticker-Analyse)"
+    $saMap = @{ "Depot" = "Depot"; "Alle" = "Depot + Watchlist"; "Aus" = "Aus" }
+    $cbSigAl = & $addCombo -Label "Hinweis bei Signal-Wechsel" -Items @("Depot", "Depot + Watchlist", "Aus") -Value $saMap[[string]$cfg.SignalAlerts] -Tip "Einmal am Tag: Signal wird überwiegend positiv / negativ, Kurs fällt unter die Unterstützung oder steigt über den Widerstand" -Key "SignalAlerts" -Default "Depot" -Words "Signal Alarm Unterstützung Widerstand"
 
     # ================= Depot =================
     & $beginPage "Depot"
@@ -15065,6 +15274,10 @@ function Show-SettingsDialog {
     $cfg.NewsMoveThreshold     = [int]$nNewsMove.Value
     $cfg.NewsKeywords          = (@(ConvertTo-KeywordList $tKw.Text) -join ", ")
     $cfg.NewsKeywordWatch      = [bool]$chkKwWatch.Checked
+    $cfg.SignalAlerts          = switch ([string]$cbSigAl.SelectedItem) { "Depot + Watchlist" { "Alle" } "Aus" { "Aus" } default { "Depot" } }
+    $feedsNew = (@(ConvertTo-FeedList $tFeeds.Text) -join "`r`n")
+    if ($feedsNew -ne [string]$cfg.NewsFeeds) { $script:NextNewsLoad = Get-Date }
+    $cfg.NewsFeeds             = $feedsNew
     $cfg.NewsMuted             = @($script:NewMuted)
     $hkNew = $tHk.Text.Trim()
     $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
@@ -15296,7 +15509,8 @@ function Get-HealthChecks {
         & $add "Speicher" $(if ($mb -gt 900) { "WARN" } else { "INFO" }) ("{0:N0} MB (Arbeitsspeicher), {1:N0} MB privat" -f $mb, ($pr0.PrivateMemorySize64 / 1MB))
     } catch { }
     $nReq = $script:FetchLog.Count
-    & $add "Abfragen" $(if ($nReq -gt 2000) { "WARN" } else { "INFO" }) ("{0} Anfragen in der letzten Stunde, Intervall {1} s / {2} s" -f $nReq, [int]$script:Config.RefreshSeconds, [int]$script:Config.SlowRefreshSeconds)
+    $byP = @($script:FetchLog.ToArray() | Group-Object -Property P | Sort-Object Count -Descending | ForEach-Object { "{0} {1}" -f $_.Name, $_.Count })
+    & $add "Abfragen" $(if ($nReq -gt 2000) { "WARN" } else { "INFO" }) ("{0} Anfragen in der letzten Stunde ({3}), Intervall {1} s / {2} s" -f $nReq, [int]$script:Config.RefreshSeconds, [int]$script:Config.SlowRefreshSeconds, $(if ($byP.Count -gt 0) { $byP -join ", " } else { "-" }))
     # log
     if (Test-Path $script:LogPath) {
         $lf = Get-Item $script:LogPath
@@ -15527,6 +15741,16 @@ P > Einkommen   received dividends as a month calendar; Export button
 Scenario        per sector or currency (Beitrag page)
 Savings plans   yearly increase (%) and pause months
 Watchlist       column "Signal" (header right-click), clock = stale price
+
+New in 5.7
+NVDA TA         daily and weekly signals side by side, one sentence for both;
+                valuation vs. the ticker's own history (grows from now on)
+NVDA PEER AMD   own peer group for the comparison column (PEER - = sector)
+Signals         once a day: note when a depot ticker's signal turns, or the
+                price crosses support / resistance (Settings > Alerts)
+Chart           with support / resistance on: 50/200-day crossings (triangles)
+News            own RSS / Atom feeds (Settings > Data & refresh)
+THEME CONTRAST  high contrast; HEALTH shows requests per data source
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -15666,6 +15890,16 @@ P > Einkommen   erhaltene Dividenden als Monatskalender; Knopf Export
 Szenario        je Sektor oder Währung (Seite Beitrag)
 Sparpläne       Dynamik (% pro Jahr) und Pausenmonate
 Watchlist       Spalte "Signal" (Rechtsklick auf Kopf), Uhr = alter Kurs
+
+Neu in 5.7
+NVDA TA         Tages- und Wochensignale nebeneinander, ein Satz für beide;
+                Bewertung vs. eigene Historie des Tickers (wächst ab jetzt)
+NVDA PEER AMD   eigene Vergleichsgruppe für die Spalte Vergleich (PEER - = Sektor)
+Signale         einmal am Tag: Hinweis, wenn das Signal eines Depot-Tickers
+                kippt oder der Kurs Unterstützung / Widerstand kreuzt
+Chart           mit Unterstützung / Widerstand: 50/200-Tage-Kreuzungen (Dreiecke)
+Nachrichten     eigene RSS- / Atom-Feeds (Einstellungen > Daten)
+THEME CONTRAST  hoher Kontrast; HEALTH zeigt Anfragen je Datenquelle
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
@@ -17357,6 +17591,7 @@ $uiTimer.Add_Tick({
             Check-EarningsNotifications
             Invoke-DailyBackup
             Invoke-SavingsPlans   # v5.0
+            Request-DailySignals  # v5.7
         }
         # v4.9: news feed (also in the background, for the unread count)
         if ($script:StartupDone -and $nowTick -ge $script:NextNewsLoad) {
@@ -18205,6 +18440,45 @@ function Invoke-SmokeTest {
         Refresh-WatchlistAndAlerts
         [void](Invoke-TerminalCommand "STYLE REFINED"); Set-ActiveTab -TabName "Chart"; & $pump
         if (@(Get-HealthChecks | Where-Object { $_.Name -in @("Startzeit", "Speicher", "Abfragen") }).Count -lt 2) { throw "health has no start / memory / load lines" }
+    }
+    # v5.7: weekly signals, peer group, valuation history, signal alerts, contrast theme
+    Invoke-SmokeStep "TA weekly + peers + history" {
+        [void](Invoke-TerminalCommand "NVDA PEER MSFT AAPL")
+        if ((Get-PeerGroup "NVDA") -join "," -ne "MSFT,AAPL") { throw "peer group not saved: $((Get-PeerGroup NVDA) -join ',')" }
+        if (-not [bool](Get-FundPeers -Sym "NVDA").Own) { throw "own peer group not used" }
+        $h = @(); foreach ($i in 1..25) { $h = Add-FundSnapshot -History $h -Fund ([PSCustomObject]@{ TrailingPE = 30.0 + $i }) -Day ((Get-Date).AddDays(-30 + $i).ToString("yyyy-MM-dd")) }
+        $script:FundHist["NVDA"] = $h
+        & $probeRun { Show-TickerAnalysis "NVDA" } {
+            $c = $script:TaCtl
+            if ($null -eq $c) { return "window not open" }
+            if ($c.TGrid.Columns.Count -ne 4) { return "TA grid has $($c.TGrid.Columns.Count) columns" }
+            if ($null -ne $c.Bars -and ($null -eq $c.WSig -or $c.TSum.Text -notmatch "/")) { return "no weekly signals: '$($c.TSum.Text)'" }
+            if ($null -ne $script:Events["NVDA"] -and $null -ne $script:Events["NVDA"].Fund -and @($c.FGrid.Rows | Where-Object { [string]$_.Cells[0].Value -like "*eigene Historie*" }).Count -ne 1) { return "valuation history rows missing" }
+            & $script:SmokeShot "19-ta-weekly-history" $c.Dlg
+            return ""
+        } 8000
+        [void](Invoke-TerminalCommand "NVDA PEER -")
+        if (@(Get-PeerGroup "NVDA").Count -ne 0) { throw "PEER - did not clear" }
+    } 10000
+    Invoke-SmokeStep "Signal change alert" {
+        $o = [PSCustomObject]@{ Day = "2026-01-01"; Score = 0; Close = @(1..30 | ForEach-Object { 100.0 }); Support = 95.0; Resistance = 105.0 }
+        $n0 = [PSCustomObject]@{ Day = "2026-01-02"; Score = 5; Close = @(1..30 | ForEach-Object { 106.0 }) }
+        $script:LastSignalAlert = ""
+        $psym = @($script:Portfolio.Keys)[0]
+        Send-SignalChangeAlerts -Sym ([string]$psym).ToUpper() -Old $o -New $n0
+        if ($script:LastSignalAlert -notmatch "Widerstand") { throw "no signal alert for a depot ticker ('$($script:LastSignalAlert)')" }
+        $script:Config.SignalAlerts = "Aus"; $script:LastSignalAlert = ""
+        Send-SignalChangeAlerts -Sym ([string]$psym).ToUpper() -Old $o -New $n0
+        if ($script:LastSignalAlert) { throw "alert although switched off" }
+        $script:Config.SignalAlerts = "Depot"
+    }
+    Invoke-SmokeStep "Contrast theme + 50/200 markers" {
+        [void](Invoke-TerminalCommand "THEME CONTRAST"); Set-ActiveTab -TabName "Chart"; [void](Invoke-TerminalCommand "TF 1Y")
+        Set-ChartOption -Key "ShowSR" -On $true; & $pump; $pnlChartCanvas.Refresh()
+        & $script:SmokeShot "20-contrast-theme-markers"
+        Set-ChartOption -Key "ShowSR" -On $false
+        $script:Config.Theme = "Dark"; Apply-ThemeToAllControls; & $pump
+        if (@(Get-HealthChecks | Where-Object { $_.Name -eq "Abfragen" -and $_.Detail -match "Yahoo" }).Count -lt 1) { throw "health shows no requests per provider" }
     }
     Invoke-SmokeStep "Dialog places" {
         Show-CashDialog

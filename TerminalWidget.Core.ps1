@@ -930,7 +930,7 @@ function Test-CompactLayout {
 }
 
 function Get-ThemeNames {
-    return @("Dark", "OLED", "Light", "Terminal", "Graphite")
+    return @("Dark", "OLED", "Light", "Terminal", "Graphite", "Contrast")   # v5.7: Contrast = high contrast
 }
 
 function Get-NextTheme {
@@ -2819,6 +2819,7 @@ function Get-TerminalFunctions {
         "ALRT"   = @{ Scope = "GT"; Desc = "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" }
         "WL"     = @{ Scope = "T";  Desc = "Zur Watchlist hinzufügen" }
         "NOTE"   = @{ Scope = "T";  Desc = "Notiz zum Ticker (Kaufgrund, These)" }
+        "PEER"   = @{ Scope = "T";  Desc = "Eigene Vergleichsgruppe: NVDA PEER AMD INTC (PEER - = wieder Sektor)" }
         "CMP"    = @{ Scope = "GT"; Desc = "Vergleich im Chart (CMP ohne Ticker = aus)" }
         "TX"     = @{ Scope = "GT"; Desc = "Transaktion erfassen / Historie" }
         "PORT"   = @{ Scope = "G";  Desc = "Portfolio" }
@@ -4801,7 +4802,8 @@ function Get-PortableSettingKeys {
         "TooltipMode", "TooltipDelayMs", "HoverCards",
         "Currency", "AutoCurrency", "RiskFreePct",
         "ChartType", "ShowVolume", "ShowRsi", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
-        "UserLayouts", "GridLayouts"
+        "UserLayouts", "GridLayouts",
+        "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds"
     )
 }
 
@@ -5170,4 +5172,283 @@ function Get-DividendIncomeTable {
         $rows += [PSCustomObject]@{ Year = $y; Months = [double[]]$ms; Total = [double]$tot; ChangePct = $chg; MonthlyAvg = [double]$tot / 12.0 }
     }
     return [PSCustomObject]@{ Rows = $rows; Max = $max; Total = [double](@($rows | ForEach-Object { $_.Total }) | Measure-Object -Sum).Sum }
+}
+
+# ==============================================================================
+# v5.7: analysis without new providers - weekly signals, signal changes, peer
+# groups, valuation vs. own history, RSS news, provider layer
+# ==============================================================================
+function ConvertTo-WeeklyBars {
+    # daily bars -> weekly (week = Monday..Sunday): last close, highest high,
+    # lowest low, summed volume; Dates = the last trading day of each week
+    param([string[]]$Dates, [double[]]$Close, [double[]]$High = $null, [double[]]$Low = $null, [double[]]$Volume = $null)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $o = [PSCustomObject]@{ Dates = @(); Close = @(); High = @(); Low = @(); Volume = @() }
+    $n = [math]::Min(@($Dates).Count, @($Close).Count)
+    if ($n -eq 0) { return $o }
+    $d = New-Object System.Collections.Generic.List[string]; $c = New-Object System.Collections.Generic.List[double]
+    $h = New-Object System.Collections.Generic.List[double]; $l = New-Object System.Collections.Generic.List[double]; $v = New-Object System.Collections.Generic.List[double]
+    $curKey = ""
+    for ($i = 0; $i -lt $n; $i++) {
+        $dt = [DateTime]::ParseExact([string]$Dates[$i], "yyyy-MM-dd", $inv)
+        $dow = ([int]$dt.DayOfWeek + 6) % 7
+        $key = $dt.AddDays(-$dow).ToString("yyyy-MM-dd", $inv)
+        $hi = if ($null -ne $High -and $i -lt $High.Count) { [double]$High[$i] } else { [double]$Close[$i] }
+        $lo = if ($null -ne $Low -and $i -lt $Low.Count) { [double]$Low[$i] } else { [double]$Close[$i] }
+        $vo = if ($null -ne $Volume -and $i -lt $Volume.Count) { [double]$Volume[$i] } else { 0.0 }
+        if ($key -ne $curKey) {
+            $curKey = $key
+            $d.Add([string]$Dates[$i]); $c.Add([double]$Close[$i]); $h.Add($hi); $l.Add($lo); $v.Add($vo)
+        } else {
+            $k = $d.Count - 1
+            $d[$k] = [string]$Dates[$i]; $c[$k] = [double]$Close[$i]
+            if ($hi -gt $h[$k]) { $h[$k] = $hi }
+            if ($lo -lt $l[$k]) { $l[$k] = $lo }
+            $v[$k] += $vo
+        }
+    }
+    $o.Dates = $d.ToArray(); $o.Close = $c.ToArray(); $o.High = $h.ToArray(); $o.Low = $l.ToArray(); $o.Volume = $v.ToArray()
+    return $o
+}
+
+function Get-SignalTone {
+    # score -> +1 (überwiegend positiv) / -1 (überwiegend negativ) / 0
+    param([int]$Score)
+    if ($Score -ge 3) { return 1 }
+    if ($Score -le -3) { return -1 }
+    return 0
+}
+
+function Get-TimeframeVerdict {
+    # daily and weekly signal score -> one plain-language sentence
+    param([int]$Daily, [int]$Weekly, [bool]$HasWeekly = $true)
+    $d = Get-SignalTone $Daily; $w = Get-SignalTone $Weekly
+    if (-not $HasWeekly) { return [PSCustomObject]@{ Tone = $d; Text = "Zu wenig Wochendaten für die mittelfristige Sicht." } }
+    $t = switch ("$d|$w") {
+        "1|1"   { "Tages- und Wochensignale sind positiv: Aufwärtstrend auf beiden Zeitebenen." }
+        "-1|-1" { "Tages- und Wochensignale sind negativ: Abwärtstrend auf beiden Zeitebenen." }
+        "1|-1"  { "Kurzfristig positiv, mittelfristig negativ: eher eine Erholung im längeren Abwärtstrend." }
+        "-1|1"  { "Kurzfristig negativ, mittelfristig positiv: eher ein Rücksetzer im längeren Aufwärtstrend." }
+        "1|0"   { "Kurzfristig positiv, mittelfristig gemischt: der Aufwärtsimpuls ist auf Wochensicht noch nicht bestätigt." }
+        "-1|0"  { "Kurzfristig negativ, mittelfristig gemischt: Schwäche, aber auf Wochensicht noch kein klarer Abwärtstrend." }
+        "0|1"   { "Kurzfristig gemischt, mittelfristig positiv: der längere Aufwärtstrend ist intakt, kurzfristig ohne Richtung." }
+        "0|-1"  { "Kurzfristig gemischt, mittelfristig negativ: der längere Abwärtstrend ist nicht gebrochen." }
+        default { "Kein klares Bild auf beiden Zeitebenen." }
+    }
+    $tone = if ($d -eq $w) { $d } else { 0 }
+    return [PSCustomObject]@{ Tone = $tone; Text = $t }
+}
+
+function Get-SignalChanges {
+    # yesterday's vs. today's cache entry -> what changed (for alerts):
+    # signal tone up / down, price crossing yesterday's support / resistance
+    param($Old, $New)
+    $out = @()
+    if ($null -eq $Old -or $null -eq $New -or @($New.Close).Count -lt 2 -or [string]$Old.Day -eq [string]$New.Day) { return $out }
+    $t0 = Get-SignalTone ([int]$Old.Score); $t1 = Get-SignalTone ([int]$New.Score)
+    if ($t1 -ne $t0) {
+        $lab = @{ "1" = "überwiegend positiv"; "-1" = "überwiegend negativ"; "0" = "gemischt" }
+        $out += [PSCustomObject]@{ Kind = $(if ($t1 -gt $t0) { "Up" } else { "Down" }); Text = ("Signal jetzt {0} (vorher {1}, Score {2:+0;-0;0})" -f $lab["$t1"], $lab["$t0"], [int]$New.Score) }
+    }
+    $last = [double]@($New.Close)[-1]
+    $prevClose = [double]@($Old.Close)[-1]
+    if ($null -ne $Old.Support -and [double]$Old.Support -gt 0 -and $prevClose -ge [double]$Old.Support -and $last -lt [double]$Old.Support) {
+        $out += [PSCustomObject]@{ Kind = "BelowSupport"; Text = ("Kurs unter die Unterstützung {0:N2} gefallen" -f [double]$Old.Support) }
+    }
+    if ($null -ne $Old.Resistance -and [double]$Old.Resistance -gt 0 -and $prevClose -le [double]$Old.Resistance -and $last -gt [double]$Old.Resistance) {
+        $out += [PSCustomObject]@{ Kind = "AboveResistance"; Text = ("Kurs über den Widerstand {0:N2} gestiegen" -f [double]$Old.Resistance) }
+    }
+    return $out
+}
+
+function Get-MaCrossMarkers {
+    # days where the fast average crosses the slow one (Golden / Death cross)
+    param([double[]]$Closes, [string[]]$Dates, [int]$Fast = 50, [int]$Slow = 200)
+    $out = @()
+    $n = [math]::Min(@($Closes).Count, @($Dates).Count)
+    if ($n -le $Slow) { return $out }
+    $f = Compute-Sma -Prices $Closes -Period $Fast
+    $s = Compute-Sma -Prices $Closes -Period $Slow
+    for ($i = $Slow; $i -lt $n; $i++) {
+        if ([double]::IsNaN($f[$i - 1]) -or [double]::IsNaN($s[$i - 1])) { continue }
+        $a = $f[$i - 1] - $s[$i - 1]; $b = $f[$i] - $s[$i]
+        if ($a -le 0 -and $b -gt 0) { $out += [PSCustomObject]@{ Date = [string]$Dates[$i]; Kind = "Golden" } }
+        elseif ($a -ge 0 -and $b -lt 0) { $out += [PSCustomObject]@{ Date = [string]$Dates[$i]; Kind = "Death" } }
+    }
+    return $out
+}
+
+function ConvertTo-PeerList {
+    # "AMD, intc  TSM;AMD" -> @("AMD", "INTC", "TSM") without the ticker itself, max 15
+    param([string]$Text, [string]$Self = "")
+    $me = ([string]$Self).Trim().ToUpperInvariant()
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($p in (([string]$Text) -split '[\s,;]+')) {
+        $u = $p.Trim().ToUpperInvariant()
+        if (-not $u -or $u -eq $me -or $out.Contains($u) -or $u -notmatch '^[A-Z0-9\^][A-Z0-9\.\-=\^]{0,19}$') { continue }
+        $out.Add($u)
+        if ($out.Count -ge 15) { break }
+    }
+    return @($out)
+}
+
+function Get-ValuationKeys {
+    return @(@("TrailingPE", "KGV (12 Monate)"), @("ForwardPE", "KGV erwartet"), @("PriceToSales", "KUV"), @("PriceToBook", "KBV"), @("EvEbitda", "EV / EBITDA"), @("DivYield", "Dividendenrendite"))
+}
+
+function Add-FundSnapshot {
+    # one valuation snapshot per day (newest last, at most Max days)
+    param($History, $Fund, [string]$Day, [int]$Max = 500)
+    $list = @(@($History) | Where-Object { $null -ne $_ -and [string]$_.D -ne $Day })
+    if ($null -eq $Fund) { return $list }
+    $snap = [ordered]@{ D = $Day }
+    $any = $false
+    foreach ($k in (Get-ValuationKeys)) {
+        $pp = $Fund.PSObject.Properties[$k[0]]
+        $v = $null
+        if ($null -ne $pp -and $null -ne $pp.Value -and [string]$pp.Value -ne "") { try { $x = [double]$pp.Value; if (-not [double]::IsNaN($x) -and -not [double]::IsInfinity($x)) { $v = [math]::Round($x, 4); $any = $true } } catch { } }
+        $snap[$k[0]] = $v
+    }
+    if ($any) { $list += [PSCustomObject]$snap }
+    $list = @($list | Sort-Object -Property { [string]$_.D })
+    if ($list.Count -gt $Max) { $list = @($list | Select-Object -Last $Max) }
+    return $list
+}
+
+function Get-ValuationVsHistory {
+    # today's ratio vs. the snapshots collected so far: median, range, rank
+    # Rows only for keys with at least MinDays values
+    param($History, $Fund, [int]$MinDays = 20)
+    $rows = @()
+    $hist = @(@($History) | Where-Object { $null -ne $_ })
+    foreach ($k in (Get-ValuationKeys)) {
+        $vals = @($hist | ForEach-Object { $_.PSObject.Properties[$k[0]] } | Where-Object { $null -ne $_ -and $null -ne $_.Value } | ForEach-Object { [double]$_.Value })
+        if ($vals.Count -lt $MinDays) { continue }
+        $now = [double]::NaN
+        if ($null -ne $Fund -and $null -ne $Fund.PSObject.Properties[$k[0]] -and $null -ne $Fund.($k[0])) { try { $now = [double]$Fund.($k[0]) } catch { } }
+        if ([double]::IsNaN($now)) { $now = $vals[-1] }
+        $sorted = @($vals | Sort-Object)
+        $med = Get-Median $sorted
+        # mid-rank: equal values count half (flat history -> 50)
+        $below = @($sorted | Where-Object { $_ -lt $now }).Count
+        $equal = @($sorted | Where-Object { $_ -eq $now }).Count
+        $rank = [math]::Round(100.0 * ($below + 0.5 * $equal) / $sorted.Count)
+        $note = if ($k[0] -eq "DivYield") {
+            if ($rank -ge 80) { "Rendite hoch gegenüber der eigenen Historie (eher günstig)" } elseif ($rank -le 20) { "Rendite niedrig gegenüber der eigenen Historie (eher teuer)" } else { "im üblichen Bereich" }
+        } else {
+            if ($rank -ge 80) { "teuer gegenüber der eigenen Historie" } elseif ($rank -le 20) { "günstig gegenüber der eigenen Historie" } else { "im üblichen Bereich" }
+        }
+        $rows += [PSCustomObject]@{ Key = $k[0]; Label = $k[1]; Now = $now; Median = $med; Min = $sorted[0]; Max = $sorted[-1]; Count = $sorted.Count; Rank = $rank; Note = $note; Since = [string]$hist[0].D }
+    }
+    return $rows
+}
+
+function ConvertFrom-RssFeed {
+    # RSS 2.0 or Atom text -> @(@{ Title; Publisher; Link; Time; Tickers = @() })
+    # DTDs and external entities are not processed (safe for any feed)
+    param([string]$Text, [string]$Fallback = "")
+    $out = @()
+    if (-not ([string]$Text).Trim().StartsWith("<")) { return $out }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    $set = New-Object System.Xml.XmlReaderSettings
+    $set.DtdProcessing = [System.Xml.DtdProcessing]::Ignore
+    $set.XmlResolver = $null
+    try {
+        $rd = [System.Xml.XmlReader]::Create((New-Object System.IO.StringReader($Text)), $set)
+        $doc.Load($rd); $rd.Close()
+    } catch { return $out }
+    $parseT = {
+        param([string]$s)
+        $dto = [DateTimeOffset]::MinValue
+        $s2 = ([string]$s).Trim() -replace '\s(GMT|UT|UTC)$', ' +0000' -replace '\sCET$', ' +0100' -replace '\sCEST$', ' +0200'
+        if ([DateTimeOffset]::TryParse($s2, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$dto)) { return $dto.LocalDateTime }
+        return [DateTime]::MinValue
+    }
+    $root = $doc.DocumentElement
+    if ($null -eq $root) { return $out }
+    if ($root.LocalName -eq "feed") {
+        $pub = ([string]($root.SelectSingleNode("*[local-name()='title']").InnerText)).Trim()
+        foreach ($e in @($root.SelectNodes("*[local-name()='entry']"))) {
+            $ln = $e.SelectSingleNode("*[local-name()='link'][@rel='alternate' or not(@rel)]")
+            $link = if ($null -ne $ln) { [string]$ln.GetAttribute("href") } else { "" }
+            $tn = $e.SelectSingleNode("*[local-name()='updated' or local-name()='published']")
+            $out += [PSCustomObject]@{ Title = ([string]$e.SelectSingleNode("*[local-name()='title']").InnerText).Trim(); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $tn) { & $parseT $tn.InnerText } else { [DateTime]::MinValue }); Tickers = @() }
+        }
+        return @($out | Where-Object { $_.Title })
+    }
+    $ch = $root.SelectSingleNode("*[local-name()='channel']")
+    if ($null -eq $ch) { $ch = $root }
+    $tt = $ch.SelectSingleNode("*[local-name()='title']")
+    $pub = if ($null -ne $tt) { ([string]$tt.InnerText).Trim() } else { "" }
+    foreach ($it in @($root.SelectNodes("//*[local-name()='item']"))) {
+        $tn = $it.SelectSingleNode("*[local-name()='title']"); $lk = $it.SelectSingleNode("*[local-name()='link']")
+        $dn = $it.SelectSingleNode("*[local-name()='pubDate' or local-name()='date']")
+        $link = if ($null -ne $lk) { ([string]$lk.InnerText).Trim() } else { "" }
+        $out += [PSCustomObject]@{ Title = $(if ($null -ne $tn) { ([string]$tn.InnerText).Trim() } else { "" }); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $dn) { & $parseT $dn.InnerText } else { [DateTime]::MinValue }); Tickers = @() }
+    }
+    return @($out | Where-Object { $_.Title })
+}
+
+function Get-NewsNameKey {
+    # company name -> the word to look for in headlines ("NVIDIA Corporation" -> "nvidia")
+    param([string]$Name)
+    $stop = @("the", "inc", "corp", "corporation", "ag", "se", "plc", "nv", "sa", "co", "ltd", "group", "holding", "holdings", "company", "class", "ishares", "vanguard", "xtrackers", "core", "msci", "etf", "ucits")
+    foreach ($w in ((ConvertTo-SearchKey $Name) -split '[^a-z0-9]+')) { if ($w.Length -ge 4 -and $stop -notcontains $w) { return $w } }
+    return ""
+}
+
+function Add-RssToFeed {
+    # merged Yahoo feed + RSS items -> one feed (newest first, no duplicates);
+    # RSS items get the tickers whose name key (NameMap: sym -> word) is in the title
+    param($Feed, $RssItems, [hashtable]$NameMap = @{}, [int]$Max = 150, [int]$MaxAgeDays = 14, [DateTime]$Now = [DateTime]::MinValue)
+    if ($Now -eq [DateTime]::MinValue) { $Now = Get-Date }
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($f in @($Feed)) { if ($null -ne $f) { [void]$seen.Add([string]$f.Key); $out.Add($f) } }
+    foreach ($n in @($RssItems)) {
+        if ($null -eq $n -or -not $n.Title) { continue }
+        $t = if ($null -ne $n.Time) { [DateTime]$n.Time } else { [DateTime]::MinValue }
+        if ($t -gt [DateTime]::MinValue -and ($Now - $t).TotalDays -gt $MaxAgeDays) { continue }
+        $key = Get-NewsKey $n
+        if (-not $seen.Add($key)) { continue }
+        $tk = ConvertTo-SearchKey ([string]$n.Title)
+        $syms = @(foreach ($s in $NameMap.Keys) { $w = [string]$NameMap[$s]; if ($w -and $tk -match ('\b' + [regex]::Escape($w) + '\b')) { ([string]$s).ToUpperInvariant() } })
+        $out.Add([PSCustomObject]@{ Key = $key; Title = ([string]$n.Title).Trim(); Publisher = [string]$n.Publisher; Link = [string]$n.Link; Time = $t; Syms = @($syms | Sort-Object -Unique) })
+    }
+    $sorted = @($out | Sort-Object -Property @{ Expression = { $_.Time }; Descending = $true }, @{ Expression = { $_.Title }; Descending = $false })
+    if ($sorted.Count -gt $Max) { $sorted = @($sorted[0..($Max - 1)]) }
+    return $sorted
+}
+
+function ConvertTo-FeedList {
+    # settings text -> http(s) URLs (comma, semicolon, space or line break separated), max 10
+    param([string]$Text)
+    return @(@(([string]$Text) -split '[\s,;]+') | Where-Object { $_ -match '^https?://[^\s]+$' } | Select-Object -Unique -First 10)
+}
+
+# ---- provider layer (groundwork): every data request is built here ----
+function Get-DataProviders { return @("Yahoo") }
+
+function Get-ProviderUrl {
+    # Kind: Chart (Range, Interval), Daily (1y daily bars), Search (news), Quote
+    # Provider: Yahoo for now; V6 adds Twelve Data / Finnhub behind the same call
+    param([string]$Kind, [string]$Symbol, [string]$Range = "1y", [string]$Interval = "1d", [int]$NewsCount = 10, [string]$Provider = "Yahoo")
+    $s = [Uri]::EscapeDataString(([string]$Symbol).Trim())
+    switch ($Kind) {
+        "Daily"  { return "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval=1d&range={1}" -f $s, $Range }
+        "Chart"  { return "https://query1.finance.yahoo.com/v8/finance/chart/{0}?interval={1}&range={2}" -f $s, $Interval, $Range }
+        "Search" { return "https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=0&newsCount={1}" -f $s, $NewsCount }
+        default  { return "" }
+    }
+}
+
+function Get-ProviderOfUrl {
+    # host -> provider name for the request budget ("Yahoo", "RSS: derstandard.at", ...)
+    param([string]$Url)
+    $u = $null
+    if (-not [Uri]::TryCreate([string]$Url, [UriKind]::Absolute, [ref]$u)) { return "?" }
+    $h = $u.Host.ToLowerInvariant()
+    if ($h -like "*finance.yahoo.com" -or $h -like "*yahoo.com") { return "Yahoo" }
+    return "RSS: " + ($h -replace '^www\.', '')
 }
