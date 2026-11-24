@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.8"
+$script:AppVersion    = "4.9"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -513,6 +513,15 @@ $defaultConfig = [PSCustomObject]@{
     # v4.8
     LogScale              = $false
     CompactShow           = "DayAbs,Ext,Spark,Market"
+    # v4.9: news tab + look and feel
+    NewsFilter            = "All"             # All / Holdings / Watchlist / <ticker>
+    NewsSeenAt            = ""                # newest item seen in the news tab (ISO, local)
+    NewsRefreshMinutes    = 15
+    NewsMoveThreshold     = 3                 # mark items of tickers moving >= x % today (0 = off)
+    MonoFont              = "Consolas"        # numbers and tickers (from the next start)
+    FontScale             = 100               # 90 / 100 / 110 / 120 % (from the next start)
+    AlignNumbersRight     = $true             # numbers right-aligned in the lists
+    RoundCorners          = $true             # Windows 11 rounded window corners
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -595,7 +604,7 @@ if ($null -eq $script:Config.Watchlist -or @($script:Config.Watchlist).Count -eq
 if ([string]::IsNullOrWhiteSpace($script:Config.ActiveTicker)) { $script:Config.ActiveTicker = $script:Config.Watchlist[0] }
 if ([string]$script:Config.Currency -notin @(Get-DisplayCurrencies)) { $script:Config.Currency = "EUR" }
 if ($script:Config.ChartType -notin @("Line", "Candle")) { $script:Config.ChartType = "Line" }
-if ($script:Config.ActiveTab -notin @("Chart", "Portfolio", "Watchlist")) { $script:Config.ActiveTab = "Chart" }
+if ($script:Config.ActiveTab -notin @("Chart", "Portfolio", "Watchlist", "News")) { $script:Config.ActiveTab = "Chart" }
 if ($script:Config.Theme -notin @(Get-ThemeNames)) { $script:Config.Theme = "Dark" }
 # v4.0 layouts: a v3 config only knows CompactMode
 if ($script:Config.PSObject.Properties["Layout"] -and $cfgSchema -lt 4 -and [bool]$script:Config.CompactMode) { $script:Config.Layout = "Compact" }
@@ -609,7 +618,11 @@ $script:Config.TerminalChartPct = [math]::Max(25, [math]::Min(80, [int]$script:C
 $script:Config.AnalysisBenchmark = ([string]$script:Config.AnalysisBenchmark).Trim().ToUpper()
 if ([string]$script:Config.AnalysisRange -notin @("6M", "1Y", "3Y", "Max")) { $script:Config.AnalysisRange = "Max" }
 $script:Config.ConcentrationWarnPct = [math]::Max(5, [math]::Min(90, [int]$script:Config.ConcentrationWarnPct))
-if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio")) { $script:Config.TerminalBottom = "Watchlist" }
+if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio", "News")) { $script:Config.TerminalBottom = "Watchlist" }
+$script:Config.NewsRefreshMinutes = [math]::Max(5, [math]::Min(240, [int]$script:Config.NewsRefreshMinutes))
+$script:Config.NewsMoveThreshold  = [math]::Max(0, [math]::Min(50, [int]$script:Config.NewsMoveThreshold))
+if ([int]$script:Config.FontScale -notin @(Get-FontScaleSteps)) { $script:Config.FontScale = 100 }
+if ([string]$script:Config.MonoFont -notin @(Get-MonoFontNames)) { $script:Config.MonoFont = "Consolas" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
 if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene")) { $script:Config.AccentColor = "Sky" }
 if ([string]$script:Config.MaType -notin @("SMA", "EMA")) { $script:Config.MaType = "SMA" }
@@ -2083,6 +2096,7 @@ function Set-CompareTicker {
 function Show-CompareDialog {
     $p = $script:Pal
     $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Add_HandleCreated($script:DialogChromeHandler)
     $dlg.Text = "Vergleichen mit"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.ShowInTaskbar = $false
@@ -2378,13 +2392,23 @@ $udInit   = Get-UpDownColors -Scheme ([string]$script:Config.UpDownScheme) -UpHe
 $colGreen = [System.Drawing.Color]::FromArgb($udInit.Up[0], $udInit.Up[1], $udInit.Up[2])
 $colRed   = [System.Drawing.Color]::FromArgb($udInit.Down[0], $udInit.Down[1], $udInit.Down[2])
 
-$fontTicker = New-Object System.Drawing.Font("Consolas", 10.5, [System.Drawing.FontStyle]::Bold)
-$fontPrice  = New-Object System.Drawing.Font("Consolas", 13.0, [System.Drawing.FontStyle]::Bold)
-$fontUi     = New-Object System.Drawing.Font("Segoe UI", 8.5)
-$fontUiBold = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
-$fontMono   = New-Object System.Drawing.Font("Consolas", 8.5)
-$fontAxis   = New-Object System.Drawing.Font("Consolas", 8.0)
-$fontBadge  = New-Object System.Drawing.Font("Consolas", 8.0, [System.Drawing.FontStyle]::Bold)
+# v4.9: number font (Consolas / Cascadia Mono / ...) and font size, read at start
+$script:InstalledFonts = @()
+try {
+    $ifc = New-Object System.Drawing.Text.InstalledFontCollection
+    $script:InstalledFonts = @($ifc.Families | ForEach-Object { $_.Name })
+    $ifc.Dispose()
+} catch { }
+$script:MonoFamily = Resolve-MonoFont -Wanted ([string]$script:Config.MonoFont) -Installed $script:InstalledFonts
+$fsc = [int]$script:Config.FontScale
+$fontTicker = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 10.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontPrice  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 13.0 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontUi     = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc))
+$fontUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontMono   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc))
+$fontMonoBold = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontAxis   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc))
+$fontBadge  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc), [System.Drawing.FontStyle]::Bold)
 
 $script:GdiCache = @{}
 
@@ -3622,6 +3646,8 @@ $script:EnText = @{
     "Version, Pfade, Update-Prüfung" = "Version, paths, update check"; "Depot wechseln: PF <Name> (ohne Name: neues Depot)" = "Switch depot: PF <name> (without name: new depot)"
     "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
     "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
+    # v4.9: news tab, fonts, frame
+    "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße (ab Neustart)" = "Font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
 }
 
 function Tr {
@@ -3691,18 +3717,33 @@ $form.KeyPreview = $true
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 
-function Apply-DwmTitlebarTheme {
-    if ($form.IsHandleCreated) {
-        try {
-            $darkMode = [int]$script:Pal.DwmDark
-            [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($form.Handle, 20, [ref]$darkMode, 4)
-            $captionColor = [int]$script:Pal.DwmCap
-            [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($form.Handle, 35, [ref]$captionColor, 4)
-            $borderColor = [int]$script:Pal.DwmBdr
-            [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($form.Handle, 34, [ref]$borderColor, 4)
-        } catch { }
-    }
+function Set-WindowChrome {
+    # v4.9: the same window frame for the main window and every dialog: dark
+    # title bar, caption + border colour of the theme, rounded corners
+    # (Windows 11; older Windows ignores the unknown attributes).
+    param([System.Windows.Forms.Form]$Win, [string]$Kind = "Window")
+    if ($null -eq $Win -or $Win.IsDisposed -or -not $Win.IsHandleCreated) { return }
+    try {
+        $darkMode = [int]$script:Pal.DwmDark
+        [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($Win.Handle, 20, [ref]$darkMode, 4)
+        $captionColor = [int]$script:Pal.DwmCap
+        [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($Win.Handle, 35, [ref]$captionColor, 4)
+        $borderColor = [int]$script:Pal.DwmBdr
+        [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($Win.Handle, 34, [ref]$borderColor, 4)
+        $corner = [int](Get-WindowCornerPref -Kind $Kind -Round ([bool]$script:Config.RoundCorners))
+        [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($Win.Handle, 33, [ref]$corner, 4)
+    } catch { }
 }
+
+function Apply-DwmTitlebarTheme {
+    # the main window; the borderless ticker strip gets small round corners
+    $kind = if ([string]$script:Config.Layout -eq "Ticker") { "Strip" } else { "Window" }
+    Set-WindowChrome -Win $form -Kind $kind
+    foreach ($ow in @($form.OwnedForms)) { Set-WindowChrome -Win $ow }
+}
+
+# every dialog gets the frame when its window handle exists
+$script:DialogChromeHandler = { param($sender, $e) Set-WindowChrome -Win $sender }
 
 $form.Add_HandleCreated({ Apply-DwmTitlebarTheme })
 
@@ -4173,8 +4214,11 @@ $tabButtons = @{}
 $tabDefs = @(
     @{ Key = "Chart";     Label = "Chart (F1)";         W = 88  },
     @{ Key = "Portfolio"; Label = "Portfolio (F2)";     W = 104 },
-    @{ Key = "Watchlist"; Label = "Watch & Alarm (F3)"; W = 138 }
+    @{ Key = "Watchlist"; Label = "Watch & Alarm (F3)"; W = 138 },
+    @{ Key = "News";      Label = "News (F4)";          W = 80  }
 )
+# v4.9: the nav bar controls right of the tabs start here (was 346)
+$script:NavX = 431
 $tabX = 0
 foreach ($td in $tabDefs) {
     $b = New-Object System.Windows.Forms.Button
@@ -4190,7 +4234,7 @@ foreach ($td in $tabDefs) {
 }
 
 $btnRefreshNow = New-Object System.Windows.Forms.Button
-$btnRefreshNow.Location = New-Object System.Drawing.Point((S 346), (S 2))
+$btnRefreshNow.Location = New-Object System.Drawing.Point((S ($script:NavX)), (S 2))
 $btnRefreshNow.Size = New-Object System.Drawing.Size((S 30), (S 27))
 Style-FlatButton -Btn $btnRefreshNow -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
 $btnRefreshNow.Font = $fontUiBold
@@ -4199,7 +4243,7 @@ $pnlNav.Controls.Add($btnRefreshNow)
 Set-Tip $btnRefreshNow "Marktdaten jetzt aktualisieren (F5)" "REFRESH"
 
 $cmbRefresh = New-Object System.Windows.Forms.ComboBox
-$cmbRefresh.Location = New-Object System.Drawing.Point((S 380), (S 4))
+$cmbRefresh.Location = New-Object System.Drawing.Point((S ($script:NavX + 34)), (S 4))
 $cmbRefresh.Size = New-Object System.Drawing.Size((S 58), (S 24))
 $cmbRefresh.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $cmbRefresh.BackColor = $script:Pal.Input
@@ -4218,7 +4262,7 @@ $pnlNav.Controls.Add($cmbRefresh)
 Set-Tip $cmbRefresh "Auto-Refresh Intervall" "REFRESH"
 
 $btnThemeCycle = New-Object System.Windows.Forms.Button
-$btnThemeCycle.Location = New-Object System.Drawing.Point((S 442), (S 2))
+$btnThemeCycle.Location = New-Object System.Drawing.Point((S ($script:NavX + 96)), (S 2))
 $btnThemeCycle.Size = New-Object System.Drawing.Size((S 54), (S 27))
 Style-FlatButton -Btn $btnThemeCycle -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnThemeCycle.Font = $fontUi
@@ -4227,7 +4271,7 @@ $pnlNav.Controls.Add($btnThemeCycle)
 Set-Tip $btnThemeCycle "Theme wechseln: Dark / OLED / Light / Terminal (Taste T)" "THEME"
 
 $btnSettings = New-Object System.Windows.Forms.Button
-$btnSettings.Location = New-Object System.Drawing.Point((S 500), (S 2))
+$btnSettings.Location = New-Object System.Drawing.Point((S ($script:NavX + 154)), (S 2))
 $btnSettings.Size = New-Object System.Drawing.Size((S 30), (S 27))
 Style-FlatButton -Btn $btnSettings -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnSettings.Font = $fontUiBold
@@ -4236,7 +4280,7 @@ $pnlNav.Controls.Add($btnSettings)
 Set-Tip $btnSettings "Einstellungen (Taste S)"
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point((S 534), (S 6))
+$lblStatus.Location = New-Object System.Drawing.Point((S ($script:NavX + 188)), (S 6))
 $lblStatus.Size = New-Object System.Drawing.Size((S 222), (S 20))
 $lblStatus.Font = $fontMono
 $lblStatus.ForeColor = $script:Pal.Muted
@@ -4247,7 +4291,7 @@ $pnlNav.Controls.Add($lblStatus)
 
 # v4.4: command line button (Ctrl+K)
 $btnCmd = New-Object System.Windows.Forms.Button
-$btnCmd.SetBounds((S 534), (S 3), (S 170), (S 24))
+$btnCmd.SetBounds((S ($script:NavX + 188)), (S 3), (S 170), (S 24))
 Style-FlatButton -Btn $btnCmd -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnCmd.Font = $fontMono
 $btnCmd.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
@@ -4964,6 +5008,378 @@ $viewWatch.Controls.Add($dgvWatchlist)
 $dgvPortfolio.Add_CellPainting($script:SparkCellPainter)
 $dgvWatchlist.Add_CellPainting($script:SparkCellPainter)
 
+function Apply-NumberAlignment {
+    # v4.9: numbers right-aligned (header too), so digits stay in their
+    # columns when prices change; off = left as before
+    $right = [bool]$script:Config.AlignNumbersRight
+    $cell = if ($right) { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight } else { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleLeft }
+    $sets = @(
+        @($dgvWatchlist, @("Price", "Day", "Ext", "Rsi", "Dist")),
+        @($dgvPortfolio, @("Shares", "Avg", "Price", "Val", "Weight", "Pnl", "Day"))
+    )
+    foreach ($set in $sets) {
+        foreach ($cn in $set[1]) {
+            $col = $set[0].Columns[$cn]
+            if ($null -eq $col) { continue }
+            $col.DefaultCellStyle.Alignment = $cell
+            $col.HeaderCell.Style.Alignment = $cell
+        }
+    }
+}
+Apply-NumberAlignment
+
+# ==============================================================================
+# v4.9: NEWS TAB - one feed for the depot + watchlist
+# ==============================================================================
+$script:NewsItems     = @()
+$script:NewsLoading   = $false
+$script:NewsLoadedAt  = [DateTime]::MinValue
+$script:NewsError     = ""
+$script:NextNewsLoad  = (Get-Date).AddSeconds(25)
+$script:NewsWasVisible = $false
+$script:NewsSeenAt    = [DateTime]::MinValue
+if ([string]$script:Config.NewsSeenAt) {
+    $nsa = [DateTime]::MinValue
+    if ([DateTime]::TryParse([string]$script:Config.NewsSeenAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$nsa)) { $script:NewsSeenAt = $nsa }
+}
+$script:NewsBoldSince = $script:NewsSeenAt
+$script:NewsGridSig = ""
+$script:NewsComboSig = ""
+$script:LastNewsTip = ""
+$script:NewsFilterUpdating = $false
+$script:NewsFilterKeys = New-Object System.Collections.Generic.List[string]
+
+$aNT = [System.Windows.Forms.AnchorStyles]::Top
+$aNB = [System.Windows.Forms.AnchorStyles]::Bottom
+$aNL = [System.Windows.Forms.AnchorStyles]::Left
+$aNR = [System.Windows.Forms.AnchorStyles]::Right
+
+$viewNews = New-Object System.Windows.Forms.Panel
+$viewNews.Location = New-Object System.Drawing.Point((S 12), (S 92))
+$viewNews.Size = New-Object System.Drawing.Size((S 756), (S 456))
+$viewNews.BackColor = $script:Pal.Card
+$viewNews.Visible = $false
+$form.Controls.Add($viewNews)
+
+$lblNewsTitle = New-Object System.Windows.Forms.Label
+$lblNewsTitle.SetBounds((S 10), (S 8), (S 330), (S 20))
+$lblNewsTitle.Font = $fontUiBold
+$lblNewsTitle.ForeColor = $script:Pal.Accent
+$lblNewsTitle.Text = "Nachrichten - Depot und Watchlist"
+$lblNewsTitle.Anchor = $aNT -bor $aNL
+$viewNews.Controls.Add($lblNewsTitle)
+
+$cmbNewsFilter = New-Object System.Windows.Forms.ComboBox
+$cmbNewsFilter.SetBounds((S 470), (S 6), (S 128), (S 24))
+$cmbNewsFilter.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbNewsFilter.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cmbNewsFilter.BackColor = $script:Pal.Input
+$cmbNewsFilter.ForeColor = $script:Pal.Text
+$cmbNewsFilter.Font = $fontMono
+$cmbNewsFilter.MaxDropDownItems = 20
+$cmbNewsFilter.Anchor = $aNT -bor $aNR
+$viewNews.Controls.Add($cmbNewsFilter)
+Set-Tip $cmbNewsFilter "Welche Nachrichten: alle, nur Depot, nur Watchlist oder ein Ticker (auch: NEWS DEPOT / NEWS WATCH / NEWS NVDA)"
+
+$btnNewsRead = New-Object System.Windows.Forms.Button
+$btnNewsRead.SetBounds((S 604), (S 6), (S 112), (S 24))
+Style-FlatButton -Btn $btnNewsRead -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnNewsRead.Font = $fontUiBold
+$btnNewsRead.Text = "Alle gelesen"
+$btnNewsRead.Anchor = $aNT -bor $aNR
+$viewNews.Controls.Add($btnNewsRead)
+Set-Tip $btnNewsRead "Neue Meldungen sind fett, bis du sie als gelesen markierst"
+
+$btnNewsRefresh = New-Object System.Windows.Forms.Button
+$btnNewsRefresh.SetBounds((S 722), (S 6), (S 26), (S 24))
+Style-FlatButton -Btn $btnNewsRefresh -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnNewsRefresh.Font = $fontUiBold
+$btnNewsRefresh.Text = [string][char]0x21BB
+$btnNewsRefresh.Anchor = $aNT -bor $aNR
+$viewNews.Controls.Add($btnNewsRefresh)
+Set-Tip $btnNewsRefresh "Nachrichten jetzt neu laden"
+
+$lblNewsInfo = New-Object System.Windows.Forms.Label
+$lblNewsInfo.SetBounds((S 10), (S 32), (S 738), (S 18))
+$lblNewsInfo.Font = $fontUi
+$lblNewsInfo.ForeColor = $script:Pal.Muted
+$lblNewsInfo.Text = "Nachrichten werden geladen ..."
+$lblNewsInfo.Anchor = $aNT -bor $aNL -bor $aNR
+$viewNews.Controls.Add($lblNewsInfo)
+
+$dgvNews = New-Object System.Windows.Forms.DataGridView
+$dgvNews.SetBounds((S 8), (S 54), (S 740), (S 394))
+Style-DataGrid -Grid $dgvNews
+Enable-DoubleBuffering -Control $dgvNews
+$dgvNews.Anchor = $aNT -bor $aNB -bor $aNL -bor $aNR
+$dgvNews.ShowCellToolTips = $true
+[void]$dgvNews.Columns.Add("Age",   "Zeit")
+[void]$dgvNews.Columns.Add("Syms",  "Ticker")
+[void]$dgvNews.Columns.Add("Src",   "Quelle")
+[void]$dgvNews.Columns.Add("Title", "Titel")
+$dgvNews.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+$dgvNews.Columns["Age"].Width  = S 104
+$dgvNews.Columns["Syms"].Width = S 150
+$dgvNews.Columns["Src"].Width  = S 120
+$dgvNews.Columns["Title"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+$dgvNews.Columns["Title"].DefaultCellStyle.Font = $fontUi
+foreach ($nc in $dgvNews.Columns) { $nc.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
+$viewNews.Controls.Add($dgvNews)
+$dgvNews.Columns["Age"].ToolTipText  = "Wann die Meldung erschienen ist"
+$dgvNews.Columns["Syms"].ToolTipText = "Zu welchen deiner Ticker sie gehört. Mit Prozentzahl: der Ticker bewegt sich heute stark. Klick = Ticker öffnen"
+$dgvNews.Columns["Title"].ToolTipText = "Doppelklick öffnet den Artikel im Browser"
+
+function Get-NewsFilterLabel {
+    param([string]$Filter)
+    switch ([string]$Filter) {
+        "All"       { return (Tr "Alle") }
+        "Holdings"  { return "Depot" }
+        "Watchlist" { return "Watchlist" }
+        default     { return [string]$Filter }
+    }
+}
+
+function Update-NewsFilterCombo {
+    # Alle / Depot / Watchlist, then every ticker of depot + watchlist
+    $script:NewsFilterKeys = New-Object System.Collections.Generic.List[string]
+    foreach ($k in @("All", "Holdings", "Watchlist")) { $script:NewsFilterKeys.Add($k) }
+    foreach ($s in @(Get-NewsSymbols -Holdings @($script:Portfolio.Keys | Sort-Object) -Watchlist @($script:Config.Watchlist) -Max 60)) { $script:NewsFilterKeys.Add($s) }
+    $cur = [string]$script:Config.NewsFilter
+    if (-not $script:NewsFilterKeys.Contains($cur)) { $script:NewsFilterKeys.Add($cur) }
+    $sig = ($script:NewsFilterKeys -join ",") + "|" + $cur + "|" + [string]$script:Config.Language
+    if ($sig -eq $script:NewsComboSig -and $cmbNewsFilter.Items.Count -gt 0) { return }
+    $script:NewsComboSig = $sig
+    $script:NewsFilterUpdating = $true
+    $cmbNewsFilter.BeginUpdate()
+    $cmbNewsFilter.Items.Clear()
+    foreach ($k in $script:NewsFilterKeys) { [void]$cmbNewsFilter.Items.Add((Get-NewsFilterLabel $k)) }
+    $cmbNewsFilter.SelectedIndex = [math]::Max(0, $script:NewsFilterKeys.IndexOf($cur))
+    $cmbNewsFilter.EndUpdate()
+    $script:NewsFilterUpdating = $false
+}
+
+function Set-NewsFilter {
+    param([string]$Filter)
+    $f = ([string]$Filter).Trim()
+    if (-not $f) { $f = "All" }
+    $script:Config.NewsFilter = $f
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-NewsFilterCombo
+    Refresh-NewsGrid
+}
+
+function Get-NewsNewest {
+    $newest = [DateTime]::MinValue
+    foreach ($n in @($script:NewsItems)) { if ($null -ne $n -and [DateTime]$n.Time -gt $newest) { $newest = [DateTime]$n.Time } }
+    return $newest
+}
+
+function Set-NewsSeen {
+    param([DateTime]$At)
+    if ($At -le $script:NewsSeenAt) { return }
+    $script:NewsSeenAt = $At
+    $script:Config.NewsSeenAt = $At.ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
+function Update-NewsBadge {
+    # Tab text "News (F4)" or "News ● 5" (unread since the tab was last seen).
+    # While the tab is shown everything in it counts as seen; what was new
+    # when it opened stays bold until "Alle gelesen".
+    $vis = [bool]$script:ViewOn["News"] -and $form.Visible -and -not [bool]$script:Config.CompactMode
+    $cnt = 0
+    if ($vis) {
+        if (-not $script:NewsWasVisible) { $script:NewsBoldSince = $script:NewsSeenAt }
+        Set-NewsSeen (Get-NewsNewest)
+    } else {
+        $cnt = Get-NewsUnreadCount -Items $script:NewsItems -Since $script:NewsSeenAt
+    }
+    $script:NewsWasVisible = $vis
+    $b = $tabButtons["News"]
+    if ($null -eq $b) { return }
+    $txt = if ($cnt -gt 0) { "News {0} {1}" -f [char]0x25CF, [math]::Min(99, $cnt) } else { "News (F4)" }
+    if ($b.Text -ne $txt) { $b.Text = $txt }
+    if (-not [bool]$script:ViewOn["News"]) { $b.ForeColor = if ($cnt -gt 0) { $script:Pal.Accent } else { $script:Pal.Text } }
+    $tipTxt = if ($cnt -gt 0) { "{0} neue Nachrichten zu Depot und Watchlist (F4)" -f $cnt } else { "Nachrichten zu Depot und Watchlist (F4)" }
+    if ($script:LastNewsTip -ne $tipTxt) { $script:LastNewsTip = $tipTxt; Set-DynTip $b $tipTxt }
+}
+
+function Get-NewsTooltip {
+    param($Item)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add([string]$Item.Title)
+    $meta = @()
+    if ([DateTime]$Item.Time -gt [DateTime]::MinValue) { $meta += ([DateTime]$Item.Time).ToString("dd.MM.yyyy HH:mm", $inv) }
+    if ($Item.Publisher) { $meta += [string]$Item.Publisher }
+    if ($meta.Count -gt 0) { $lines.Add($meta -join "  |  ") }
+    if (@($Item.Syms).Count -gt 0) { $lines.Add("Ticker: " + (@($Item.Syms) -join ", ")) }
+    if ($Item.Link) { $lines.Add((Tr "Doppelklick öffnet den Artikel im Browser")) }
+    return ($lines -join "`r`n")
+}
+
+function Refresh-NewsGrid {
+    # -IfChanged: skip when nothing changed (called on every price refresh;
+    # the ages "vor 5 min" need at most one rebuild per minute)
+    param([switch]$IfChanged)
+    if ($null -eq $dgvNews -or $dgvNews.IsDisposed) { return }
+    $sig = "{0}|{1}|{2}|{3}|{4}|{5}" -f $script:NewsLoadedAt.Ticks, [string]$script:Config.NewsFilter, $script:NewsBoldSince.Ticks, (Get-Date).ToString("yyyyMMddHHmm"), $script:NewsLoading, @($script:NewsItems).Count
+    if ($IfChanged -and $sig -eq $script:NewsGridSig) { return }
+    $script:NewsGridSig = $sig
+    $p = $script:Pal
+    $hold = @($script:Portfolio.Keys)
+    $items = @(Select-NewsItems -Items $script:NewsItems -Filter ([string]$script:Config.NewsFilter) -Holdings $hold -Watchlist @($script:Config.Watchlist))
+    $dayPct = @{}
+    foreach ($k in @($script:QuoteStore.Keys)) {
+        $q = $script:QuoteStore[$k]
+        if ($null -ne $q -and $null -ne $q.ChangePct -and -not [bool]$q.FromCache) { $dayPct[([string]$k).ToUpperInvariant()] = [double]$q.ChangePct }
+    }
+    $lang = [string]$script:Config.Language
+    $now = Get-Date
+    $first = -1
+    try { $first = $dgvNews.FirstDisplayedScrollingRowIndex } catch { }
+    $selKey = ""
+    if ($dgvNews.SelectedRows.Count -gt 0 -and $null -ne $dgvNews.SelectedRows[0].Tag) { $selKey = [string]$dgvNews.SelectedRows[0].Tag.Key }
+    $dgvNews.SuspendLayout()
+    $dgvNews.Rows.Clear()
+    foreach ($n in $items) {
+        $mv = Get-NewsMover -Syms @($n.Syms) -DayPct $dayPct -Threshold ([double]$script:Config.NewsMoveThreshold)
+        $symTxt = @($n.Syms | Select-Object -First 4) -join " "
+        if (@($n.Syms).Count -gt 4) { $symTxt += " +" + (@($n.Syms).Count - 4) }
+        if ($null -ne $mv) { $symTxt = "{0}  {1}{2:+0.0;-0.0}%" -f $symTxt, (Get-ArrowPrefix $mv.Pct), $mv.Pct }
+        $idx = $dgvNews.Rows.Add((Format-NewsAge -Time ([DateTime]$n.Time) -Now $now -Lang $lang), $symTxt, [string]$n.Publisher, [string]$n.Title)
+        $row = $dgvNews.Rows[$idx]
+        $row.Tag = $n
+        $row.Cells["Age"].Style.ForeColor = $p.Muted
+        $row.Cells["Src"].Style.ForeColor = $p.Muted
+        $row.Cells["Syms"].Style.ForeColor = if ($null -eq $mv) { $p.Accent } elseif ($mv.Pct -ge 0) { $colGreen } else { $colRed }
+        if ([DateTime]$n.Time -gt $script:NewsBoldSince) {
+            foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontMonoBold }
+            $row.Cells["Title"].Style.Font = $fontUiBold
+        }
+        $tip = Get-NewsTooltip $n
+        foreach ($cn in @("Age", "Src", "Title")) { $row.Cells[$cn].ToolTipText = $tip }
+        $row.Cells["Syms"].ToolTipText = if ($null -ne $mv) { "{0} heute {1:+0.0;-0.0}% - Klick öffnet den Ticker" -f $mv.Sym, $mv.Pct } else { "Klick öffnet den Ticker" }
+        if ($selKey -and [string]$n.Key -eq $selKey) { $row.Selected = $true }
+    }
+    if ($items.Count -eq 0) {
+        $msg = if ($script:NewsLoading -or $script:NewsLoadedAt -eq [DateTime]::MinValue) { "Nachrichten werden geladen ..." }
+               elseif (@($script:NewsItems).Count -gt 0) { "Keine Nachrichten für diesen Filter." }
+               elseif ($script:NewsError) { "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." }
+               else { "Keine Nachrichten der letzten 14 Tage." }
+        $idx = $dgvNews.Rows.Add("", "", "", (Tr $msg))
+        $dgvNews.Rows[$idx].DefaultCellStyle.ForeColor = $p.Muted
+    }
+    if (-not $selKey) { $dgvNews.ClearSelection() }
+    if ($first -ge 0 -and $first -lt $dgvNews.Rows.Count) { try { $dgvNews.FirstDisplayedScrollingRowIndex = $first } catch { } }
+    $dgvNews.ResumeLayout()
+    Update-NewsInfo -Shown $items.Count
+}
+
+function Update-NewsInfo {
+    param([int]$Shown = -1)
+    if ($Shown -lt 0) { $Shown = @($dgvNews.Rows | Where-Object { $null -ne $_.Tag }).Count }
+    $parts = @()
+    if ($script:NewsLoading) { $parts += (Tr "lädt ...") }
+    if ($script:NewsLoadedAt -gt [DateTime]::MinValue) {
+        $parts += ("{0} {1}" -f $Shown, (Tr "Meldungen"))
+        $parts += ("{0} {1}" -f (Tr "Stand"), $script:NewsLoadedAt.ToString("HH:mm"))
+    }
+    if ($script:NewsError) { $parts += (Tr "letzter Versuch ohne Verbindung") }
+    $parts += (Tr "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel")
+    $lblNewsInfo.Text = $parts -join "  |  "
+}
+
+function Start-NewsLoad {
+    # One Yahoo search request per ticker (holdings + watchlist, max 40),
+    # merged into one feed in the background
+    if ($script:IsClosing -or $script:NewsLoading) { return }
+    $syms = @(Get-NewsSymbols -Holdings @($script:Portfolio.Keys | Sort-Object) -Watchlist @($script:Config.Watchlist) -Max 40)
+    if ($syms.Count -eq 0) {
+        $script:NewsItems = @()
+        $script:NewsLoadedAt = Get-Date
+        Update-NewsBadge
+        if ($viewNews.Visible) { Refresh-NewsGrid }
+        return
+    }
+    $urls = @{}
+    foreach ($s in $syms) { $urls[$s] = "https://query1.finance.yahoo.com/v1/finance/search?q={0}&quotesCount=0&newsCount=10" -f [Uri]::EscapeDataString($s) }
+    $script:NewsLoading = $true
+    if ($viewNews.Visible) { Update-NewsInfo }
+    Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
+        param($Box, $Ctx)
+        $script:NewsLoading = $false
+        $by = @{}
+        $ok = 0
+        foreach ($s in $Ctx.Urls.Keys) {
+            $j = $Box.Results[$Ctx.Urls[$s]]
+            if ($null -ne $j) { $ok++ }
+            $by[$s] = @(ConvertFrom-YahooNews $j)
+        }
+        if ($ok -eq 0) {
+            $script:NewsError = "offline"
+            Write-WidgetLog "News: no answer for $($Ctx.Urls.Count) tickers" "WARN"
+        } else {
+            $script:NewsError = ""
+            $script:NewsItems = @(Merge-NewsFeed -BySymbol $by -Max 150)
+            $script:NewsLoadedAt = Get-Date
+            # first start: nothing counts as unread
+            if ($script:NewsSeenAt -eq [DateTime]::MinValue) {
+                Set-NewsSeen (Get-NewsNewest)
+                $script:NewsBoldSince = $script:NewsSeenAt
+            }
+        }
+        Update-NewsBadge
+        if ($viewNews.Visible) { Refresh-NewsGrid }
+    }
+}
+
+$cmbNewsFilter.Add_SelectionChangeCommitted({
+    if ($script:NewsFilterUpdating) { return }
+    $i = $cmbNewsFilter.SelectedIndex
+    if ($i -lt 0 -or $i -ge $script:NewsFilterKeys.Count) { return }
+    Set-NewsFilter $script:NewsFilterKeys[$i]
+})
+$btnNewsRead.Add_Click({
+    $script:NewsBoldSince = [DateTime]::MaxValue
+    Set-NewsSeen (Get-NewsNewest)
+    $script:NewsBoldSince = $script:NewsSeenAt
+    Refresh-NewsGrid
+    Update-NewsBadge
+})
+$btnNewsRefresh.Add_Click({
+    $script:NextNewsLoad = (Get-Date).AddMinutes((Get-NewsPollMinutes -Minutes ([int]$script:Config.NewsRefreshMinutes)))
+    Start-NewsLoad
+})
+$dgvNews.Add_CellDoubleClick({
+    param($sender, $e)
+    if ($e.RowIndex -lt 0) { return }
+    $n = $sender.Rows[$e.RowIndex].Tag
+    if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) }
+})
+$dgvNews.Add_CellClick({
+    param($sender, $e)
+    if ($e.RowIndex -lt 0 -or $e.ColumnIndex -ne $sender.Columns["Syms"].Index) { return }
+    $n = $sender.Rows[$e.RowIndex].Tag
+    if ($null -eq $n -or @($n.Syms).Count -eq 0) { return }
+    # the ticker that moves (if any), else the first
+    $pick = [string]@($n.Syms)[0]
+    $cellTxt = [string]$sender.Rows[$e.RowIndex].Cells[$e.ColumnIndex].Value
+    foreach ($s in @($n.Syms)) { if ($cellTxt -match ('(^|\s)' + [regex]::Escape([string]$s) + '\s\s')) { $pick = [string]$s } }
+    Switch-ActiveTicker -NewTicker $pick -SkipResolve $true
+    Set-TransientStatus ("{0} {1}" -f (Tr "Aktiver Ticker:"), $pick) 3
+})
+$dgvNews.Add_KeyDown({
+    param($sender, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $sender.SelectedRows.Count -gt 0) {
+        $n = $sender.SelectedRows[0].Tag
+        if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) }
+        $e.Handled = $true
+    }
+})
+Update-NewsFilterCombo
+Refresh-NewsGrid
+
 $lblAlTitle = New-Object System.Windows.Forms.Label
 $lblAlTitle.Location = New-Object System.Drawing.Point((S 496), (S 8))
 $lblAlTitle.Size = New-Object System.Drawing.Size((S 168), (S 20))
@@ -5145,13 +5561,15 @@ function Set-ViewVisibility {
     # Kept in $script:ViewOn because Control.Visible reads $false while the
     # window itself is hidden (startup, tray).
     param([hashtable]$On)
-    $old = (@("Chart", "Portfolio", "Watchlist") | ForEach-Object { [bool]$script:ViewOn[$_] }) -join ","
+    $old = (@("Chart", "Portfolio", "Watchlist", "News") | ForEach-Object { [bool]$script:ViewOn[$_] }) -join ","
     $script:ViewOn = $On
     $viewChart.Visible     = [bool]$On["Chart"]
     $viewPortfolio.Visible = [bool]$On["Portfolio"]
     $viewWatch.Visible     = [bool]$On["Watchlist"]
+    $viewNews.Visible      = [bool]$On["News"]
     Update-TabHighlight
-    $new = (@("Chart", "Portfolio", "Watchlist") | ForEach-Object { [bool]$script:ViewOn[$_] }) -join ","
+    Update-NewsBadge
+    $new = (@("Chart", "Portfolio", "Watchlist", "News") | ForEach-Object { [bool]$script:ViewOn[$_] }) -join ","
     # a view that just appeared may have missed refreshes while hidden
     if ($new -ne $old -and $script:StartupDone -and $form.Visible) { Update-VisibleTabContent }
 }
@@ -5175,8 +5593,12 @@ function Update-MainLayout {
 
     # Navigation bar: status text uses the extra width
     $pnlNav.Width = $W - (S 24)
-    $btnCmd.SetBounds((S 534), (S 3), (S 170), (S 24))
-    $lblStatus.SetBounds((S 712), (S 6), ($pnlNav.Width - (S 712)), (S 20))
+    # v4.9: the command button gets narrower before the status text vanishes
+    $cmdX = S ($script:NavX + 188)
+    $cmdW = [math]::Max((S 110), [math]::Min((S 170), $pnlNav.Width - $cmdX - (S 220)))
+    $btnCmd.SetBounds($cmdX, (S 3), $cmdW, (S 24))
+    $stX = $cmdX + $cmdW + (S 8)
+    $lblStatus.SetBounds($stX, (S 6), [math]::Max(0, $pnlNav.Width - $stX), (S 20))
 
     $vx = S 12
     $vy = S 92
@@ -5188,7 +5610,7 @@ function Update-MainLayout {
             -ShowWatch ([bool]$script:Config.TerminalShowWatch) -ShowPortfolio ([bool]$script:Config.TerminalShowPortfolio) `
             -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160)
         $on = @{}
-        foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio))) {
+        foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio), @("News", $viewNews))) {
             $rect = $r.($pair[0])
             if ($null -ne $rect) {
                 $pair[1].SetBounds([int]$rect[0], [int]$rect[1], [int]$rect[2], [int]$rect[3])
@@ -5197,7 +5619,7 @@ function Update-MainLayout {
         }
         Set-ViewVisibility $on
     } else {
-        foreach ($v in @($viewChart, $viewPortfolio, $viewWatch)) { $v.SetBounds($vx, $vy, $vw, $vh) }
+        foreach ($v in @($viewChart, $viewPortfolio, $viewWatch, $viewNews)) { $v.SetBounds($vx, $vy, $vw, $vh) }
         Set-ViewVisibility @{ ([string]$script:Config.ActiveTab) = $true }
     }
     Update-ChartControlsLayout
@@ -5320,6 +5742,17 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnDelAlert -BgColor $p.Input -FgColor $colRed   -BorderColor $p.Border
     $lstAlerts.BackColor = $p.Input; $lstAlerts.ForeColor = $p.Text
 
+    # v4.9: news tab
+    $viewNews.BackColor = $p.Card
+    $lblNewsTitle.ForeColor = $p.Accent
+    $lblNewsInfo.ForeColor = $p.Muted
+    $cmbNewsFilter.BackColor = $p.Input; $cmbNewsFilter.ForeColor = $p.Text
+    Style-FlatButton -Btn $btnNewsRead    -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    Style-FlatButton -Btn $btnNewsRefresh -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    Style-DataGrid -Grid $dgvNews
+    $dgvNews.ShowCellToolTips = $true
+    if ($viewNews.Visible) { Refresh-NewsGrid }
+
     Set-ActiveTab -TabName $script:Config.ActiveTab
     Update-AllUiViews
     $pnlHeader.Invalidate()
@@ -5402,10 +5835,10 @@ function Populate-TickerDropdown {
 
 function Set-ActiveTab {
     param([string]$TabName)
-    if ($TabName -notin @("Chart", "Portfolio", "Watchlist")) { $TabName = "Chart" }
+    if ($TabName -notin @("Chart", "Portfolio", "Watchlist", "News")) { $TabName = "Chart" }
     $script:Config.ActiveTab = $TabName
-    # Terminal: the Portfolio / Watch tabs pick the lower panel when only one fits
-    if ($TabName -in @("Portfolio", "Watchlist")) { $script:Config.TerminalBottom = $TabName }
+    # Terminal: the Portfolio / Watch / News tabs pick the lower panel
+    if ($TabName -in @("Portfolio", "Watchlist", "News")) { $script:Config.TerminalBottom = $TabName }
     $lstTickerDropdown.Visible   = $false
     $lstCurrencyDropdown.Visible = $false
     $lstWlSearchDropdown.Visible = $false
@@ -5426,6 +5859,14 @@ function Update-VisibleTabContent {
         Update-NachkaufSimulation
     }
     if ($viewWatch.Visible) { Refresh-WatchlistAndAlerts }
+    if ($viewNews.Visible) {
+        Update-NewsFilterCombo
+        Refresh-NewsGrid -IfChanged
+        # the first look at the tab loads the feed if it is old
+        if (-not $script:NewsLoading -and ((Get-Date) - $script:NewsLoadedAt).TotalMinutes -gt [int]$script:Config.NewsRefreshMinutes) {
+            $script:NextNewsLoad = Get-Date
+        }
+    }
 }
 
 function Ensure-FormOnScreen {
@@ -7007,6 +7448,7 @@ function New-DialogForm {
     $d.BackColor = $p.BodyBg; $d.ForeColor = $p.Text; $d.Font = $fontUi
     $d.TopMost = $form.TopMost
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
+    $d.Add_HandleCreated($script:DialogChromeHandler)
     # v4.7: English mode translates the static texts once the dialog is built
     $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
     $d.Text = Tr $Title
@@ -9156,7 +9598,28 @@ function Invoke-TerminalCommand {
             "DVD"    { Show-AnalysisDialog -Page "Div" }
             "CAL"    { Show-CalendarDialog }
             "EE"     { Show-CalendarDialog }
-            "N"      { Show-NewsDialog $script:Config.ActiveTicker }
+            "N"      { Set-ActiveTab -TabName "News" }
+            "NEWS"   {
+                # NEWS / NEWS DEPOT / NEWS WATCH / NEWS ALL / NEWS <ticker>
+                switch ($arg0) {
+                    ""      { }
+                    "ALL"   { Set-NewsFilter "All" }
+                    "ALLE"  { Set-NewsFilter "All" }
+                    "DEPOT" { Set-NewsFilter "Holdings" }
+                    "PF"    { Set-NewsFilter "Holdings" }
+                    "WATCH" { Set-NewsFilter "Watchlist" }
+                    "WL"    { Set-NewsFilter "Watchlist" }
+                    default {
+                        $ns = Resolve-BestSymbol -RawInput $arg0
+                        if ([string]::IsNullOrWhiteSpace($ns)) { return "Ticker '$arg0' nicht gefunden." }
+                        Set-NewsFilter $ns
+                        if (@(Get-NewsSymbols -Holdings @($script:Portfolio.Keys) -Watchlist @($script:Config.Watchlist) -Max 200) -notcontains $ns) {
+                            Set-TransientStatus "$ns ist nicht in Depot oder Watchlist - Einzelansicht: $ns N" 6
+                        }
+                    }
+                }
+                Set-ActiveTab -TabName "News"
+            }
             "ALRT"   {
                 if ($arg0) { return (Invoke-TerminalCommand ("{0} ALRT {1}" -f $script:Config.ActiveTicker, (@($c.Args) -join " "))) }
                 Set-ActiveTab -TabName "Watchlist"
@@ -9310,6 +9773,7 @@ function Show-CommandPalette {
     $f.KeyPreview = $true
     $f.BackColor = $p.Accent
     $f.Padding = New-Object System.Windows.Forms.Padding(1)
+    $f.Add_HandleCreated({ param($sender, $e) Set-WindowChrome -Win $sender -Kind "Strip" })
     $f.ClientSize = New-Object System.Drawing.Size($W, (S 352))
     $inner = New-Object System.Windows.Forms.Panel
     $inner.Dock = [System.Windows.Forms.DockStyle]::Fill
@@ -9317,13 +9781,13 @@ function Show-CommandPalette {
     $f.Controls.Add($inner)
     $lp = New-Object System.Windows.Forms.Label
     $lp.SetBounds((S 10), (S 10), (S 22), (S 28)); $lp.Text = ">"; $lp.ForeColor = $p.Accent
-    $lp.Font = New-Object System.Drawing.Font("Consolas", 14, [System.Drawing.FontStyle]::Bold)
+    $lp.Font = New-Object System.Drawing.Font($script:MonoFamily, 14, [System.Drawing.FontStyle]::Bold)
     $inner.Controls.Add($lp)
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.SetBounds((S 34), (S 10), ($W - (S 46)), (S 28))
     $tb.BorderStyle = [System.Windows.Forms.BorderStyle]::None
     $tb.BackColor = $p.Card; $tb.ForeColor = $p.Text
-    $tb.Font = New-Object System.Drawing.Font("Consolas", 14)
+    $tb.Font = New-Object System.Drawing.Font($script:MonoFamily, 14)
     $tb.CharacterCasing = [System.Windows.Forms.CharacterCasing]::Upper
     $inner.Controls.Add($tb)
     $sep = New-Object System.Windows.Forms.Label
@@ -10415,13 +10879,7 @@ function Show-SettingsDialog {
     $dlg.TopMost = $form.TopMost
     $dlg.KeyPreview = $true
     $dlg.ClientSize = New-Object System.Drawing.Size((S 860), (S 400))
-    $dlg.Add_HandleCreated({
-        param($sender, $e)
-        try {
-            $dm = [int]$script:Pal.DwmDark
-            [void][Win32WidgetHelperV26]::DwmSetWindowAttribute($sender.Handle, 20, [ref]$dm, 4)
-        } catch { }
-    })
+    $dlg.Add_HandleCreated($script:DialogChromeHandler)
 
     $newColumn = {
         param([int]$X)
@@ -10635,6 +11093,19 @@ function Show-SettingsDialog {
         if ($a) { $script:NewColors.Accent = $a }
     })
 
+    # v4.9: fonts, window frame, news
+    & $addSection "Schrift und Rahmen"
+    $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
+    $cbMono  = & $addCombo "Schrift für Zahlen (ab Neustart)" $monoOffered ([string]$cfg.MonoFont) "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal."
+    $scaleItems = @(Get-FontScaleSteps | ForEach-Object { "$_ %" })
+    $cbScale = & $addCombo "Schriftgröße (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Größer = besser lesbar, braucht aber mehr Platz in den Spalten"
+    $chkAlignR = & $addCheck "Zahlen rechtsbündig (Watchlist, Portfolio)" ([bool]$cfg.AlignNumbersRight) "Ziffern bleiben beim Aktualisieren an ihrem Platz"
+    $chkRound  = & $addCheck "Abgerundete Fensterecken (Windows 11)" ([bool]$cfg.RoundCorners)
+
+    & $addSection "Nachrichten (F4)"
+    $nNewsMin  = & $addNum "Neu laden alle (Minuten)" 5 240 ([int]$cfg.NewsRefreshMinutes) "Eine Abfrage je Ticker in Depot und Watchlist (max. 40). Sind alle Börsen zu, halb so oft." "" 5
+    $nNewsMove = & $addNum "Ticker markieren ab Tagesbewegung (%)" 0 50 ([int]$cfg.NewsMoveThreshold) "Zeigt bei der Meldung, dass sich der Ticker heute stark bewegt (0 = aus)"
+
     & $addSection "Erklärungen (Maus darüber)"
     $modes = Get-TooltipModes
     $cbTip = & $addCombo "Ausführlichkeit" @($modes.Values) ([string]$modes[[string]$cfg.TooltipMode]) "" "TOOLTIPS"
@@ -10788,6 +11259,17 @@ function Show-SettingsDialog {
     $cfg.ShowArrows            = [bool]$chkArrow.Checked
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked
+    # v4.9
+    $newMono  = [string]$cbMono.SelectedItem
+    $newScale = [int](([string]$cbScale.SelectedItem) -replace '[^0-9]', '')
+    $fontChanged = ($newMono -ne [string]$cfg.MonoFont) -or ($newScale -ne [int]$cfg.FontScale)
+    $cfg.MonoFont              = $newMono
+    $cfg.FontScale             = $newScale
+    $cfg.AlignNumbersRight     = [bool]$chkAlignR.Checked
+    $cfg.RoundCorners          = [bool]$chkRound.Checked
+    $newsMinChanged = ([int]$nNewsMin.Value -ne [int]$cfg.NewsRefreshMinutes)
+    $cfg.NewsRefreshMinutes    = [int]$nNewsMin.Value
+    $cfg.NewsMoveThreshold     = [int]$nNewsMove.Value
     $hkNew = $tHk.Text.Trim()
     $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
     if (-not $hkNew -or $null -ne (ConvertFrom-HotkeyText $hkNew)) { $cfg.GlobalHotkey = $hkNew }
@@ -10814,12 +11296,18 @@ function Show-SettingsDialog {
     Set-Tip $btnToggleSma "Gleitende Durchschnitte SMA $($cfg.SmaFastPeriod)/$($cfg.SmaSlowPeriod) (Taste M)" "SMA"
     Apply-TooltipMode
     Update-ChartControlsLayout
+    Apply-NumberAlignment
+    if ($newsMinChanged) { $script:NextNewsLoad = (Get-Date).AddMinutes([int]$cfg.NewsRefreshMinutes) }
     Save-JsonState -Path $script:ConfigPath -Data $cfg
     Apply-ThemeToAllControls
     Apply-Layout $newLayout
     if ($needRefresh) { Refresh-AllMarketData -Force }
     Set-TransientStatus "Einstellungen gespeichert" 3
     if ($langChanged -and (Confirm-Action -Text "Die Sprache wirkt nach einem Neustart. Jetzt neu starten? / Restart now to switch the language?" -Title "Sprache / Language")) {
+        Restart-Widget
+        return
+    }
+    if (-not $langChanged -and $fontChanged -and -not $script:SmokeMode -and (Confirm-Action -Text (Tr "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?") -Title (Tr "Schrift"))) {
         Restart-Widget
         return
     }
@@ -10898,7 +11386,7 @@ function Show-ShortcutHelp {
         $txtEn = @"
 Keyboard shortcuts
 
-F1 / F2 / F3    Chart / Portfolio / Watch & alerts
+F1 - F4         Chart / Portfolio / Watch & alerts / News
 F5              Refresh now
 Ctrl+F          Search ticker
 Ctrl+K          Command line (also numpad /)
@@ -10920,6 +11408,7 @@ Y  log scale           (diamond in the chart = ex-dividend)
 
 Command line: NVDA, NVDA GP 1Y, NVDA DES, NVDA N, NVDA DVD,
 NVDA EE, NVDA ALRT TRAIL 8, NVDA WL, PORT, ANA, DVD, CAL, TOP,
+NEWS, NEWS DEPOT, NEWS WATCH, NEWS NVDA,
 FX, LOG, REP, TF 3M, LAYOUT TERMINAL, LAYOUT SAVE <name>,
 IND MACD, PF <depot>, IMP, BAK, SET, PUSH, ABOUT, TOUR
 
@@ -10933,7 +11422,7 @@ Hover over controls for explanations (glossary is German).
     $txt = @"
 Tastenkürzel
 
-F1 / F2 / F3    Chart / Portfolio / Watch & Alarm
+F1 - F4         Chart / Portfolio / Watch & Alarm / News
 F5              Jetzt aktualisieren
 Ctrl+F          Ticker suchen
 Links / Rechts  Vorheriger / nächster Watchlist-Ticker
@@ -10959,6 +11448,12 @@ Ticker    nur Kurs + Mini-Chart, rahmenlos
 Compact   Leiste mit Marktstatus und Laufband
 Standard  Fenster mit Tabs
 Terminal  Chart oben, Watchlist + Portfolio darunter
+          (oder die News: F4 / NEWS)
+
+News (F4): Meldungen zu Depot und Watchlist, neue fett,
+die Zahl am Tab = ungelesen. Doppelklick = Artikel,
+Klick auf den Ticker = Ticker öffnen. NEWS DEPOT /
+NEWS WATCH / NEWS NVDA filtern, NVDA N = Einzelfenster.
 
 Erklärungen: Maus auf Bedienelemente, Spaltenköpfe oder
 die Legende im Chart (SMA, VWAP, RSI ...) halten.
@@ -11909,6 +12404,8 @@ $script:GlobalKeyHandler = {
     if ($e.Control -or $e.Alt) { return }
     $ac = $sender.ActiveControl
     $isFKey = $e.KeyCode -in @([System.Windows.Forms.Keys]::F1, [System.Windows.Forms.Keys]::F2, [System.Windows.Forms.Keys]::F3, [System.Windows.Forms.Keys]::F5)
+    # v4.9: F4 = News, except in a drop-down (F4 opens it there, as in every Windows list)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::F4 -and -not ($ac -is [System.Windows.Forms.ComboBox])) { $isFKey = $true }
     # Typing into inputs/lists must not trigger letter shortcuts (F-keys still work)
     if (($ac -is [System.Windows.Forms.TextBox] -or $ac -is [System.Windows.Forms.ComboBox] -or $ac -is [System.Windows.Forms.ListBox]) -and -not $isFKey) { return }
     # Arrow keys belong to the grid when a grid has focus
@@ -11930,6 +12427,7 @@ $script:GlobalKeyHandler = {
         ([System.Windows.Forms.Keys]::F1) { Set-ActiveTab -TabName "Chart"; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F2) { Set-ActiveTab -TabName "Portfolio"; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F3) { Set-ActiveTab -TabName "Watchlist"; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F4) { Set-ActiveTab -TabName "News"; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F5) {
             Refresh-AllMarketData -Force; Evaluate-GlobalAlerts; Update-AllUiViews; $e.Handled = $true
         }
@@ -12114,6 +12612,13 @@ $uiTimer.Add_Tick({
             Check-EarningsNotifications
             Invoke-DailyBackup
         }
+        # v4.9: news feed (also in the background, for the unread count)
+        if ($script:StartupDone -and $nowTick -ge $script:NextNewsLoad) {
+            $mst = @(Get-PrioMarketStates)
+            $allClosed = ($mst.Count -gt 0 -and @($mst | Where-Object { $_ -ne "CLOSED" }).Count -eq 0)
+            $script:NextNewsLoad = $nowTick.AddMinutes((Get-NewsPollMinutes -Minutes ([int]$script:Config.NewsRefreshMinutes) -AllClosed $allClosed))
+            Start-NewsLoad
+        }
     } catch {
         Write-WidgetLog "UI tick failed: $($_.Exception.Message)" "WARN"
     }
@@ -12248,9 +12753,34 @@ function Invoke-SmokeTest {
     $pump = { [System.Windows.Forms.Application]::DoEvents() }
     Invoke-SmokeStep "Refresh" { Refresh-AllMarketData -Force; for ($i = 0; $i -lt 60 -and $script:IsRefreshing; $i++) { Start-Sleep -Milliseconds 250; & $pump }; Evaluate-GlobalAlerts; Update-AllUiViews }
     foreach ($lay in @("Terminal", "Standard", "Compact", "Ticker", "Standard")) { Invoke-SmokeStep "Layout $lay" { Apply-Layout $lay; & $pump } }
-    foreach ($tab in @("Chart", "Portfolio", "Watchlist", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
+    foreach ($tab in @("Chart", "Portfolio", "Watchlist", "News", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
+    # v4.9: the news tab with a real load (or the offline message), then fake items
+    Invoke-SmokeStep "News load" {
+        Set-ActiveTab -TabName "News"
+        Start-NewsLoad
+        for ($i = 0; $i -lt 80 -and $script:NewsLoading; $i++) { Start-Sleep -Milliseconds 250; & $pump }
+        $fake = @{
+            "NVDA" = @([PSCustomObject]@{ Title = "Smoke: NVDA item"; Publisher = "Test"; Link = ""; Time = (Get-Date).AddMinutes(-5); Tickers = @("MSFT") })
+            "MSFT" = @([PSCustomObject]@{ Title = "Smoke: MSFT item"; Publisher = "Test"; Link = ""; Time = (Get-Date).AddHours(-30); Tickers = @() })
+        }
+        $script:NewsItems = @(Merge-NewsFeed -BySymbol $fake) + @($script:NewsItems)
+        $script:NewsBoldSince = (Get-Date).AddHours(-1)
+        Refresh-NewsGrid; & $pump
+        if ($dgvNews.Rows.Count -lt 2) { throw "news grid has $($dgvNews.Rows.Count) rows" }
+    }
+    Invoke-SmokeStep "News filter + read" {
+        foreach ($nf in @("Holdings", "Watchlist", "MSFT", "All")) { Set-NewsFilter $nf; & $pump }
+        $btnNewsRead.PerformClick(); & $pump
+        Set-ActiveTab -TabName "Chart"; & $pump
+        $script:NewsSeenAt = (Get-Date).AddDays(-3)
+        Update-NewsBadge
+        if ($tabButtons["News"].Text -notlike ("*" + [char]0x25CF + "*")) { throw "no unread count on the tab: $($tabButtons['News'].Text)" }
+        Set-ActiveTab -TabName "News"; & $pump
+        Set-ActiveTab -TabName "Chart"; & $pump
+    }
+    Invoke-SmokeStep "News in Terminal" { Apply-Layout "Terminal"; Set-ActiveTab -TabName "News"; & $pump; Set-ActiveTab -TabName "Watchlist"; Apply-Layout "Standard"; & $pump }
     foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
-    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
+    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL", "NEWS DEPOT", "NEWS MSFT", "NEWS", "N")) {
         Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
     }
     Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }

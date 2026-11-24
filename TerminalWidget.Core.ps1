@@ -919,11 +919,13 @@ function Get-TerminalLayoutRects {
         [int]$MinBottomH = 300,
         [int]$MinChartH = 160
     )
-    $out = [PSCustomObject]@{ Chart = $null; Watchlist = $null; Portfolio = $null; SideBySide = $false }
+    # v4.9: ActiveBottom "News" puts the news tab below the chart, full width
+    $out = [PSCustomObject]@{ Chart = $null; Watchlist = $null; Portfolio = $null; News = $null; SideBySide = $false }
     $bottom = New-Object System.Collections.Generic.List[string]
     if ($ShowWatch) { $bottom.Add("Watchlist") }
     if ($ShowPortfolio) { $bottom.Add("Portfolio") }
-    if ($bottom.Count -eq 0 -or $H -lt ($MinChartH + $Gap + 40)) {
+    $newsOn = ([string]$ActiveBottom -eq "News")
+    if (($bottom.Count -eq 0 -and -not $newsOn) -or $H -lt ($MinChartH + $Gap + 40)) {
         $out.Chart = @($X, $Y, $W, $H)
         return $out
     }
@@ -936,6 +938,10 @@ function Get-TerminalLayoutRects {
     }
     $out.Chart = @($X, $Y, $W, $chartH)
     $by = $Y + $chartH + $Gap
+    if ($newsOn) {
+        $out.News = @($X, $by, $W, $bottomH)
+        return $out
+    }
     if ($bottom.Count -eq 2 -and $W -ge (2 * $PanelMinW + $Gap)) {
         $half = [int][math]::Floor(($W - $Gap) / 2)
         $out.Watchlist = @($X, $by, $half, $bottomH)
@@ -2518,7 +2524,8 @@ function Get-TerminalFunctions {
     return [ordered]@{
         "GP"     = @{ Scope = "T";  Desc = "Chart (optional Zeitraum: GP 1Y)" }
         "DES"    = @{ Scope = "T";  Desc = "Beschreibung: Profil, Kennzahlen, Termine, Position" }
-        "N"      = @{ Scope = "GT"; Desc = "Nachrichten" }
+        "N"      = @{ Scope = "GT"; Desc = "Nachrichten (ohne Ticker: News-Tab)" }
+        "NEWS"   = @{ Scope = "G";  Desc = "News-Tab: NEWS / NEWS DEPOT / NEWS WATCH / NEWS <Ticker>" }
         "DVD"    = @{ Scope = "GT"; Desc = "Dividenden (ohne Ticker: Depot-Dividenden)" }
         "EE"     = @{ Scope = "GT"; Desc = "Termine: Quartalszahlen, Ex-Tag, Zahltag" }
         "ALRT"   = @{ Scope = "GT"; Desc = "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" }
@@ -2689,6 +2696,153 @@ function ConvertFrom-YahooNews {
         }
     }
     return @($out | Sort-Object -Property Time -Descending)
+}
+
+# ------------------------------------------------------------------------------
+# News tab (v4.9): one feed for holdings + watchlist
+# ------------------------------------------------------------------------------
+function Get-NewsSymbols {
+    # Tickers to ask for news: holdings first, then the watchlist, each once.
+    # Indices (^GSPC), FX (EURUSD=X) and futures (GC=F) have no useful news.
+    param([string[]]$Holdings = @(), [string[]]$Watchlist = @(), [int]$Max = 40)
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($s in (@($Holdings) + @($Watchlist))) {
+        if ($null -eq $s) { continue }
+        $u = ([string]$s).Trim().ToUpperInvariant()
+        if (-not $u -or $u -match '^\^|=X$|=F$') { continue }
+        if ($seen.Add($u)) {
+            $out.Add($u)
+            if ($out.Count -ge $Max) { break }
+        }
+    }
+    return @($out)
+}
+
+function Get-NewsKey {
+    # De-duplication key: the link without query / anchor, else the title
+    param($Item)
+    $link = [string]$Item.Link
+    if ($link) { return ($link -replace '[?#].*$', '').TrimEnd('/').ToLowerInvariant() }
+    return "t:" + (([string]$Item.Title).Trim() -replace '\s+', ' ').ToLowerInvariant()
+}
+
+function Merge-NewsFeed {
+    # Per-ticker lists (ticker -> ConvertFrom-YahooNews items) -> one feed,
+    # newest first. The same article found for several tickers appears once;
+    # Syms lists every ticker of ours it belongs to (queried or related).
+    param([hashtable]$BySymbol, [int]$Max = 150, [int]$MaxAgeDays = 14, [DateTime]$Now = [DateTime]::MinValue)
+    if ($Now -eq [DateTime]::MinValue) { $Now = Get-Date }
+    $out = @()
+    if ($null -eq $BySymbol -or $BySymbol.Count -eq 0) { return $out }
+    $ours = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($k in $BySymbol.Keys) { [void]$ours.Add(([string]$k).ToUpperInvariant()) }
+    $map = @{}
+    $order = New-Object System.Collections.Generic.List[string]
+    foreach ($sym in @($BySymbol.Keys | Sort-Object)) {
+        $su = ([string]$sym).ToUpperInvariant()
+        foreach ($n in @($BySymbol[$sym])) {
+            if ($null -eq $n -or -not $n.Title) { continue }
+            $t = [DateTime]::MinValue
+            if ($null -ne $n.Time) { $t = [DateTime]$n.Time }
+            if ($t -gt [DateTime]::MinValue -and ($Now - $t).TotalDays -gt $MaxAgeDays) { continue }
+            $key = Get-NewsKey $n
+            $e = $map[$key]
+            if ($null -eq $e) {
+                $e = [PSCustomObject]@{
+                    Key = $key; Title = ([string]$n.Title).Trim(); Publisher = [string]$n.Publisher
+                    Link = [string]$n.Link; Time = $t; Syms = New-Object System.Collections.Generic.List[string]
+                }
+                $map[$key] = $e
+                $order.Add($key)
+            }
+            if (-not $e.Syms.Contains($su)) { $e.Syms.Add($su) }
+            foreach ($rt in @($n.Tickers)) {
+                $ru = ([string]$rt).ToUpperInvariant()
+                if ($ru -and $ours.Contains($ru) -and -not $e.Syms.Contains($ru)) { $e.Syms.Add($ru) }
+            }
+        }
+    }
+    foreach ($key in $order) {
+        $e = $map[$key]
+        $out += [PSCustomObject]@{
+            Key = $e.Key; Title = $e.Title; Publisher = $e.Publisher; Link = $e.Link; Time = $e.Time
+            Syms = @($e.Syms | Sort-Object)
+        }
+    }
+    $sorted = @($out | Sort-Object -Property @{ Expression = { $_.Time }; Descending = $true }, @{ Expression = { $_.Title }; Descending = $false })
+    if ($sorted.Count -gt $Max) { $sorted = @($sorted[0..($Max - 1)]) }
+    return $sorted
+}
+
+function Select-NewsItems {
+    # Filter: "All", "Holdings", "Watchlist" or one ticker
+    param($Items, [string]$Filter = "All", [string[]]$Holdings = @(), [string[]]$Watchlist = @())
+    $f = ([string]$Filter).Trim()
+    if (-not $f -or $f -eq "All") { return @($Items) }
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    $src = switch ($f) {
+        "Holdings"  { @($Holdings) }
+        "Watchlist" { @($Watchlist) }
+        default     { @($f) }
+    }
+    foreach ($s in $src) { if ($s) { [void]$set.Add(([string]$s).ToUpperInvariant()) } }
+    return @(@($Items) | Where-Object { $null -ne $_ -and @($_.Syms | Where-Object { $set.Contains(([string]$_).ToUpperInvariant()) }).Count -gt 0 })
+}
+
+function Format-NewsAge {
+    # "vor 12 min", "vor 3 h", "gestern 14:30", "21.11. 09:15" (EN: "12 min ago" ...)
+    param([DateTime]$Time, [DateTime]$Now = [DateTime]::MinValue, [string]$Lang = "DE")
+    if ($Time -eq [DateTime]::MinValue) { return "" }
+    if ($Now -eq [DateTime]::MinValue) { $Now = Get-Date }
+    $en = ($Lang -eq "EN")
+    $age = $Now - $Time
+    if ($age.TotalMinutes -lt 1) { if ($en) { return "now" } else { return "jetzt" } }
+    if ($age.TotalMinutes -lt 60) {
+        $m = [int][math]::Floor($age.TotalMinutes)
+        if ($en) { return "$m min ago" } else { return "vor $m min" }
+    }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    if ($Time.Date -eq $Now.Date) {
+        $h = [int][math]::Floor($age.TotalHours)
+        if ($en) { return "$h h ago" } else { return "vor $h h" }
+    }
+    if ($Time.Date -eq $Now.Date.AddDays(-1)) {
+        if ($en) { return "yesterday " + $Time.ToString("HH:mm", $inv) } else { return "gestern " + $Time.ToString("HH:mm", $inv) }
+    }
+    return $Time.ToString("dd.MM. HH:mm", $inv)
+}
+
+function Get-NewsUnreadCount {
+    # Items newer than the last time the news tab was looked at
+    param($Items, [DateTime]$Since)
+    return @(@($Items) | Where-Object { $null -ne $_ -and [DateTime]$_.Time -gt $Since }).Count
+}
+
+function Get-NewsMover {
+    # The ticker of an item that moves most today, if it moves at least
+    # Threshold % (to see why a position jumps). $null otherwise.
+    param([string[]]$Syms, [hashtable]$DayPct, [double]$Threshold = 3)
+    if ($null -eq $DayPct -or $Threshold -le 0) { return $null }
+    $best = $null
+    foreach ($s in @($Syms)) {
+        if (-not $s) { continue }
+        $v = $DayPct[([string]$s).ToUpperInvariant()]
+        if ($null -eq $v) { continue }
+        $d = [double]$v
+        if ([double]::IsNaN($d) -or [math]::Abs($d) -lt $Threshold) { continue }
+        if ($null -eq $best -or [math]::Abs($d) -gt [math]::Abs($best.Pct)) { $best = [PSCustomObject]@{ Sym = ([string]$s).ToUpperInvariant(); Pct = $d } }
+    }
+    return $best
+}
+
+function Get-NewsPollMinutes {
+    # Refresh interval of the news feed: the setting, doubled while every
+    # market is closed (news still comes, but nothing trades on it)
+    param([int]$Minutes = 15, [bool]$AllClosed = $false)
+    $m = [math]::Max(5, [math]::Min(240, $Minutes))
+    if ($AllClosed) { $m = [math]::Min(240, 2 * $m) }
+    return [int]$m
 }
 
 function Get-EventCalendar {
@@ -3055,6 +3209,40 @@ function Get-UpDownColors {
         $u = ConvertFrom-HexColor $sc.Up; $d = ConvertFrom-HexColor $sc.Down
     }
     return @{ Up = $u; Down = $d }
+}
+
+# ------------------------------------------------------------------------------
+# Look and feel (v4.9)
+# ------------------------------------------------------------------------------
+function Get-MonoFontNames {
+    # Fonts offered for numbers and tickers (all fixed-width)
+    return @("Consolas", "Cascadia Mono", "Cascadia Code", "Lucida Console")
+}
+
+function Resolve-MonoFont {
+    # The wanted font if it is offered and installed, else Consolas
+    param([string]$Wanted, [string[]]$Installed = @())
+    if ($Wanted -and (Get-MonoFontNames) -contains $Wanted -and @($Installed) -contains $Wanted) { return $Wanted }
+    return "Consolas"
+}
+
+function Get-FontScaleSteps { return @(90, 100, 110, 120) }
+
+function Get-ScaledFontSize {
+    # Base size in pt * scale %, rounded to 0.5 pt; unknown scales count as 100
+    param([double]$Base, [int]$ScalePct = 100)
+    if ((Get-FontScaleSteps) -notcontains $ScalePct) { $ScalePct = 100 }
+    return [math]::Round($Base * $ScalePct / 100.0 * 2, [System.MidpointRounding]::AwayFromZero) / 2.0
+}
+
+function Get-WindowCornerPref {
+    # DWMWA_WINDOW_CORNER_PREFERENCE (33): 1 = square, 2 = round, 3 = small round.
+    # Windows 11 rounds normal windows itself; borderless strips need asking.
+    # The fullscreen chart stays square.
+    param([string]$Kind = "Window", [bool]$Round = $true)
+    if (-not $Round -or $Kind -eq "Fullscreen") { return 1 }
+    if ($Kind -eq "Strip") { return 3 }
+    return 2
 }
 
 function ConvertFrom-HotkeyText {
