@@ -13517,6 +13517,7 @@ function Invoke-SmokeTest {
         & $key ([System.Windows.Forms.Keys]::F9)
         if ([bool]$script:Config.PrivacyMode -eq $was) { throw "F9 did not toggle the privacy mode" }
         & $key ([System.Windows.Forms.Keys]::F9)
+        Set-ActiveTab -TabName "Portfolio"; & $pump   # PerformClick needs a visible button
         $btnPrivacy.PerformClick(); & $pump
         if (-not [bool]$script:Config.PrivacyMode) { throw "privacy button did not switch it on" }
         Set-PrivacyMode $false
