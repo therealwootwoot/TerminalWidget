@@ -969,6 +969,82 @@ function Get-StalenessLevel {
     return "OK"
 }
 
+function Get-FlashAlpha {
+    # v4.9.5: price flash strength: Max while holding, then linear to 0
+    param([double]$ElapsedMs, [int]$HoldMs = 300, [int]$FadeMs = 600, [double]$Max = 0.35)
+    if ($ElapsedMs -lt 0) { return $Max }
+    if ($ElapsedMs -le $HoldMs) { return $Max }
+    if ($FadeMs -le 0) { return 0.0 }
+    $t = ($ElapsedMs - $HoldMs) / $FadeMs
+    if ($t -ge 1) { return 0.0 }
+    return [math]::Round($Max * (1 - $t), 4)
+}
+
+function Get-DirectionKey {
+    # v4.9.5: "up" / "down" / "none" (flat within +-Flat %, or no value)
+    param([double]$Pct, [double]$Flat = 0.005)
+    if ([double]::IsNaN($Pct)) { return "none" }
+    if ($Pct -gt $Flat) { return "up" }
+    if ($Pct -lt -$Flat) { return "down" }
+    return "none"
+}
+
+function Protect-Amount {
+    # v4.9.5: privacy mode (F9): amounts become dots, percentages stay
+    param([string]$Text, [bool]$On = $false)
+    if (-not $On) { return $Text }
+    return [string]([char]0x2022) * 4
+}
+
+function Get-SnoozeUntil {
+    # v4.9.5: "1h" / "4h" / "Tomorrow" (next day 08:00) -> DateTime; MinValue = no pause
+    param([string]$Kind, [DateTime]$Now = (Get-Date))
+    switch ($Kind) {
+        "1h"       { return $Now.AddHours(1) }
+        "4h"       { return $Now.AddHours(4) }
+        "Tomorrow" { return $Now.Date.AddDays(1).AddHours(8) }
+        default    { return [DateTime]::MinValue }
+    }
+}
+
+function Test-AlertSnoozed {
+    # v4.9.5: an alert with SnoozeUntil in the future stays quiet
+    param($Alert, [DateTime]$Now = (Get-Date))
+    if ($null -eq $Alert -or $null -eq $Alert.PSObject.Properties["SnoozeUntil"]) { return $false }
+    $v = [string]$Alert.SnoozeUntil
+    if (-not $v) { return $false }
+    $t = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse($v, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$t)) { return $false }
+    return ($Now -lt $t)
+}
+
+function ConvertTo-TsvTable {
+    # v4.9.5: header + rows -> tab-separated text (pastes into Excel / mail);
+    # tabs and line breaks inside a cell become spaces
+    param([string[]]$Headers, $Rows)
+    $clean = { param($v) (([string]$v) -replace '[\t\r\n]+', ' ').Trim() }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add((@($Headers | ForEach-Object { & $clean $_ }) -join "`t"))
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $lines.Add((@(@($r) | ForEach-Object { & $clean $_ }) -join "`t"))
+    }
+    return ($lines -join "`r`n")
+}
+
+function Get-DataHealth {
+    # v4.9.5: colour of the status dot: "OK" / "WARN" / "ERR" ("" = no data yet).
+    # While every market is closed the widget polls only every ClosedMinutes,
+    # so older data is still fine then.
+    param([double]$AgeSec, [int]$RefreshSec, [bool]$Offline = $false, [bool]$RateLimited = $false, [int]$ClosedMinutes = 0, [bool]$AllClosed = $false)
+    if ($Offline) { return "ERR" }
+    if ([double]::IsNaN($AgeSec)) { return "" }
+    if ($RateLimited) { return "WARN" }
+    $every = $RefreshSec
+    if ($AllClosed -and $ClosedMinutes -gt 0) { $every = [math]::Max($RefreshSec, $ClosedMinutes * 60) }
+    return (Get-StalenessLevel -AgeSec $AgeSec -RefreshSec $every)
+}
+
 function Test-ResumeGap {
     # A 1-second timer that did not tick for ThresholdSec means the PC slept
     # (or the process was frozen): the data is old, refresh right away.
@@ -2184,6 +2260,9 @@ function ConvertFrom-YahooCalendar {
     $o = [PSCustomObject]@{
         EarningsDate = ""; EarningsEnd = ""; ExDividendDate = ""; DividendDate = ""
         DividendRate = [double]::NaN; DividendYield = [double]::NaN; TrailingRate = [double]::NaN
+        # v4.9.5: analysts (module financialData)
+        TargetMean = [double]::NaN; TargetHigh = [double]::NaN; TargetLow = [double]::NaN
+        RecMean = [double]::NaN; RecKey = ""; Analysts = [double]::NaN
     }
     $r = $null
     try { $r = $Summary.quoteSummary.result[0] } catch { $r = $null }
@@ -2220,7 +2299,50 @@ function ConvertFrom-YahooCalendar {
         $o.TrailingRate = & $num $sd.trailingAnnualDividendRate
         if (-not $o.ExDividendDate) { $o.ExDividendDate = & $date $sd.exDividendDate }
     }
+    $fd = $r.financialData
+    if ($null -ne $fd) {
+        $o.TargetMean = & $num $fd.targetMeanPrice
+        $o.TargetHigh = & $num $fd.targetHighPrice
+        $o.TargetLow  = & $num $fd.targetLowPrice
+        $o.RecMean    = & $num $fd.recommendationMean
+        $o.Analysts   = & $num $fd.numberOfAnalystOpinions
+        $rk = ([string]$fd.recommendationKey).Trim().ToLowerInvariant()
+        if ($rk -and $rk -ne "none") { $o.RecKey = $rk }
+    }
     return $o
+}
+
+function Get-ConsensusLabel {
+    # v4.9.5: Yahoo recommendationKey -> short German label
+    param([string]$Key, [switch]$Long)
+    $map = @{
+        "strong_buy"   = @("Kauf+", "Starker Kauf")
+        "buy"          = @("Kauf", "Kaufen")
+        "hold"         = @("Halten", "Halten")
+        "underperform" = @("Schwach", "Untergewichten")
+        "sell"         = @("Verkauf", "Verkaufen")
+        "strong_sell"  = @("Verkauf+", "Starker Verkauf")
+    }
+    $k = ([string]$Key).Trim().ToLowerInvariant()
+    if (-not $map.ContainsKey($k)) { return "" }
+    if ($Long) { return $map[$k][1] }
+    return $map[$k][0]
+}
+
+function Get-TargetUpside {
+    # Analyst mean target vs. price in % (NaN when one is missing)
+    param([double]$Target, [double]$Price)
+    if ([double]::IsNaN($Target) -or [double]::IsNaN($Price) -or $Target -le 0 -or $Price -le 0) { return [double]::NaN }
+    return ($Target / $Price - 1.0) * 100.0
+}
+
+function Get-RangePosition {
+    # v4.9.5: where the price sits in the 52-week range: 0 = low, 1 = high
+    # (clamped); NaN without a valid range
+    param([double]$Price, [double]$Low, [double]$High)
+    if ([double]::IsNaN($Price) -or $Low -le 0 -or $High -le 0 -or $High -le $Low -or $Price -le 0) { return [double]::NaN }
+    $f = ($Price - $Low) / ($High - $Low)
+    return [math]::Max(0.0, [math]::Min(1.0, $f))
 }
 
 function Get-EarningsBadge {
@@ -2552,6 +2674,7 @@ function Get-TerminalFunctions {
         "BAK"    = @{ Scope = "G";  Desc = "Backup wiederherstellen" }
         "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
         "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
+        "PRIV"   = @{ Scope = "G";  Desc = "Privat-Modus: Beträge ausblenden (PRIV ON / OFF, Taste F9)" }
         "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
         "SCALE"  = @{ Scope = "G";  Desc = "Preisachse: SCALE LOG / SCALE LIN" }
         "BAR"    = @{ Scope = "G";  Desc = "Was die Compact-/Ticker-Leiste zeigt" }
@@ -2834,6 +2957,69 @@ function Get-NewsMover {
         if ($null -eq $best -or [math]::Abs($d) -gt [math]::Abs($best.Pct)) { $best = [PSCustomObject]@{ Sym = ([string]$s).ToUpperInvariant(); Pct = $d } }
     }
     return $best
+}
+
+function Get-NewsMoverRows {
+    # v4.9.5: item key -> mover, only for the NEWEST item of each moving
+    # ticker (Items newest first), so "+31 %" is not repeated on every row
+    param($Items, [hashtable]$DayPct, [double]$Threshold = 3)
+    $out = @{}
+    $done = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($n in @($Items)) {
+        if ($null -eq $n) { continue }
+        # only tickers that were not marked on a newer item yet
+        $open = @(@($n.Syms) | Where-Object { $_ -and -not $done.Contains(([string]$_).ToUpperInvariant()) })
+        if ($open.Count -eq 0) { continue }
+        $mv = Get-NewsMover -Syms $open -DayPct $DayPct -Threshold $Threshold
+        if ($null -eq $mv) { continue }
+        [void]$done.Add([string]$mv.Sym)
+        $out[[string]$n.Key] = $mv
+    }
+    return $out
+}
+
+function Remove-MutedNews {
+    # v4.9.5: drop items of muted sources (publisher names, any case)
+    param($Items, [string[]]$Muted = @())
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($m in @($Muted)) { if ($m) { [void]$set.Add(([string]$m).Trim().ToLowerInvariant()) } }
+    if ($set.Count -eq 0) { return @($Items) }
+    return @(@($Items) | Where-Object { $null -ne $_ -and -not $set.Contains(([string]$_.Publisher).Trim().ToLowerInvariant()) })
+}
+
+function ConvertTo-KeywordList {
+    # "Downgrade, Übernahme; gewinnwarnung" -> lower-case words, each once
+    param([string]$Text)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($w in (([string]$Text) -split '[,;\r\n]+')) {
+        $t = $w.Trim().ToLowerInvariant()
+        if ($t -and -not $out.Contains($t)) { $out.Add($t) }
+    }
+    return @($out)
+}
+
+function Find-NewsKeywordHits {
+    # v4.9.5: items newer than Since, about one of Symbols, whose headline
+    # contains a keyword -> @(@{ Item; Keyword; Sym }), oldest first
+    param($Items, [string[]]$Keywords = @(), [string[]]$Symbols = @(), [DateTime]$Since = [DateTime]::MinValue)
+    $kw = @(@($Keywords) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $out = @()
+    if ($kw.Count -eq 0) { return $out }
+    $syms = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($s in @($Symbols)) { if ($s) { [void]$syms.Add(([string]$s).ToUpperInvariant()) } }
+    foreach ($n in @($Items)) {
+        if ($null -eq $n -or [DateTime]$n.Time -le $Since) { continue }
+        $hit = @(@($n.Syms) | Where-Object { $syms.Contains(([string]$_).ToUpperInvariant()) })
+        if ($hit.Count -eq 0) { continue }
+        $title = ([string]$n.Title).ToLowerInvariant()
+        foreach ($k in $kw) {
+            if ($title.Contains($k)) {
+                $out += [PSCustomObject]@{ Item = $n; Keyword = $k; Sym = ([string]$hit[0]).ToUpperInvariant() }
+                break
+            }
+        }
+    }
+    return @($out | Sort-Object -Property @{ Expression = { [DateTime]$_.Item.Time } })
 }
 
 function Get-NewsPollMinutes {
