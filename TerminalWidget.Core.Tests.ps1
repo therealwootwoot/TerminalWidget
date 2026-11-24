@@ -2297,6 +2297,40 @@ Describe "Notes, health, diagnostics (v5.5)" {
     }
 }
 
+Describe "Privacy, export, dialog places (v5.5)" {
+    It "knows which columns show amounts" {
+        foreach ($h in @("Wert", "Betrag", "Stück", "Dividende", "Summe Jahr", "Beitrag heute", "Value", "Shares", "Kauf / Verkauf")) { Test-AmountColumn $h | Should -BeTrue }
+        foreach ($h in @("Ticker", "Anteil", "Ist %", "Rendite", "Datum", "Kennzahl", "Signal", "")) { Test-AmountColumn $h | Should -BeFalse }
+    }
+    It "hides amounts with a currency but keeps percentages" {
+        Hide-AmountsInText "Summe: 1.234,56 EUR (+3,2 %)" | Should -Be ("Summe: " + ([string][char]0x2022 * 3) + " EUR (+3,2 %)")
+        Hide-AmountsInText "Dividende USD 120" | Should -Be ("Dividende USD " + ([string][char]0x2022 * 3))
+        Hide-AmountsInText "Rendite 12,5 % p.a., Beta 1,2" | Should -Be "Rendite 12,5 % p.a., Beta 1,2"
+        Hide-AmountsInText "" | Should -Be ""
+    }
+    It "writes CSV with quotes only where needed" {
+        $csv = ConvertTo-CsvText -Headers @("Ticker", "Notiz") -Rows @(, @("NVDA", 'sagt "ja"; gut'))
+        $csv | Should -Be ("Ticker;Notiz`r`nNVDA;" + '"sagt ""ja""; gut"')
+    }
+    It "builds an escaped HTML report" {
+        $h = ConvertTo-HtmlReport -Title "A & B" -Sections @([PSCustomObject]@{ Title = "Seite"; Headers = @("x", "y"); Rows = @(, @("<b>", "1.234,50 EUR")); Note = "" }) -Footer "f"
+        $h | Should -Match "<title>A &amp; B</title>"
+        $h | Should -Match "&lt;b&gt;"
+        $h | Should -Match '<td class="n">1.234,50 EUR</td>'
+        $h | Should -Match "<footer>"
+    }
+    It "puts a dialog back only where a screen still is" {
+        $scr = @([PSCustomObject]@{ X = 0; Y = 0; W = 1920; H = 1040 })
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 100; Y = 50; W = 700; H = 500 }) -Screens $scr).X | Should -Be 100
+        Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 2500; Y = 50; W = 700; H = 500 }) -Screens $scr | Should -BeNullOrEmpty
+        Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 100; Y = 1020; W = 700; H = 500 }) -Screens $scr | Should -BeNullOrEmpty
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 0; Y = 0; W = 3000; H = 2000 }) -Screens $scr).W | Should -Be 1920
+        $two = $scr + @([PSCustomObject]@{ X = 1920; Y = 0; W = 1280; H = 1000 })
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 2500; Y = 50; W = 700; H = 500 }) -Screens $two).X | Should -Be 2500
+        Get-DialogPlacement -Saved $null -Screens $scr | Should -BeNullOrEmpty
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

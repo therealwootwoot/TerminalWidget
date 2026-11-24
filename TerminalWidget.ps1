@@ -474,6 +474,7 @@ $defaultConfig = [PSCustomObject]@{
     SettingsPage          = "Design"          # v5.3: last page of the settings window
     SettingsW             = 0                 # v5.3: settings window size (0 = default)
     SettingsH             = 0
+    DialogPlacement       = [PSCustomObject]@{} # v5.5: position / size per dialog
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -4978,6 +4979,10 @@ $chartContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $cmiCopyPrice = $chartContextMenu.Items.Add("Aktuellen Kurs kopieren")
 $cmiAddWatch  = $chartContextMenu.Items.Add("Aktiven Ticker zur Watchlist hinzufügen")
 $cmiExportCsv = $chartContextMenu.Items.Add("Chartdaten als CSV exportieren")
+# v5.5: pictures of the chart / the window
+$cmiImgCopy = $chartContextMenu.Items.Add("Chart als Bild kopieren")
+$cmiImgSave = $chartContextMenu.Items.Add("Chart als Bild speichern ...")
+$cmiWinCopy = $chartContextMenu.Items.Add("Ganzes Fenster als Bild kopieren")
 $cmiFullscreen = $chartContextMenu.Items.Add("Chart im Vollbild (F11)")
 $cmiTa = $chartContextMenu.Items.Add("Ticker-Analyse: Signale + Kennzahlen (TA)")
 [void]$chartContextMenu.Items.Add("-")
@@ -7973,7 +7978,7 @@ function Send-WidgetNotification {
 
 function Show-AlertLogDialog {
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Alarm-Verlauf - $($script:AppTitle)" -W (S 760) -H (S 440)
+    $dlg = New-DialogForm -Title "Alarm-Verlauf - $($script:AppTitle)" -W (S 760) -H (S 440) -Key "AlertLog"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 560), (S 280))
     $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
@@ -8717,7 +8722,8 @@ function Invoke-Transaction {
 }
 
 function New-DialogForm {
-    param([string]$Title, [int]$W, [int]$H)
+    # v5.5: Key = remember position (and size, if sizable) under this name
+    param([string]$Title, [int]$W, [int]$H, [string]$Key = "")
     $p = $script:Pal
     $d = New-Object System.Windows.Forms.Form
     $d.Text = $Title
@@ -8732,7 +8738,188 @@ function New-DialogForm {
     # v4.7: English mode translates the static texts once the dialog is built
     $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
     $d.Text = Tr $Title
+    if ($Key) { Register-DialogPlacement -Dlg $d -Key $Key }
     return $d
+}
+
+# ---- v5.5: dialogs open where they were closed (if that screen still exists) ----
+function Register-DialogPlacement {
+    param([System.Windows.Forms.Form]$Dlg, [string]$Key)
+    $Dlg.Name = "twdlg_" + $Key
+    $Dlg.Add_Load({
+        param($sender, $e)
+        try {
+            $k = ([string]$sender.Name).Substring(6)
+            $all = $script:Config.DialogPlacement
+            if ($null -eq $all -or $null -eq $all.PSObject.Properties[$k]) { return }
+            $screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $wa = $_.WorkingArea; [PSCustomObject]@{ X = $wa.X; Y = $wa.Y; W = $wa.Width; H = $wa.Height } })
+            $pl = Get-DialogPlacement -Saved $all.$k -Screens $screens -MinW ([math]::Min($sender.Width, (S 200))) -MinH ([math]::Min($sender.Height, (S 120)))
+            if ($null -eq $pl) { return }
+            $sender.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+            if ($sender.FormBorderStyle -eq [System.Windows.Forms.FormBorderStyle]::Sizable) {
+                $w = [math]::Max($sender.MinimumSize.Width, [int]$pl.W); $h = [math]::Max($sender.MinimumSize.Height, [int]$pl.H)
+                $sender.Bounds = New-Object System.Drawing.Rectangle([int]$pl.X, [int]$pl.Y, $w, $h)
+            } else {
+                $sender.Location = New-Object System.Drawing.Point([int]$pl.X, [int]$pl.Y)
+            }
+        } catch { Write-WidgetLog "Dialog placement: $($_.Exception.Message)" "WARN" }
+    })
+    $Dlg.Add_FormClosing({
+        param($sender, $e)
+        try {
+            if ($sender.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) { return }
+            $k = ([string]$sender.Name).Substring(6)
+            if ($null -eq $script:Config.DialogPlacement -or $script:Config.DialogPlacement -is [string]) { $script:Config.DialogPlacement = [PSCustomObject]@{} }
+            $b = $sender.Bounds
+            $v = [PSCustomObject]@{ X = $b.X; Y = $b.Y; W = $b.Width; H = $b.Height }
+            $script:Config.DialogPlacement | Add-Member -NotePropertyName $k -NotePropertyValue $v -Force
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        } catch { Write-WidgetLog "Dialog placement: $($_.Exception.Message)" "WARN" }
+    })
+}
+
+# ---- v5.5: privacy mode in every window that shows amounts ----
+$script:PrivacyCellFmt = {
+    param($sender, $e)
+    if (-not [bool]$script:Config.PrivacyMode -or $e.ColumnIndex -lt 0 -or $e.RowIndex -lt 0) { return }
+    $col = $sender.Columns[$e.ColumnIndex]
+    if (-not (Test-AmountColumn ([string]$col.HeaderText))) { return }
+    $v = [string]$e.Value
+    if (-not $v -or $v.Contains("%") -or $v -notmatch '\d') { return }
+    $e.Value = [string][char]0x2022 * 3
+    $e.FormattingApplied = $true
+}
+$script:PrivacyLabelFix = {
+    param($sender, $e)
+    if (-not [bool]$script:Config.PrivacyMode) { return }
+    $t = Hide-AmountsInText ([string]$sender.Text)
+    if ($t -ne [string]$sender.Text) { $sender.Text = $t }
+}
+function Enable-PrivacyMask {
+    # grids: amount columns show dots; labels: amounts with a currency show dots
+    param($Root)
+    if ($null -eq $Root) { return }
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.DataGridView]) { $c.Add_CellFormatting($script:PrivacyCellFmt) }
+        elseif ($c -is [System.Windows.Forms.Label]) { $c.Add_TextChanged($script:PrivacyLabelFix); & $script:PrivacyLabelFix $c $null }
+        foreach ($ch in $c.Controls) { $stack.Push($ch) }
+    }
+}
+
+# ---- v5.5: export - pictures of windows / charts, grids as CSV or HTML ----
+function Get-ControlBitmap {
+    param([System.Windows.Forms.Control]$Ctl)
+    $bmp = New-Object System.Drawing.Bitmap([math]::Max(1, $Ctl.Width), [math]::Max(1, $Ctl.Height))
+    $Ctl.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)))
+    return $bmp
+}
+
+function Export-ControlImage {
+    # Mode Copy = clipboard, Save = PNG file (Path empty = ask)
+    param([System.Windows.Forms.Control]$Ctl, [string]$Mode = "Copy", [string]$Name = "TerminalWidget", [string]$Path = "")
+    if ($null -eq $Ctl -or $Ctl.IsDisposed) { return "" }
+    $bmp = $null
+    try {
+        $bmp = Get-ControlBitmap $Ctl
+        if ($Mode -eq "Copy") {
+            [System.Windows.Forms.Clipboard]::SetImage($bmp)
+            Set-TransientStatus "Bild in der Zwischenablage" 3
+            return "clipboard"
+        }
+        if (-not $Path) {
+            $sfd = New-Object System.Windows.Forms.SaveFileDialog
+            $sfd.Filter = "PNG-Bild (*.png)|*.png"
+            $sfd.FileName = "{0}_{1}.png" -f $Name, (Get-Date -Format "yyyyMMdd_HHmm")
+            if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { $sfd.Dispose(); return "" }
+            $Path = $sfd.FileName; $sfd.Dispose()
+        }
+        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Set-TransientStatus ("Bild gespeichert: {0}" -f [IO.Path]::GetFileName($Path)) 4
+        return $Path
+    } catch {
+        Write-WidgetLog "Image export: $($_.Exception.Message)" "WARN"
+        Set-TransientStatus ("Bild fehlgeschlagen: {0}" -f $_.Exception.Message) 5
+        return ""
+    } finally { if ($null -ne $bmp) { $bmp.Dispose() } }
+}
+
+function Get-GridExportData {
+    # visible columns, formatted values (privacy mask applies)
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $cols = @($Grid.Columns | Where-Object { $_.Visible } | Sort-Object DisplayIndex)
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Grid.Rows) {
+        if ($r.IsNewRow -or -not $r.Visible) { continue }
+        $vals = @(foreach ($c in $cols) { [string]$r.Cells[$c.Index].FormattedValue })
+        $rows.Add([object[]]$vals)
+    }
+    return [PSCustomObject]@{ Headers = [string[]]@($cols | ForEach-Object { [string]$_.HeaderText }); Rows = $rows.ToArray() }
+}
+
+function Export-GridsReport {
+    # Grids of a window / page as CSV (first grid) or HTML (all, with the labels as notes)
+    param([object[]]$Grids, [string]$Title, [string]$Format = "Html", [string]$Path = "", [string]$Note = "")
+    $grids = @($Grids | Where-Object { $null -ne $_ -and $_.Visible -and $_.Rows.Count -gt 0 })
+    if ($grids.Count -eq 0) { Set-TransientStatus "Auf dieser Seite gibt es keine Tabelle zum Exportieren" 4; return "" }
+    $ext = if ($Format -eq "Csv") { "csv" } else { "html" }
+    if (-not $Path) {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = if ($Format -eq "Csv") { "CSV für Excel (*.csv)|*.csv" } else { "HTML-Bericht (*.html)|*.html" }
+        $safe = ($Title -replace '[^\w\-]+', '_').Trim('_')
+        $sfd.FileName = "{0}_{1}.{2}" -f $safe, (Get-Date -Format "yyyyMMdd"), $ext
+        if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { $sfd.Dispose(); return "" }
+        $Path = $sfd.FileName; $sfd.Dispose()
+    }
+    try {
+        if ($Format -eq "Csv") {
+            $sections = @(foreach ($g in $grids) { Get-GridExportData $g })
+            $parts = @(foreach ($sec in $sections) { ConvertTo-CsvText -Headers $sec.Headers -Rows $sec.Rows })
+            # UTF-8 with BOM: Excel then shows the umlauts correctly
+            [IO.File]::WriteAllText($Path, ($parts -join "`r`n`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+        } else {
+            $sections = @(foreach ($g in $grids) { $d = Get-GridExportData $g; [PSCustomObject]@{ Title = ""; Headers = $d.Headers; Rows = $d.Rows; Note = "" } })
+            if ($Note -and $sections.Count -gt 0) { $sections[0].Note = $Note }
+            $foot = "{0} {1} - {2}{3}" -f $script:AppTitle, (Get-Date -Format "dd.MM.yyyy HH:mm"), (Tr "keine Anlageberatung"), $(if ([bool]$script:Config.PrivacyMode) { " - " + (Tr "Privat-Modus: Beträge ausgeblendet") } else { "" })
+            [IO.File]::WriteAllText($Path, (ConvertTo-HtmlReport -Title $Title -Sections $sections -Footer $foot), (New-Object System.Text.UTF8Encoding($false)))
+        }
+        Write-WidgetLog "Report exported: $Path"
+        Set-TransientStatus ("Gespeichert: {0}" -f [IO.Path]::GetFileName($Path)) 4
+        return $Path
+    } catch {
+        Write-WidgetLog "Report export: $($_.Exception.Message)" "WARN"
+        Show-InfoBox -Text ("Export fehlgeschlagen: {0}" -f $_.Exception.Message) -Title "Export"
+        return ""
+    }
+}
+
+function Get-ChildGrids {
+    param($Root)
+    $out = New-Object System.Collections.Generic.List[object]
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.DataGridView]) { $out.Add($c) }
+        foreach ($ch in $c.Controls) { $stack.Push($ch) }
+    }
+    return $out.ToArray()
+}
+
+function Get-ChildLabelText {
+    # longer labels of a page (sums, notes) for the HTML report
+    param($Root)
+    $t = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.Label] -and $c.Visible -and ([string]$c.Text).Length -gt 25) { $t.Add([string]$c.Text) }
+        foreach ($ch in $c.Controls) { $stack.Push($ch) }
+    }
+    return ($t.ToArray() -join " | ")
 }
 
 function Show-TransactionDialog {
@@ -8850,7 +9037,7 @@ function Show-TransactionDialog {
 
 function Show-TransactionHistory {
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Transaktionshistorie" -W (S 760) -H (S 440)
+    $dlg = New-DialogForm -Title "Transaktionshistorie" -W (S 760) -H (S 440) -Key "TxHistory"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 600), (S 300))
 
@@ -9095,7 +9282,7 @@ function Get-ReportYears {
 function Show-YearReport {
     param($Owner = $null)
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Jahresreport - realisierte Gewinne/Verluste und Dividenden" -W (S 940) -H (S 540)
+    $dlg = New-DialogForm -Title "Jahresreport - realisierte Gewinne/Verluste und Dividenden" -W (S 940) -H (S 540) -Key "YearReport"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 760), (S 400))
     $aT = [System.Windows.Forms.AnchorStyles]::Top; $aB = [System.Windows.Forms.AnchorStyles]::Bottom
@@ -9301,6 +9488,7 @@ function Show-YearReport {
 
     $own = if ($null -ne $Owner) { $Owner } else { $form }
     $dlg.Add_Shown({ $script:RepCtl.Calc.PerformClick() })
+    Enable-PrivacyMask $dlg
     [void]$dlg.ShowDialog($own)
     $script:RepCtl = $null
     $dlg.Dispose()
@@ -9754,7 +9942,7 @@ function Draw-AnalysisChart {
                 $v = $min + ($max - $min) * $k / 4.0
                 $y = [float](& $toY $v)
                 $g.DrawLine($gridPen, [float]$L, $y, [float]$R, $y)
-                $lbl = "{0:N0}" -f $v
+                $lbl = if ([bool]$script:Config.PrivacyMode) { [string][char]0x2022 * 3 } else { "{0:N0}" -f $v }
                 $sz = $g.MeasureString($lbl, $fontAxis)
                 $g.DrawString($lbl, $fontAxis, $brMuted, [float]($L - $sz.Width - (S 4)), [float]($y - $sz.Height / 2))
             }
@@ -9794,8 +9982,9 @@ function Draw-AnalysisChart {
             $g.DrawLine($hp, $x, [float]$T, $x, [float]$B)
             $hp.Dispose()
             $txt = @([DateTime]::ParseExact($sr.Dates[$hi], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("ddd dd.MM.yyyy"))
-            foreach ($ln in $lines) { $txt += ("{0}: {1:N2}" -f $ln.N, $ln.V[$hi]) }
-            $txt += ("Ergebnis: {0}" -f (Format-Signed ($sr.Value[$hi] + $sr.Dividends[$hi] - $sr.Invested[$hi])))
+            $pv = [bool]$script:Config.PrivacyMode
+            foreach ($ln in $lines) { $txt += $(if ($pv) { "{0}: {1}" -f $ln.N, ([string][char]0x2022 * 3) } else { "{0}: {1:N2}" -f $ln.N, $ln.V[$hi] }) }
+            $txt += ("Ergebnis: {0}" -f $(if ($pv) { [string][char]0x2022 * 3 } else { Format-Signed ($sr.Value[$hi] + $sr.Dividends[$hi] - $sr.Invested[$hi]) }))
             $body = $txt -join "`n"
             $sz = $g.MeasureString($body, $fontAxis)
             $bx = if (($x + (S 10) + $sz.Width) -lt $R) { $x + (S 10) } else { $x - (S 10) - $sz.Width }
@@ -9845,7 +10034,7 @@ function Draw-AllocationBars {
             $bw = [math]::Max(2.0, ($x1 - $x0) * ([double]$gr.Pct / $maxPct))
             $br = if ([double]$gr.Pct -gt $thr) { $brW } else { $brA }
             $g.FillRectangle($br, [float]$x0, [float]($y + (S 4)), [float]$bw, [float]($rowH - (S 9)))
-            $g.DrawString(("{0,5:N1} %  {1:N0}" -f $gr.Pct, $gr.Value), $fontAxis, $brM, [float]($x1 + (S 6)), [float]($y + (S 5)))
+            $g.DrawString($(if ([bool]$script:Config.PrivacyMode) { "{0,5:N1} %" -f $gr.Pct } else { "{0,5:N1} %  {1:N0}" -f $gr.Pct, $gr.Value }), $fontAxis, $brM, [float]($x1 + (S 6)), [float]($y + (S 5)))
             $y += $rowH
         }
         # threshold marker
@@ -10485,7 +10674,7 @@ function Show-AnalysisDialog {
     $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
     $aAll = $aT -bor $aB -bor $aL -bor $aR
 
-    $dlg = New-DialogForm -Title "Portfolio-Analyse - $($script:AppTitle)" -W (S 1000) -H (S 640)
+    $dlg = New-DialogForm -Title "Portfolio-Analyse - $($script:AppTitle)" -W (S 1000) -H (S 640) -Key "Analyse"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MaximizeBox = $true
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 860), (S 520))
@@ -11052,6 +11241,35 @@ function Show-AnalysisDialog {
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 1000), (S 520))
     $dlg.ClientSize = New-Object System.Drawing.Size((S 1130), $dlg.ClientSize.Height)
     $dlg.Add_Shown({ Show-AnalysisPage ([string]$script:AnaCtl.StartPage); Update-AnalysisAllocation; Start-AnalysisLoad })
+    # v5.5: export of the current page + privacy mode for every grid and label
+    $btnExp = New-Object System.Windows.Forms.Button
+    $btnExp.SetBounds(($dlg.ClientSize.Width - (S 112)), (S 10), (S 100), (S 26)); $btnExp.Anchor = $aT -bor $aR
+    Style-FlatButton -Btn $btnExp -BgColor $p.Card -FgColor $p.Accent -BorderColor $p.Border
+    $btnExp.Text = "Export " + $script:DropArrow
+    Set-DynTip $btnExp "Aktuelle Seite als HTML-Bericht oder CSV (Excel) speichern, oder als Bild"
+    $dlg.Controls.Add($btnExp)
+    $expMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    foreach ($ei in @(@("Html", "HTML-Bericht speichern ..."), @("Csv", "CSV für Excel speichern ..."), @("ImgCopy", "Als Bild kopieren"), @("ImgSave", "Als Bild speichern ..."))) {
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem($ei[1]); $mi.Tag = $ei[0]; [void]$expMenu.Items.Add($mi)
+    }
+    Apply-Language $expMenu
+    $expMenu.Add_ItemClicked({
+        param($sender, $e)
+        $sender.Close()
+        $ac = $script:AnaCtl
+        if ($null -eq $ac) { return }
+        $pg = $ac.Pages[[string]$ac.Page]
+        $title = "{0} - {1}" -f (Tr "Portfolio-Analyse"), (Tr ([string]$ac.PageButtons[[string]$ac.Page].Text))
+        switch ([string]$e.ClickedItem.Tag) {
+            "Html"    { [void](Export-GridsReport -Grids (Get-ChildGrids $pg) -Title $title -Format "Html" -Note (Get-ChildLabelText $pg)) }
+            "Csv"     { [void](Export-GridsReport -Grids (Get-ChildGrids $pg) -Title $title -Format "Csv") }
+            "ImgCopy" { [void](Export-ControlImage -Ctl $ac.Dlg -Mode "Copy") }
+            "ImgSave" { [void](Export-ControlImage -Ctl $ac.Dlg -Mode "Save" -Name "Analyse") }
+        }
+    })
+    $btnExp.Tag = $expMenu
+    $btnExp.Add_Click({ param($sender, $e) $sender.Tag.Show($sender, (New-Object System.Drawing.Point(0, $sender.Height))) })
+    Enable-PrivacyMask $dlg
 
     try {
         $owner = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { $script:FsForm } else { $form }
@@ -11285,7 +11503,8 @@ function Show-InfoGrid {
     param([string]$Title, [string[]]$Columns, [int[]]$Weights, [int]$W = 780, [int]$H = 480,
           [string]$Footer = "", [scriptblock]$OnShown = $null, [scriptblock]$OnDouble = $null, [hashtable]$Extra = @{}, [int[]]$RightAlign = @())
     $p = $script:Pal
-    $dlg = New-DialogForm -Title $Title -W (S $W) -H (S $H)
+    # v5.5: every info window remembers its place (key = first word of the title)
+    $dlg = New-DialogForm -Title $Title -W (S $W) -H (S $H) -Key ("Info_" + (([string]$Title -split '[\s-]+')[0] -replace '[^\w]', ''))
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 420), (S 260))
     $dlg.KeyPreview = $true
@@ -11641,7 +11860,7 @@ function Show-TickerAnalysis {
     $p = $script:Pal
     $aT = [System.Windows.Forms.AnchorStyles]::Top; $aB = [System.Windows.Forms.AnchorStyles]::Bottom
     $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
-    $dlg = New-DialogForm -Title "Ticker-Analyse - $sym (TA)" -W (S 1080) -H (S 660)
+    $dlg = New-DialogForm -Title "Ticker-Analyse - $sym (TA)" -W (S 1080) -H (S 660) -Key "TA"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MaximizeBox = $true
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 900), (S 520))
@@ -12010,6 +12229,12 @@ function Invoke-TerminalCommand {
                 Set-TransientStatus ("Design: {0}" -f $script:Config.UiStyle) 3
             }
             "HEALTH" { Show-HealthReport }
+            "IMG"    {
+                # IMG = chart to the clipboard, IMG SAVE, IMG WIN (whole window), IMG WIN SAVE
+                $aa = @($c.Args | ForEach-Object { ([string]$_).ToUpper() })
+                $md = if ($aa -contains "SAVE") { "Save" } else { "Copy" }
+                if ($aa -contains "WIN") { [void](Export-ControlImage -Ctl $form -Mode $md -Name "TerminalWidget") } else { [void](Export-ChartImage -Mode $md) }
+            }
             "DIAG"   { [void](Export-Diagnostics) }
             "SET"    { $null = Show-SettingsDialog -Search ((@($c.Args) -join " ").Trim()) }
             "MENU"   { return (Invoke-MenuEntry ((@($c.Args) -join " ").Trim())) }
@@ -13048,7 +13273,7 @@ function Copy-GridAsTable {
 # ==============================================================================
 function Show-CashDialog {
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Cash-Konto - $(Get-DepotName ([string]$script:Config.ActiveDepot))" -W (S 720) -H (S 470)
+    $dlg = New-DialogForm -Title "Cash-Konto - $(Get-DepotName ([string]$script:Config.ActiveDepot))" -W (S 720) -H (S 470) -Key "Cash"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 600), (S 360))
     $dlg.KeyPreview = $true
@@ -13197,7 +13422,7 @@ function Show-CashDialog {
 
 function Show-SavingsPlansDialog {
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Sparpläne - $(Get-DepotName ([string]$script:Config.ActiveDepot))" -W (S 760) -H (S 420)
+    $dlg = New-DialogForm -Title "Sparpläne - $(Get-DepotName ([string]$script:Config.ActiveDepot))" -W (S 760) -H (S 420) -Key "Plans"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 640), (S 320))
     $dlg.KeyPreview = $true
@@ -14581,7 +14806,7 @@ function Show-NoteDialog {
     $sym = ([string]$Ticker).Trim().ToUpper()
     if (-not $sym) { return }
     $p = $script:Pal
-    $dlg = New-DialogForm -Title ("Notiz - {0}" -f $sym) -W (S 520) -H (S 330)
+    $dlg = New-DialogForm -Title ("Notiz - {0}" -f $sym) -W (S 520) -H (S 330) -Key "Note"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 380), (S 240))
     $aAll = [System.Windows.Forms.AnchorStyles]"Top,Bottom,Left,Right"
@@ -14715,7 +14940,7 @@ function Export-Diagnostics {
 
 function Show-GlossaryDialog {
     # v4.0: searchable list of every explained term
-    $dlg = New-DialogForm -Title "Glossar - $($script:AppTitle)" -W (S 640) -H (S 430)
+    $dlg = New-DialogForm -Title "Glossar - $($script:AppTitle)" -W (S 640) -H (S 430) -Key "Glossary"
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 500), (S 300))
     $p = $script:Pal
@@ -15167,6 +15392,14 @@ $cmiAddWatch.Add_Click({
 })
 $cmiExportCsv.Add_Click({ $btnExportCsv.PerformClick() })
 $cmiFullscreen.Add_Click({ Toggle-ChartFullscreen })
+$cmiImgCopy.Add_Click({ [void](Export-ChartImage -Mode "Copy") })
+$cmiImgSave.Add_Click({ [void](Export-ChartImage -Mode "Save") })
+$cmiWinCopy.Add_Click({ [void](Export-ControlImage -Ctl $form -Mode "Copy") })
+function Export-ChartImage {
+    param([string]$Mode = "Copy", [string]$Path = "")
+    $c = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed -and $script:FsForm.Visible) { $script:FsForm } else { $pnlChartCanvas }
+    return (Export-ControlImage -Ctl $c -Mode $Mode -Name ("Chart_" + ([string]$script:Config.ActiveTicker).ToUpper()) -Path $Path)
+}
 
 # ==============================================================================
 # v5.0 Stage B: drawings in the chart (horizontal line, trend line, Fibonacci)
@@ -17331,6 +17564,65 @@ function Invoke-SmokeTest {
         Remove-Item $tmp -ErrorAction SilentlyContinue
         & $pump
     }
+    # v5.5 A: notes, HEALTH, diagnostics
+    Invoke-SmokeStep "Ticker note" {
+        Set-TickerNote -Ticker "NVDA" -Text "  Smoke: KI-These`nzweite Zeile  "
+        if ((Get-TickerNote "nvda") -ne "Smoke: KI-These`r`nzweite Zeile") { throw "note not stored: '$(Get-TickerNote NVDA)'" }
+        [void](Invoke-TerminalCommand "MSFT NOTE Cloud-Wachstum"); if ((Get-TickerNote "MSFT") -ne "Cloud-Wachstum") { throw "NOTE command did not store" }
+        & $probeRun { Show-NoteDialog -Ticker "NVDA" } { if ($null -eq $script:NoteTb -or $script:NoteTb.Text -notlike "Smoke*") { return "note dialog empty" }; "" } 800
+        # hover card with the note (painted, then hidden again)
+        $script:HoverPending = @{ Sym = "NVDA" }; $script:HoverTimer.Stop(); $script:HoverTimer.Start()
+        for ($k = 0; $k -lt 12; $k++) { Start-Sleep -Milliseconds 80; & $pump }
+        if ($pnlHover.Visible) { $pnlHover.Refresh(); if ($pnlHover.Height -le (S 172)) { throw "hover card has no room for the note" } }
+        Hide-HoverCard
+        Set-TickerNote -Ticker "MSFT" -Text ""
+        if (Get-TickerNote "MSFT") { throw "empty note not removed" }
+    } 2500
+    Invoke-SmokeStep "HEALTH and DIAG" {
+        [void](Invoke-TerminalCommand "HEALTH")
+        if (-not $script:LastHealthText -or $script:LastHealthText -notmatch "Datendateien") { throw "health report empty" }
+        $zp = Join-Path $env:TEMP ("tw-diag-{0}.zip" -f $PID)
+        if (-not (Export-Diagnostics -Path $zp) -or -not (Test-Path $zp)) { throw "diagnostics ZIP missing" }
+        Remove-Item $zp -ErrorAction SilentlyContinue
+    }
+    # v5.5 B: privacy in the Analyse window, export, image, dialog places
+    Invoke-SmokeStep "Analyse privacy + export" {
+        Set-PrivacyMode $true
+        $script:SmokeExpDir = Join-Path $env:TEMP ("tw-exp-{0}" -f $PID)
+        New-Item -ItemType Directory -Path $script:SmokeExpDir -Force | Out-Null
+        & $probeRun { Show-AnalysisDialog -Page "Ret" } {
+            $ac = $script:AnaCtl
+            if ($null -eq $ac) { return "window not open" }
+            foreach ($gr in @(Get-ChildGrids $ac.Dlg)) {
+                foreach ($col in $gr.Columns) {
+                    if (-not (Test-AmountColumn ([string]$col.HeaderText))) { continue }
+                    foreach ($row in $gr.Rows) {
+                        $fv = [string]$row.Cells[$col.Index].FormattedValue
+                        if ($fv -match '\d' -and -not $fv.Contains("%")) { return "privacy: '$($col.HeaderText)' shows '$fv'" }
+                    }
+                }
+            }
+            $pg = $ac.Pages[[string]$ac.Page]
+            $h = Export-GridsReport -Grids (Get-ChildGrids $pg) -Title "Smoke" -Format "Html" -Path (Join-Path $script:SmokeExpDir "a.html")
+            $c = Export-GridsReport -Grids (Get-ChildGrids $pg) -Title "Smoke" -Format "Csv" -Path (Join-Path $script:SmokeExpDir "a.csv")
+            if (@(Get-ChildGrids $pg | Where-Object { $_.Rows.Count -gt 0 }).Count -gt 0 -and (-not $h -or -not $c)) { return "page export failed" }
+            & $script:SmokeShot "12-analyse-privacy" $ac.Dlg
+            return ""
+        } 9000
+        Set-PrivacyMode $false
+    } 11000
+    Invoke-SmokeStep "Chart image" {
+        $ip = Join-Path $script:SmokeExpDir "chart.png"
+        if (-not (Export-ChartImage -Mode "Save" -Path $ip) -or (Get-Item $ip).Length -lt 1000) { throw "chart image missing or empty" }
+        $wp = Join-Path $script:SmokeExpDir "win.png"
+        if (-not (Export-ControlImage -Ctl $form -Mode "Save" -Path $wp)) { throw "window image missing" }
+        Remove-Item $script:SmokeExpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Invoke-SmokeStep "Dialog places" {
+        Show-CashDialog
+        if ($null -eq $script:Config.DialogPlacement.PSObject.Properties["Cash"]) { throw "cash window place not saved" }
+    } 1500
+
     Invoke-SmokeStep "Design analysis" { & $probeRun { Show-AnalysisDialog -Page "Bench" } { & $script:SmokeShot "09-fresh-analysis-bench" ([System.Windows.Forms.Form]::ActiveForm); "" } 9000 } 11000
     [void](Invoke-TerminalCommand "STYLE REFINED")
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }

@@ -2835,6 +2835,7 @@ function Get-TerminalFunctions {
         "SET"    = @{ Scope = "G";  Desc = "Einstellungen (SET <Suchwort> springt zur Einstellung)" }
         "MENU"   = @{ Scope = "G";  Desc = "Menüeintrag ausführen (MENU <Name>)" }
         "HEALTH" = @{ Scope = "G";  Desc = "Zustand prüfen: Datendateien, Backups, Datenquelle, Schriften" }
+        "IMG"    = @{ Scope = "G";  Desc = "Bild: IMG = Chart in die Zwischenablage, IMG SAVE, IMG WIN (ganzes Fenster)" }
         "DIAG"   = @{ Scope = "G";  Desc = "Diagnose als ZIP exportieren (Log, Einstellungen ohne Zugangsdaten, Zustand)" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
@@ -4860,4 +4861,100 @@ function Get-DiagnosticConfig {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
     }
     return $c
+}
+
+# ---- v5.5: privacy mask, CSV / HTML export, dialog placement ----
+function Test-AmountColumn {
+    # Columns whose values reveal money or position size (masked in privacy mode)
+    param([string]$Header)
+    $h = ConvertTo-SearchKey $Header
+    if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
+    foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
+                     "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
+        if ($h.Contains($w)) { return $true }
+    }
+    return $false
+}
+
+function Hide-AmountsInText {
+    # "Summe: 1.234,56 EUR (+3,2 %)" -> "Summe: ••• EUR (+3,2 %)"; percentages stay
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $dots = [string][char]0x2022 * 3
+    $cur = '(EUR|USD|CHF|GBP|JPY|CAD|AUD|SEK|NOK|DKK|PLN|HKD|€|\$|£)'
+    $num = '[-+−]?\d[\d.,'' ]*\d|[-+−]?\d'
+    $t = [regex]::Replace($Text, "(?<![\w.,])($num)(\s?)$cur(?!\w)", { param($m) $dots + $m.Groups[2].Value + $m.Groups[3].Value })
+    $t = [regex]::Replace($t, "$cur(\s?)($num)(?![\d%])", { param($m) $m.Groups[1].Value + $m.Groups[2].Value + $dots })
+    return $t
+}
+
+function ConvertTo-CsvText {
+    # Excel-friendly CSV (semicolon for German Excel); quotes where needed
+    param([string[]]$Headers, $Rows, [string]$Separator = ";")
+    $q = {
+        param($v)
+        $s = [string]$v
+        if ($s.Contains($Separator) -or $s.Contains('"') -or $s.Contains("`n") -or $s.Contains("`r")) { return '"' + $s.Replace('"', '""') + '"' }
+        return $s
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add((@($Headers | ForEach-Object { & $q $_ }) -join $Separator))
+    foreach ($r in @($Rows)) { if ($null -ne $r) { $lines.Add((@(@($r) | ForEach-Object { & $q $_ }) -join $Separator)) } }
+    return ($lines.ToArray() -join "`r`n")
+}
+
+function ConvertTo-HtmlReport {
+    # Sections: @(@{ Title; Headers; Rows; Note }) -> one self-contained HTML page
+    param([string]$Title, $Sections, [string]$Footer = "")
+    $enc = { param($v) [System.Net.WebUtility]::HtmlEncode([string]$v) }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("<!DOCTYPE html>`r`n<html lang=`"de`"><head><meta charset=`"utf-8`"><title>" + (& $enc $Title) + "</title>`r`n<style>")
+    [void]$sb.Append("body{font-family:'Segoe UI',sans-serif;margin:24px;color:#1f2328}h1{font-size:20px}h2{font-size:15px;margin-top:24px}")
+    [void]$sb.Append("table{border-collapse:collapse;font-size:13px}th,td{padding:4px 10px;border-bottom:1px solid #d0d7de;text-align:left}")
+    [void]$sb.Append("td.n{text-align:right;font-family:Consolas,monospace}th{background:#f6f8fa}p.note,footer{color:#656d76;font-size:12px}</style></head><body>`r`n")
+    [void]$sb.Append("<h1>" + (& $enc $Title) + "</h1>`r`n")
+    foreach ($sec in @($Sections)) {
+        if ($null -eq $sec) { continue }
+        if ($sec.Title) { [void]$sb.Append("<h2>" + (& $enc $sec.Title) + "</h2>`r`n") }
+        if ($sec.Note) { [void]$sb.Append("<p class=`"note`">" + (& $enc $sec.Note) + "</p>`r`n") }
+        if (@($sec.Headers).Count -eq 0) { continue }
+        [void]$sb.Append("<table><tr>")
+        foreach ($h in @($sec.Headers)) { [void]$sb.Append("<th>" + (& $enc $h) + "</th>") }
+        [void]$sb.Append("</tr>`r`n")
+        foreach ($r in @($sec.Rows)) {
+            if ($null -eq $r) { continue }
+            [void]$sb.Append("<tr>")
+            foreach ($v in @($r)) {
+                $sv = [string]$v
+                $cls = if ($sv -match '^[-+−]?[\d.,'' ]+\s?(%|[A-Z]{3})?$' -and $sv -match '\d') { " class=`"n`"" } else { "" }
+                [void]$sb.Append("<td$cls>" + (& $enc $sv) + "</td>")
+            }
+            [void]$sb.Append("</tr>`r`n")
+        }
+        [void]$sb.Append("</table>`r`n")
+    }
+    if ($Footer) { [void]$sb.Append("<footer><p>" + (& $enc $Footer) + "</p></footer>`r`n") }
+    [void]$sb.Append("</body></html>`r`n")
+    return $sb.ToString()
+}
+
+function Get-DialogPlacement {
+    # Saved bounds of a dialog, only if at least 120 x 60 px of its top part
+    # lie on one of the screens (monitor unplugged -> default position)
+    # Saved: @{ X; Y; W; H }; Screens: @(@{ X; Y; W; H }) working areas
+    param($Saved, $Screens, [int]$MinW = 200, [int]$MinH = 120)
+    if ($null -eq $Saved) { return $null }
+    $x = [int]$Saved.X; $y = [int]$Saved.Y; $w = [int]$Saved.W; $h = [int]$Saved.H
+    if ($w -lt $MinW -or $h -lt $MinH) { return $null }
+    foreach ($sc in @($Screens)) {
+        if ($null -eq $sc) { continue }
+        $ix = [math]::Min($x + $w, [int]$sc.X + [int]$sc.W) - [math]::Max($x, [int]$sc.X)
+        $topIn = ($y -ge [int]$sc.Y - 4) -and ($y -le [int]$sc.Y + [int]$sc.H - 60)
+        if ($ix -ge 120 -and $topIn) {
+            # not larger than that screen
+            $w2 = [math]::Min($w, [int]$sc.W); $h2 = [math]::Min($h, [int]$sc.H)
+            return [PSCustomObject]@{ X = $x; Y = $y; W = $w2; H = $h2 }
+        }
+    }
+    return $null
 }
