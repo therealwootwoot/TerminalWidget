@@ -3825,7 +3825,7 @@ function Get-TreemapRects {
     $n = @($Values).Count
     $rects = New-Object 'object[]' $n
     for ($i = 0; $i -lt $n; $i++) { $rects[$i] = @(0.0, 0.0, 0.0, 0.0) }
-    $idx = @(0..($n - 1) | Where-Object { $n -gt 0 -and [double]$Values[$_] -gt 0 } | Sort-Object -Property @{ Expression = { [double]$Values[$_] }; Descending = $true })
+    $idx = @(0..($n - 1) | Where-Object { $n -gt 0 -and [double]$Values[$_] -gt 0 } | Sort-Object -Property @{ Expression = { [double]$Values[$_] }; Descending = $true }, @{ Expression = { [int]$_ }; Descending = $false })   # stable on 5.1 too
     $total = 0.0; foreach ($i in $idx) { $total += [double]$Values[$i] }
     if ($idx.Count -eq 0 -or $total -le 0 -or $W -le 0 -or $H -le 0) { return ,$rects }
     $scale = ($W * $H) / $total
