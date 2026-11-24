@@ -930,7 +930,7 @@ function Test-CompactLayout {
 }
 
 function Get-ThemeNames {
-    return @("Dark", "OLED", "Light", "Terminal")
+    return @("Dark", "OLED", "Light", "Terminal", "Graphite")
 }
 
 function Get-NextTheme {
@@ -2828,6 +2828,7 @@ function Get-TerminalFunctions {
         "TF"     = @{ Scope = "G";  Desc = "Zeitraum: TF 1D / 5D / 1M / 3M / 6M / 1Y" }
         "LAYOUT" = @{ Scope = "G";  Desc = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <Name>, LAYOUT DEL <Name>" }
         "THEME"  = @{ Scope = "G";  Desc = "Theme wechseln (THEME <Name>)" }
+        "STYLE"  = @{ Scope = "G";  Desc = "Design umschalten: STYLE / STYLE FRESH / STYLE REFINED" }
         "SET"    = @{ Scope = "G";  Desc = "Einstellungen" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
@@ -4538,4 +4539,45 @@ function Get-AlignedIndex {
         $out[$i] = [double]$Closes[$j] / $base * 100.0
     }
     return ,$out
+}
+
+# ------------------------------------------------------------------------------
+# v5.2: design - style (Refined / Fresh), row density, ticker bar speed,
+# Windows accent colour
+# ------------------------------------------------------------------------------
+function Get-UiSpec {
+    param([string]$Style = "Refined", [string]$Density = "Normal")
+    $fresh = ($Style -eq "Fresh")
+    $row = switch ($Density) { "Compact" { 21 } "Comfortable" { 30 } default { 25 } }
+    if ($fresh) { $row += 2 }
+    return [PSCustomObject]@{
+        Style      = $(if ($fresh) { "Fresh" } else { "Refined" })
+        Fresh      = $fresh
+        BtnRadius  = $(if ($fresh) { 8 } else { 4 })
+        CardRadius = $(if ($fresh) { 10 } else { 0 })
+        Gap        = $(if ($fresh) { 12 } else { 8 })
+        RowH       = $row
+        HeaderH    = $(if ($fresh) { 30 } else { 26 })
+        FillAlpha  = $(if ($fresh) { 95 } else { 64 })
+        LineWidth  = $(if ($fresh) { 2.2 } else { 1.9 })
+        CellPad    = $(if ($fresh) { 6 } else { 2 })
+    }
+}
+
+function Get-UiStyles { return @("Refined", "Fresh") }
+function Get-RowDensities { return @("Compact", "Normal", "Comfortable") }
+function Get-TapeSpeeds { return @("Slow", "Normal", "Fast") }
+
+function Get-TapeStep {
+    # pixels per 30 ms tick (before DPI scaling)
+    param([string]$Speed)
+    switch ($Speed) { "Slow" { return 0.5 } "Fast" { return 2.0 } default { return 1.0 } }
+}
+
+function ConvertFrom-AbgrDword {
+    # HKCU\Software\Microsoft\Windows\DWM\AccentColor is 0xAABBGGRR; the
+    # registry hands it to PowerShell as a (possibly negative) Int32
+    param([long]$Value)
+    $v = $Value -band 0xFFFFFFFFL
+    return @([int]($v -band 0xFF), [int](($v -shr 8) -band 0xFF), [int](($v -shr 16) -band 0xFF))
 }

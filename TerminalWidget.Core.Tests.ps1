@@ -413,7 +413,8 @@ Describe "Layouts and themes (v4.0)" {
     }
     It "cycles the theme through Terminal and back to Dark" {
         Get-NextTheme "Light" | Should -Be "Terminal"
-        Get-NextTheme "Terminal" | Should -Be "Dark"
+        Get-NextTheme "Terminal" | Should -Be "Graphite"
+        Get-NextTheme "Graphite" | Should -Be "Dark"
         Get-NextTheme "unknown" | Should -Be "Dark"
     }
 }
@@ -2072,6 +2073,29 @@ Describe "Analysis (v5.1)" {
         $rows = Get-SectorComparison -Groups @([PSCustomObject]@{ Key = "Technology"; Pct = 60.0 }, [PSCustomObject]@{ Key = "Unbekannt"; Pct = 40.0 }) -Reference $ref
         $rows[0].Diff | Should -Be 35
         $rows[$rows.Count - 1].Sector | Should -Be "Andere / ETF / unbekannt"
+    }
+}
+
+Describe "Design (v5.2)" {
+    It "describes the two styles and the row densities" {
+        $r = Get-UiSpec -Style "Refined" -Density "Normal"
+        $f = Get-UiSpec -Style "Fresh" -Density "Comfortable"
+        $r.Fresh | Should -BeFalse
+        $r.CardRadius | Should -Be 0
+        $f.CardRadius | Should -BeGreaterThan 0
+        $f.Gap | Should -BeGreaterThan $r.Gap
+        $f.RowH | Should -Be 32
+        (Get-UiSpec -Style "nonsense" -Density "Compact").Style | Should -Be "Refined"
+        (Get-UiSpec -Density "Compact").RowH | Should -Be 21
+    }
+    It "reads the Windows accent colour" {
+        (ConvertFrom-AbgrDword -Value 0xFFD77800) -join "," | Should -Be "0,120,215"
+        (ConvertFrom-AbgrDword -Value -2656256) -join "," | Should -Be "0,120,215"
+    }
+    It "steps the ticker bar" {
+        Get-TapeStep "Slow" | Should -Be 0.5
+        Get-TapeStep "Fast" | Should -Be 2
+        Get-TapeStep "" | Should -Be 1
     }
 }
 
