@@ -12879,6 +12879,7 @@ function Show-SettingsDialog {
     $dlg.Controls.Add($lSearch)
     $tSearch = New-Object System.Windows.Forms.TextBox
     $tSearch.SetBounds((S 438), ($by + (S 2)), (S 200), (S 24))
+    $tSearch.Name = "tSettingsSearch"
     $tSearch.BackColor = $p.Input; $tSearch.ForeColor = $p.Text; $tSearch.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $dlg.Controls.Add($tSearch)
     Set-DynTip $tSearch "Einstellung suchen, z. B. 'schrift', 'push', 'news' - Treffer werden hervorgehoben"
@@ -15311,6 +15312,24 @@ function Invoke-SmokeTest {
         "Compact options" = { Show-CompactOptions }
     }
     foreach ($k in $dialogs.Keys) { Invoke-SmokeStep "Dialog $k" $dialogs[$k] 2500 }
+    Invoke-SmokeStep "Settings search" {
+        $script:SettingsSearchHits = -1
+        $script:SmokeTyper = New-Object System.Windows.Forms.Timer
+        $script:SmokeTyper.Interval = 700
+        $script:SmokeTyper.Add_Tick({
+            $script:SmokeTyper.Stop()
+            foreach ($f in @([System.Windows.Forms.Application]::OpenForms)) {
+                $hit = $f.Controls.Find("tSettingsSearch", $true)
+                if ($hit.Count -gt 0) { $hit[0].Text = "push"; $script:SmokeSearchPush = $script:SettingsSearchHits; $hit[0].Text = "xyzxyz"; $script:SmokeSearchNone = $script:SettingsSearchHits; $hit[0].Text = "" }
+            }
+        })
+        $script:SmokeSearchPush = -1; $script:SmokeSearchNone = -1
+        $script:SmokeTyper.Start()
+        Show-SettingsDialog
+        $script:SmokeTyper.Stop()
+        if ($script:SmokeSearchPush -lt 1) { throw "search 'push' found $($script:SmokeSearchPush) settings" }
+        if ($script:SmokeSearchNone -ne 0) { throw "nonsense search found $($script:SmokeSearchNone) settings" }
+    } 2500
     # v5.0: the Analyse pages again with time to load the price history
     foreach ($pg in @("Risk", "Target", "Heat")) { Invoke-SmokeStep "Analysis $pg loaded" { Show-AnalysisDialog -Page $pg } 12000 }
     Invoke-SmokeStep "Compact with depot line" {
