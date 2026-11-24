@@ -3365,11 +3365,11 @@ function Get-CsvColumnGuess {
         Date     = '^(datum|date|buchungstag|buchungsdatum|handelstag|ausführungsdatum|ausfuehrungsdatum|valuta|trade ?date|transaction ?date|zeit|time)'
         Type     = '^(typ|type|art|transaktion|transaktionsart|geschäftsart|geschaeftsart|buchungsart|transaction ?type|action|vorgang|aktion)'
         Ident    = '^(isin|symbol|ticker|wertpapier ?kennnummer|wkn|instrument)'
-        Shares   = '^(stück|stueck|stk|anzahl|menge|quantity|shares|nominale|units|anteile)'
+        Shares   = '^(stück|stueck|stk|anzahl|menge|quantity|shares|nominale|units|anteile|no\.? ?of ?shares)'
         Price    = '^(kurs($|[\s\(/])|preis|price|ausführungskurs|ausfuehrungskurs|execution ?price|t\. ?price|price ?per ?share)'
         Amount   = '^(betrag|amount|gesamt|total|kurswert|wert$|value|net ?amount|proceeds|summe)'
         Fee      = '^(gebühr|gebuehr|gebühren|gebuehren|provision|fee|fees|commission|comm|kosten|spesen)'
-        Tax      = '^(steuer|steuern|tax|taxes|quellensteuer|kapitalertragsteuer)'
+        Tax      = '^(steuer|steuern|tax|taxes|quellensteuer|kapitalertragsteuer|withholding ?tax)'
         Currency = '^(währung|waehrung|currency|whg|ccy)'
         Name     = '^(name|bezeichnung|wertpapier|titel|description|beschreibung)'
     }
@@ -3384,6 +3384,26 @@ function Get-CsvColumnGuess {
             if ($h -match $pat[$f]) { $map[$f] = $i; $used[$i] = $true; break }
         }
     }
+    # v5.5: extra columns (e.g. Trading212): currency of the total / of the
+    # withholding tax, exchange rate, further fees in the account currency
+    $extra = [ordered]@{
+        AmountCurrency = '^(currency|währung|waehrung) ?\((total|gesamt|betrag)'
+        TaxCurrency    = '^(currency|währung|waehrung) ?\((withholding|quellensteuer)'
+        Rate           = '^(exchange ?rate|wechselkurs|devisenkurs|fx ?rate)'
+    }
+    foreach ($f in $extra.Keys) {
+        $map[$f] = -1
+        for ($i = 0; $i -lt @($Headers).Count; $i++) {
+            if (([string]$Headers[$i]).Trim().ToLowerInvariant() -match $extra[$f]) { $map[$f] = $i; break }
+        }
+    }
+    $fx = @()
+    for ($i = 0; $i -lt @($Headers).Count; $i++) {
+        if ($used.ContainsKey($i)) { continue }
+        $h = ([string]$Headers[$i]).Trim().ToLowerInvariant()
+        if ($h -match '^(currency conversion fee|stamp duty|french transaction tax|transaction fee|finra fee|charge amount|ptm levy)') { $fx += $i }
+    }
+    $map["FeeExtra"] = $fx
     return $map
 }
 
@@ -3413,6 +3433,10 @@ function ConvertFrom-CsvType {
     param([string]$Raw)
     $t = ([string]$Raw).Trim().ToLowerInvariant()
     if (-not $t) { return "" }
+    # v5.5: cash movements (go to the cash account, not to the bookings)
+    if ($t -match '^(deposit|einzahlung|einlage)') { return "Einzahlung" }
+    if ($t -match '^(withdrawal|auszahlung|entnahme)') { return "Auszahlung" }
+    if ($t -match 'interest on cash|lending interest|cash interest|zinsgutschrift|habenzins') { return "Zinsen" }
     if ($t -match 'dividend|ausschüttung|ausschuettung|ertrag|distribution|coupon|zins') { return "Dividende" }
     if ($t -match 'verkauf|sell|^s$|^sld$|^sale') { return "Verkauf" }
     if ($t -match 'kauf|buy|^b$|^bot$|sparplan|savings ?plan|purchase|einbuchung') { return "Kauf" }
@@ -3427,11 +3451,15 @@ function Test-Isin {
 function ConvertFrom-BrokerRows {
     # Rows + column map -> @(@{ Date; Type; Ident; Name; Shares; Price; Fee; Currency; Ok; Note })
     # Price = per share for buys/sells, total gross amount for dividends (like the widget's own bookings)
+    # v5.5: cash rows (Einzahlung / Auszahlung / Zinsen) come back with Cash = $true
+    # and Amount (signed, in AmountCurrency); Trading212: fees in the account
+    # currency are converted with the row's exchange rate when it checks out
     param([array]$Rows, [hashtable]$Map, [string]$DefaultCurrency = "EUR")
-    $get = { param($R, [string]$F) $i = [int]$Map[$F]; if ($i -ge 0 -and $i -lt @($R).Count) { return [string]$R[$i] } return "" }
+    $get = { param($R, [string]$F) $i = if ($Map.ContainsKey($F) -and $null -ne $Map[$F] -and $Map[$F] -isnot [array]) { [int]$Map[$F] } else { -1 }; if ($i -ge 0 -and $i -lt @($R).Count) { return [string]$R[$i] } return "" }
+    $feeCols = if ($Map.ContainsKey("FeeExtra")) { @($Map["FeeExtra"]) } else { @() }
     $out = @()
     foreach ($r in @($Rows)) {
-        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = "" }
+        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = ""; Cash = $false; Amount = 0.0 }
         $dRaw = ((& $get $r "Date").Trim()) -replace '[T ,;].*$', ''
         $o.Date = ConvertTo-IsoDate $dRaw
         $o.Ident = (& $get $r "Ident").Trim().ToUpperInvariant()
@@ -3446,11 +3474,44 @@ function ConvertFrom-BrokerRows {
         $typ = if ([int]$Map["Type"] -ge 0) { ConvertFrom-CsvType (& $get $r "Type") } else { "" }
         if (-not $typ -and [int]$Map["Type"] -lt 0 -and -not [double]::IsNaN($sh) -and $sh -ne 0) { $typ = if ($sh -lt 0) { "Verkauf" } else { "Kauf" } }
         $o.Type = $typ
+        $amCur = Get-NormalizedCurrencyCode (& $get $r "AmountCurrency")
+        if ($typ -in @("Einzahlung", "Auszahlung", "Zinsen")) {
+            $o.Cash = $true
+            $o.Currency = if ($amCur) { $amCur } else { $o.Currency }
+            $v = if (-not [double]::IsNaN($am)) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px)) { [math]::Abs($px) } else { 0.0 }
+            $o.Amount = if ($typ -eq "Auszahlung") { -$v } else { $v }
+            $why = @()
+            if (-not $o.Date) { $why += "Datum fehlt" }
+            if ($v -le 0) { $why += "Betrag fehlt" }
+            $o.Ok = ($why.Count -eq 0); $o.Note = $why -join ", "
+            $out += [PSCustomObject]$o
+            continue
+        }
+        # factor: account currency -> price currency (only if the row's numbers agree)
+        $rate = ConvertFrom-CsvNumber (& $get $r "Rate")
+        $acc2px = $(if (-not $amCur -or $amCur -eq $o.Currency) { 1.0 } else { [double]::NaN })
+        if ([double]::IsNaN($acc2px) -and $rate -gt 0 -and $sh -ne 0 -and $px -gt 0 -and -not [double]::IsNaN($am) -and $am -ne 0) {
+            $gross = [math]::Abs($sh) * $px
+            if ([math]::Abs($gross / $rate / [math]::Abs($am) - 1) -lt 0.03) { $acc2px = $rate }
+            elseif ([math]::Abs($gross * $rate / [math]::Abs($am) - 1) -lt 0.03) { $acc2px = 1 / $rate }
+        }
+        $feeAcc = 0.0
+        foreach ($fc in $feeCols) { if ([int]$fc -ge 0 -and [int]$fc -lt @($r).Count) { $fv = ConvertFrom-CsvNumber ([string]$r[[int]$fc]); if (-not [double]::IsNaN($fv)) { $feeAcc += [math]::Abs($fv) } } }
         $o.Fee = if ([double]::IsNaN($fe)) { 0.0 } else { [math]::Abs($fe) }
+        if ($feeAcc -gt 0) {
+            if (-not [double]::IsNaN($acc2px)) { $o.Fee += $feeAcc * $acc2px }
+            else { $o.Note = "Gebühr ({0:N2} {1}) nicht umgerechnet" -f $feeAcc, $amCur }
+        }
+        $taxCur = Get-NormalizedCurrencyCode (& $get $r "TaxCurrency")
+        if (-not [double]::IsNaN($tx) -and $taxCur -and $taxCur -ne $o.Currency) {
+            $tx = if ($taxCur -eq $amCur -and -not [double]::IsNaN($acc2px)) { $tx * $acc2px } else { [double]::NaN }
+        }
         if (-not [double]::IsNaN($tx) -and $o.Type -ne "Dividende") { $o.Fee += [math]::Abs($tx) }
         $o.Shares = if ([double]::IsNaN($sh)) { 0.0 } else { [math]::Abs($sh) }
         if ($o.Type -eq "Dividende") {
-            $o.Price = if (-not [double]::IsNaN($am) -and $am -ne 0) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px) -and $o.Shares -gt 0) { [math]::Abs($px) * $o.Shares } else { 0.0 }
+            # v5.5: the total is in another currency (Trading212: account currency) -> gross from shares x per share
+            $useGross = ($amCur -and $amCur -ne $o.Currency -and $o.Shares -gt 0 -and -not [double]::IsNaN($px) -and $px -gt 0)
+            $o.Price = if ($useGross) { [math]::Abs($px) * $o.Shares } elseif (-not [double]::IsNaN($am) -and $am -ne 0) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px) -and $o.Shares -gt 0) { [math]::Abs($px) * $o.Shares } else { 0.0 }
             if (-not [double]::IsNaN($tx)) { $o.Fee += [math]::Abs($tx) }
         } else {
             if (-not [double]::IsNaN($px) -and $px -ne 0) { $o.Price = [math]::Abs($px) }
@@ -3469,7 +3530,7 @@ function ConvertFrom-BrokerRows {
         if ($o.Type -ne "Dividende" -and $o.Shares -le 0) { $why += "Stück fehlen" }
         if ($o.Price -le 0) { $why += "Kurs/Betrag fehlt" }
         $o.Ok = ($why.Count -eq 0)
-        $o.Note = $why -join ", "
+        $o.Note = (@(@($why) + @($(if ($o.Note) { $o.Note }))) | Where-Object { $_ }) -join ", "
         $out += [PSCustomObject]$o
     }
     return $out

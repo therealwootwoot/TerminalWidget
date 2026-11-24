@@ -1338,7 +1338,9 @@ Describe "CSV import (v4.5)" {
     It "treats empty text as NaN" { [double]::IsNaN((ConvertFrom-CsvNumber "")) | Should -BeTrue; [double]::IsNaN((ConvertFrom-CsvNumber "abc")) | Should -BeTrue }
     It "maps broker wording <Raw> -> <T>" -TestCases @(
         @{ Raw = "Kauf"; T = "Kauf" }, @{ Raw = "BUY"; T = "Kauf" }, @{ Raw = "Sparplanausführung"; T = "Kauf" }, @{ Raw = "Verkauf"; T = "Verkauf" },
-        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "" }
+        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "Einzahlung" },
+        @{ Raw = "Market buy"; T = "Kauf" }, @{ Raw = "Limit sell"; T = "Verkauf" }, @{ Raw = "Dividend (Ordinary)"; T = "Dividende" }, @{ Raw = "Interest on cash"; T = "Zinsen" },
+        @{ Raw = "Withdrawal"; T = "Auszahlung" }, @{ Raw = "Currency conversion"; T = "" }
     ) {
         param($Raw, $T)
         ConvertFrom-CsvType $Raw | Should -Be $T
@@ -1356,8 +1358,8 @@ Describe "CSV import (v4.5)" {
         $b[0].Date | Should -Be "2025-01-15"; $b[0].Type | Should -Be "Kauf"; $b[0].Shares | Should -Be 10; $b[0].Price | Should -Be 120.5; $b[0].Fee | Should -Be 1; $b[0].Currency | Should -Be "USD"; $b[0].Ok | Should -BeTrue
         $b[1].Date | Should -Be "2025-02-03"; $b[1].Shares | Should -Be 4; $b[1].Price | Should -Be 150; $b[1].Currency | Should -Be "EUR"
         $b[2].Type | Should -Be "Dividende"; $b[2].Price | Should -Be 0.4
-        $b[3].Ok | Should -BeFalse
-        $b[3].Note | Should -Match "Art unbekannt"
+        # v5.5: deposits are cash rows now (for the cash account)
+        $b[3].Type | Should -Be "Einzahlung"; $b[3].Cash | Should -BeTrue; $b[3].Amount | Should -Be 1000; $b[3].Ok | Should -BeTrue
     }
     It "infers buy/sell from the sign without a type column" {
         $map = @{ Date = 0; Type = -1; Ident = 1; Shares = 2; Price = 3; Amount = -1; Fee = -1; Tax = -1; Currency = -1; Name = -1 }
@@ -2412,6 +2414,49 @@ Describe "Depot extras (v5.5)" {
         $t.Max | Should -Be 15
         $t.Total | Should -Be 30
         @((Get-DividendIncomeTable -Items @()).Rows).Count | Should -Be 0
+    }
+}
+
+Describe "Trading212 import (v5.5)" {
+    BeforeAll {
+        $f = Join-Path $PSScriptRoot "testdata/trading212-history-sample.csv"
+        $script:T212 = if (Test-Path $f) { ConvertFrom-CsvText ([IO.File]::ReadAllText($f)) } else { $null }
+    }
+    It "detects every Trading212 column" {
+        if ($null -eq $script:T212) { Set-ItResult -Skipped -Because "testdata not next to the tests"; return }
+        $m = Get-CsvColumnGuess -Headers $script:T212.Headers
+        $m.Type | Should -Be 0; $m.Date | Should -Be 1; $m.Ident | Should -Be 2; $m.Name | Should -Be 4
+        $m.Shares | Should -Be 7; $m.Price | Should -Be 8; $m.Currency | Should -Be 9; $m.Rate | Should -Be 10
+        $m.Amount | Should -Be 13; $m.AmountCurrency | Should -Be 14; $m.Tax | Should -Be 15; $m.TaxCurrency | Should -Be 16
+        @($m.FeeExtra) -join "," | Should -Be "17"
+    }
+    It "reads buys, sells, dividends and cash rows" {
+        if ($null -eq $script:T212) { Set-ItResult -Skipped -Because "testdata not next to the tests"; return }
+        $b = @(ConvertFrom-BrokerRows -Rows $script:T212.Rows -Map (Get-CsvColumnGuess -Headers $script:T212.Headers) -DefaultCurrency "EUR")
+        $b.Count | Should -Be 8
+        # deposit -> cash account
+        $b[0].Cash | Should -BeTrue; $b[0].Type | Should -Be "Einzahlung"; $b[0].Amount | Should -Be 1000; $b[0].Currency | Should -Be "EUR"
+        # fractional buy in USD, conversion fee from EUR into USD with the row's rate
+        $b[1].Type | Should -Be "Kauf"; $b[1].Shares | Should -Be 0.5123456; $b[1].Price | Should -Be 180.2; $b[1].Currency | Should -Be "USD"
+        [math]::Round($b[1].Fee, 4) | Should -Be ([math]::Round(0.13 * 1.0835, 4))
+        $b[1].Ok | Should -BeTrue
+        # EUR buy without fee
+        $b[2].Currency | Should -Be "EUR"; $b[2].Fee | Should -Be 0
+        # dividend: gross in USD from shares x per share, withholding tax as fee
+        $b[3].Type | Should -Be "Dividende"; $b[3].Currency | Should -Be "USD"
+        [math]::Round($b[3].Price, 5) | Should -Be ([math]::Round(0.5123456 * 0.24, 5)); $b[3].Fee | Should -Be 0.02
+        # interest -> cash, currency conversion skipped, sell, withdrawal negative
+        $b[4].Type | Should -Be "Zinsen"; $b[4].Amount | Should -Be 0.45
+        $b[5].Ok | Should -BeFalse
+        $b[6].Type | Should -Be "Verkauf"; $b[6].Shares | Should -Be 0.2; [math]::Round($b[6].Fee, 3) | Should -Be 0.054
+        $b[7].Type | Should -Be "Auszahlung"; $b[7].Amount | Should -Be -200
+    }
+    It "does not guess a fee currency when the numbers do not agree" {
+        $map = @{ Date = 0; Type = 1; Ident = 2; Shares = 3; Price = 4; Amount = 5; Fee = -1; Tax = -1; Currency = 6; Name = -1; AmountCurrency = 7; TaxCurrency = -1; Rate = 8; FeeExtra = @(9) }
+        $b = @(ConvertFrom-BrokerRows -Rows @(, @("2024-01-02", "Market buy", "TSTA", "1", "100", "50", "USD", "EUR", "1.1", "0.5")) -Map $map)
+        $b[0].Fee | Should -Be 0
+        $b[0].Note | Should -Match "nicht umgerechnet"
+        $b[0].Ok | Should -BeTrue
     }
 }
 

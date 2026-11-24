@@ -13168,16 +13168,29 @@ function Show-CsvImportDialog {
     $dlg.Controls.Add($btnCa)
     $dlg.CancelButton = $btnCa
 
-    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Imported = 0 }
+    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Imported = 0; Guess = $guess; CashN = 0 }
     $script:CsvCtl.Fill = {
         $cc = $script:CsvCtl
         $map = @{}
         foreach ($f in $cc.Combos.Keys) { $map[$f] = $cc.Combos[$f].SelectedIndex - 1 }
+        # v5.5: automatic extras (currency of the total, exchange rate, more fee columns)
+        foreach ($f in @("AmountCurrency", "TaxCurrency", "Rate", "FeeExtra")) { if ($cc.Guess.ContainsKey($f)) { $map[$f] = $cc.Guess[$f] } }
         $cc.Rows = @(ConvertFrom-BrokerRows -Rows $cc.Csv.Rows -Map $map -DefaultCurrency ([string]$cc.Cur.SelectedItem))
         $existing = $script:Transactions.ToArray()
         $cc.Grid.Rows.Clear()
         $nOk = 0; $nDup = 0; $nIsin = 0
+        $nCash = 0
         foreach ($b in $cc.Rows) {
+            if ([bool]$b.Cash) {
+                # v5.5: deposits / withdrawals / interest -> cash account
+                $note = $b.Note; $use = $b.Ok
+                if ($use -and -not [bool]$script:Cash.Enabled) { $note = "Cash-Konto ist aus (CASH)"; $use = $false }
+                elseif ($use -and @($script:Cash.Entries | Where-Object { [string]$_.Date -eq $b.Date -and [string]$_.Kind -eq $b.Type -and [math]::Abs([double]$_.Amount - [double]$b.Amount) -lt 0.005 }).Count -gt 0) { $note = "schon vorhanden"; $use = $false; $nDup++ }
+                elseif ($use) { $note = "Cash-Konto"; $nCash++ }
+                $ri = $cc.Grid.Rows.Add($use, (Format-IsoDateDe $b.Date), $b.Type, "", "", "", ("{0:N2}" -f $b.Amount), "", $b.Currency, $note)
+                if (-not $use) { $cc.Grid.Rows[$ri].DefaultCellStyle.ForeColor = $script:Pal.Muted }
+                continue
+            }
             $sym = if (Test-Isin $b.Ident) { [string]$cc.IsinMap[$b.Ident] } else { $b.Ident }
             $note = $b.Note
             $use = $b.Ok
@@ -13187,7 +13200,7 @@ function Show-CsvImportDialog {
             $ri = $cc.Grid.Rows.Add($use, (Format-IsoDateDe $b.Date), $b.Type, $b.Ident, $sym, ("{0:N4}" -f $b.Shares), ("{0:N4}" -f $b.Price), ("{0:N2}" -f $b.Fee), $b.Currency, $note)
             if (-not $b.Ok) { $cc.Grid.Rows[$ri].DefaultCellStyle.ForeColor = $script:Pal.Muted }
         }
-        $cc.Sum.Text = "{0} Zeilen: {1} zum Import, {2} schon vorhanden, {3} ISIN offen, {4} übersprungen (Art/Datum/Stück fehlen, z. B. Ein-/Auszahlungen)." -f $cc.Rows.Count, $nOk, $nDup, $nIsin, @($cc.Rows | Where-Object { -not $_.Ok }).Count
+        $cc.Sum.Text = "{0} Zeilen: {1} zum Import, {2} Cash-Bewegungen, {3} schon vorhanden, {4} ISIN offen, {5} übersprungen (Art/Datum/Stück fehlen)." -f $cc.Rows.Count, $nOk, $nCash, $nDup, $nIsin, @($cc.Rows | Where-Object { -not $_.Ok }).Count
     }
     foreach ($cb in @($combos.Values) + @($cbCur)) { $cb.Add_SelectionChangeCommitted({ & $script:CsvCtl.Fill }) }
     $btnRes.Add_Click({
@@ -13221,11 +13234,22 @@ function Show-CsvImportDialog {
         $cc = $script:CsvCtl
         $cc.Grid.EndEdit() | Out-Null
         $n = 0
+        # v5.5: backup first - cash rows are written right away
+        if (@(for ($k = 0; $k -lt $cc.Rows.Count; $k++) { if ([bool]$cc.Grid.Rows[$k].Cells["Use"].Value) { 1 } }).Count -gt 0) { [void](Backup-DataFiles -Reason "vor_csv_import") }
         $syms = New-Object System.Collections.Generic.HashSet[string]
         for ($k = 0; $k -lt $cc.Rows.Count; $k++) {
             $row = $cc.Grid.Rows[$k]
             if (-not [bool]$row.Cells["Use"].Value) { continue }
             $b = $cc.Rows[$k]
+            if ([bool]$b.Cash) {
+                if ($b.Ok -and [bool]$script:Cash.Enabled) {
+                    # amount in the cash currency (today's rate if the broker used another one)
+                    $amt = Convert-CurrencyValue -Amount ([double]$b.Amount) -FromCurrency ([string]$b.Currency) -ToCurrency ([string]$script:Cash.Currency)
+                    Add-CashEntry -Kind $b.Type -Amount $amt -Date $b.Date -Note ("CSV-Import " + $cc.File)
+                    $cc.CashN++
+                }
+                continue
+            }
             $sym = ([string]$row.Cells["Sym"].Value).Trim().ToUpper()
             if (-not $b.Ok -or -not $sym) { continue }
             $script:Transactions.Add([PSCustomObject]@{
@@ -13236,8 +13260,8 @@ function Show-CsvImportDialog {
             [void]$syms.Add($sym)
             $n++
         }
+        if ($n -eq 0 -and $cc.CashN -gt 0) { $cc.Imported = $cc.CashN; $cc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK; $cc.Dlg.Close(); return }
         if ($n -eq 0) { $cc.Sum.Text = "Nichts ausgewählt."; return }
-        [void](Backup-DataFiles -Reason "vor_csv_import")
         Save-Transactions
         Write-WidgetLog ("CSV import: {0} bookings from {1}" -f $n, $cc.File)
         if ($cc.Reb.Checked) {

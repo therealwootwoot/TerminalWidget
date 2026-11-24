@@ -1,0 +1,9 @@
+Action,Time,ISIN,Ticker,Name,Notes,ID,No. of shares,Price / share,Currency (Price / share),Exchange rate,Result,Currency (Result),Total,Currency (Total),Withholding tax,Currency (Withholding tax),Currency conversion fee,Currency (Currency conversion fee)
+Deposit,2024-03-01 09:00:12,,,,,TEST0001,,,,,,,1000.00,EUR,,,,
+Market buy,2024-03-01 15:31:05,US0000000001,TSTA,"Test Corp, Inc.",,TEST0002,0.5123456,180.20,USD,1.0835,,,85.34,EUR,,,0.13,EUR
+Limit buy,2024-03-04 10:02:44,DE0000000002,TSTB,Testwerke AG,,TEST0003,3,52.10,EUR,1.00,,,156.30,EUR,,,,
+Dividend (Dividend),2024-05-16 06:12:00,US0000000001,TSTA,"Test Corp, Inc.",,,0.5123456,0.24,USD,1.09,,,0.10,EUR,0.02,USD,,
+Interest on cash,2024-06-01 03:00:00,,,,,TEST0004,,,,,,,0.45,EUR,,,,
+Currency conversion,2024-06-02 11:00:00,,,,,TEST0005,,,,,,,10.00,EUR,,,,
+Market sell,2024-07-10 16:45:00,US0000000001,TSTA,"Test Corp, Inc.",,TEST0006,0.2,190.00,USD,1.08,1.02,EUR,35.13,EUR,,,0.05,EUR
+Withdrawal,2024-08-01 12:00:00,,,,,TEST0007,,,,,,,-200.00,EUR,,,,
