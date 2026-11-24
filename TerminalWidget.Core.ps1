@@ -2837,6 +2837,7 @@ function Get-TerminalFunctions {
         "MENU"   = @{ Scope = "G";  Desc = "Menüeintrag ausführen (MENU <Name>)" }
         "HEALTH" = @{ Scope = "G";  Desc = "Zustand prüfen: Datendateien, Backups, Datenquelle, Schriften" }
         "IMG"    = @{ Scope = "G";  Desc = "Bild: IMG = Chart in die Zwischenablage, IMG SAVE, IMG WIN (ganzes Fenster)" }
+        "PROV"   = @{ Scope = "G";  Desc = "Datenquellen testen: was liefern deine Twelve-Data- / Finnhub-Schlüssel?" }
         "DIAG"   = @{ Scope = "G";  Desc = "Diagnose als ZIP exportieren (Log, Einstellungen ohne Zugangsdaten, Zustand)" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
@@ -5428,7 +5429,7 @@ function ConvertTo-FeedList {
 }
 
 # ---- provider layer (groundwork): every data request is built here ----
-function Get-DataProviders { return @("Yahoo") }
+function Get-DataProviders { return @("Yahoo", "TwelveData", "Finnhub") }
 
 function Get-ProviderUrl {
     # Kind: Chart (Range, Interval), Daily (1y daily bars), Search (news), Quote
@@ -5450,5 +5451,263 @@ function Get-ProviderOfUrl {
     if (-not [Uri]::TryCreate([string]$Url, [UriKind]::Absolute, [ref]$u)) { return "?" }
     $h = $u.Host.ToLowerInvariant()
     if ($h -like "*finance.yahoo.com" -or $h -like "*yahoo.com") { return "Yahoo" }
+    if ($h -like "*twelvedata.com") { return "TwelveData" }
+    if ($h -like "*finnhub.io") { return "Finnhub" }
     return "RSS: " + ($h -replace '^www\.', '')
+}
+
+# ==============================================================================
+# V6.0: data providers (Twelve Data, Finnhub) and deeper ticker analysis
+# Free tiers (checked 2026-11): Twelve Data Basic = 8 credits / min, 800 / day,
+# US markets only, no earnings; Finnhub free = 60 calls / min, basic financials,
+# earnings surprises (last 4 quarters), recommendation trends. Everything else
+# is probed with the user's key (Test-Providers) and only used when it works.
+# ==============================================================================
+function Get-ProviderLimits {
+    # requests per minute / per day we allow ourselves (a little below the plan)
+    return @{
+        "TwelveData" = [PSCustomObject]@{ PerMin = 7; PerDay = 780 }
+        "Finnhub"    = [PSCustomObject]@{ PerMin = 55; PerDay = 0 }
+    }
+}
+
+function Test-UsSymbol {
+    # Yahoo symbol without exchange suffix and not an index / FX pair -> US listing
+    param([string]$Symbol)
+    $s = ([string]$Symbol).Trim().ToUpperInvariant()
+    return ($s -match '^[A-Z][A-Z0-9\-]{0,9}$')
+}
+
+function ConvertTo-ProviderSymbol {
+    # Yahoo symbol -> provider symbol; "" when the free tier does not cover it
+    param([string]$Symbol, [string]$Provider)
+    $s = ([string]$Symbol).Trim().ToUpperInvariant()
+    if (-not (Test-UsSymbol $s)) { return "" }
+    if ($Provider -eq "TwelveData") { return ($s -replace '-', '.') }   # BRK-B -> BRK.B
+    return ($s -replace '-', '.')
+}
+
+function Get-ProviderRequestUrl {
+    # Twelve Data / Finnhub URLs (the key is a query parameter; log lines are redacted)
+    param([string]$Provider, [string]$Kind, [string]$Symbol, [string]$Key, [string]$From = "", [string]$To = "")
+    $k = [Uri]::EscapeDataString([string]$Key)
+    $s = [Uri]::EscapeDataString([string]$Symbol)
+    if ($Provider -eq "TwelveData") {
+        switch ($Kind) {
+            "Daily" { return "https://api.twelvedata.com/time_series?symbol={0}&interval=1day&outputsize=260&apikey={1}" -f $s, $k }
+            "Quote" { return "https://api.twelvedata.com/quote?symbol={0}&apikey={1}" -f $s, $k }
+        }
+        return ""
+    }
+    switch ($Kind) {
+        "Daily"    { return "https://finnhub.io/api/v1/stock/candle?symbol={0}&resolution=D&from={1}&to={2}&token={3}" -f $s, $From, $To, $k }
+        "Quote"    { return "https://finnhub.io/api/v1/quote?symbol={0}&token={1}" -f $s, $k }
+        "Metric"   { return "https://finnhub.io/api/v1/stock/metric?symbol={0}&metric=all&token={1}" -f $s, $k }
+        "Earnings" { return "https://finnhub.io/api/v1/stock/earnings?symbol={0}&token={1}" -f $s, $k }
+        "Calendar" { return "https://finnhub.io/api/v1/calendar/earnings?symbol={0}&from={1}&to={2}&token={3}" -f $s, $From, $To, $k }
+        "Recommendation" { return "https://finnhub.io/api/v1/stock/recommendation?symbol={0}&token={1}" -f $s, $k }
+        "PriceTarget"    { return "https://finnhub.io/api/v1/stock/price-target?symbol={0}&token={1}" -f $s, $k }
+    }
+    return ""
+}
+
+function Hide-ApiKeys {
+    # log lines never contain keys: apikey=..., token=...
+    param([string]$Text)
+    return ([string]$Text -replace '(?i)\b(apikey|token|api_key)=[^&\s"'']+', '$1=***')
+}
+
+function Get-ProviderError {
+    # provider answer -> "" (fine) or an error text (Twelve Data sends errors with HTTP 200)
+    param($Json)
+    if ($null -eq $Json) { return "keine Antwort" }
+    if ($Json -is [string]) { return "unerwartete Antwort" }
+    if ($null -ne $Json.PSObject.Properties["status"] -and [string]$Json.status -eq "error") { return ("{0} {1}" -f [string]$Json.code, [string]$Json.message).Trim() }
+    if ($null -ne $Json.PSObject.Properties["error"] -and [string]$Json.error) { return [string]$Json.error }
+    if ($null -ne $Json.PSObject.Properties["s"] -and [string]$Json.s -eq "no_data") { return "keine Daten" }
+    return ""
+}
+
+function ConvertFrom-TwelveDataSeries {
+    # /time_series (1day) -> bars like ConvertFrom-YahooOhlc (oldest first)
+    param($Json)
+    if ((Get-ProviderError $Json) -or $null -eq $Json.values) { return $null }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $vals = @($Json.values)
+    [array]::Reverse($vals)
+    $o = [PSCustomObject]@{ Dates = @(); Open = @(); High = @(); Low = @(); Close = @(); Volume = @(); Currency = ""; Name = ""; Source = "TwelveData" }
+    $num = { param($x) $d = 0.0; if ([double]::TryParse([string]$x, [System.Globalization.NumberStyles]::Float, $inv, [ref]$d)) { $d } else { [double]::NaN } }
+    $aD = @(); $aO = @(); $aH = @(); $aL = @(); $aC = @(); $aV = @()
+    foreach ($v in $vals) {
+        $c0 = & $num $v.close
+        if ([double]::IsNaN($c0) -or $c0 -le 0) { continue }
+        $aD += ([string]$v.datetime).Substring(0, 10); $aC += $c0
+        $o0 = & $num $v.open; $h0 = & $num $v.high; $l0 = & $num $v.low; $v0 = & $num $v.volume
+        $aO += $(if ([double]::IsNaN($o0)) { $c0 } else { $o0 }); $aH += $(if ([double]::IsNaN($h0)) { $c0 } else { $h0 }); $aL += $(if ([double]::IsNaN($l0)) { $c0 } else { $l0 }); $aV += $(if ([double]::IsNaN($v0)) { 0.0 } else { $v0 })
+    }
+    if ($aC.Count -eq 0) { return $null }
+    $o.Dates = $aD; $o.Open = [double[]]$aO; $o.High = [double[]]$aH; $o.Low = [double[]]$aL; $o.Close = [double[]]$aC; $o.Volume = [double[]]$aV
+    if ($null -ne $Json.meta) { $o.Currency = [string]$Json.meta.currency; $o.Name = [string]$Json.meta.symbol }
+    return $o
+}
+
+function ConvertFrom-FinnhubCandles {
+    # /stock/candle -> bars (dates in UTC; daily bars have no time of day)
+    param($Json, [string]$Currency = "USD")
+    if ((Get-ProviderError $Json) -or $null -eq $Json.c -or $null -eq $Json.t) { return $null }
+    $n = [math]::Min(@($Json.c).Count, @($Json.t).Count)
+    if ($n -eq 0) { return $null }
+    $o = [PSCustomObject]@{ Dates = @(); Open = @(); High = @(); Low = @(); Close = @(); Volume = @(); Currency = $Currency; Name = ""; Source = "Finnhub" }
+    $aD = @(); $aC = @(); $aO = @(); $aH = @(); $aL = @(); $aV = @()
+    for ($i = 0; $i -lt $n; $i++) {
+        $c0 = [double]$Json.c[$i]
+        if ($c0 -le 0) { continue }
+        $aD += [DateTimeOffset]::FromUnixTimeSeconds([long]$Json.t[$i]).UtcDateTime.ToString("yyyy-MM-dd"); $aC += $c0
+        $aO += $(if ($null -ne $Json.o) { [double]$Json.o[$i] } else { $c0 }); $aH += $(if ($null -ne $Json.h) { [double]$Json.h[$i] } else { $c0 })
+        $aL += $(if ($null -ne $Json.l) { [double]$Json.l[$i] } else { $c0 }); $aV += $(if ($null -ne $Json.v) { [double]$Json.v[$i] } else { 0.0 })
+    }
+    $o.Dates = $aD; $o.Open = [double[]]$aO; $o.High = [double[]]$aH; $o.Low = [double[]]$aL; $o.Close = [double[]]$aC; $o.Volume = [double[]]$aV
+    return $o
+}
+
+function Test-ProviderBudget {
+    # may one more request go to this provider? Log = @(@{ T; P }), DayCount =
+    # requests already sent today (kept across restarts)
+    param($Log, [string]$Provider, [DateTime]$Now = (Get-Date), [int]$DayCount = 0)
+    $lim = (Get-ProviderLimits)[$Provider]
+    if ($null -eq $lim) { return [PSCustomObject]@{ Ok = $true; Reason = "" } }
+    $lastMin = @(@($Log) | Where-Object { $null -ne $_ -and [string]$_.P -eq $Provider -and ($Now - [DateTime]$_.T).TotalSeconds -lt 60 }).Count
+    if ($lim.PerDay -gt 0 -and $DayCount -ge $lim.PerDay) { return [PSCustomObject]@{ Ok = $false; Reason = ("{0}: Tageslimit erreicht ({1}) - wieder ab morgen" -f $Provider, $lim.PerDay) } }
+    if ($lastMin -ge $lim.PerMin) { return [PSCustomObject]@{ Ok = $false; Reason = ("{0}: Minutenlimit erreicht ({1}) - kurz warten" -f $Provider, $lim.PerMin) } }
+    return [PSCustomObject]@{ Ok = $true; Reason = "" }
+}
+
+function Format-ProviderReport {
+    # probe results @(@{ Provider; Kind; Ok; Detail }) -> text for the user
+    param($Results)
+    $lab = @{ Daily = "Tageskurse (Verlauf)"; Quote = "Kurs"; Metric = "Kennzahlen + Verlauf"; Earnings = "Quartalszahlen (Überraschung)"; Calendar = "Termine der Quartalszahlen"; Recommendation = "Analysten-Empfehlungen"; PriceTarget = "Kursziele" }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($grp in @(@($Results) | Group-Object -Property Provider)) {
+        $lines.Add([string]$grp.Name)
+        foreach ($r in $grp.Group) { $lines.Add(("  {0} {1,-32} {2}" -f $(if ($r.Ok) { "OK" } else { "--" }), $lab[[string]$r.Kind], [string]$r.Detail).TrimEnd()) }
+        $lines.Add("")
+    }
+    return ($lines.ToArray() -join "`r`n").TrimEnd()
+}
+
+function ConvertFrom-FinnhubMetricSeries {
+    # /stock/metric?metric=all -> @{ Annual = rows; Quarterly = valuation history }
+    # Annual rows: @{ Key; Label; Points = @(@{ Year; Value }) } newest year last
+    param($Json, [int]$Years = 5)
+    $res = [PSCustomObject]@{ Annual = @(); Quarterly = @() }
+    if ((Get-ProviderError $Json) -or $null -eq $Json.series) { return $res }
+    $keys = @(@("pe", "KGV", "Ratio"), @("ps", "KUV", "Ratio"), @("pb", "KBV", "Ratio"), @("grossMargin", "Bruttomarge", "Pct"), @("operatingMargin", "Operative Marge", "Pct"),
+              @("netMargin", "Nettomarge", "Pct"), @("roe", "Eigenkapitalrendite", "Pct"), @("eps", "Gewinn je Aktie", "Plain"), @("currentRatio", "Liquidität (Current Ratio)", "Ratio"), @("totalDebtToEquity", "Verschuldung (FK/EK)", "Ratio"))
+    $an = $Json.series.annual
+    if ($null -ne $an) {
+        foreach ($k in $keys) {
+            $pp = $an.PSObject.Properties[$k[0]]
+            if ($null -eq $pp -or $null -eq $pp.Value) { continue }
+            $pts = @(@($pp.Value) | Where-Object { $null -ne $_ -and $null -ne $_.v -and $_.period } | ForEach-Object { [PSCustomObject]@{ Year = ([string]$_.period).Substring(0, 4); Value = [double]$_.v } } | Sort-Object Year)
+            if ($pts.Count -eq 0) { continue }
+            # margins may come as fractions (0.25) or percent (25) - show percent
+            if ($k[2] -eq "Pct" -and @($pts | Where-Object { [math]::Abs($_.Value) -gt 1.5 }).Count -eq 0) { foreach ($pt in $pts) { $pt.Value = $pt.Value * 100 } }
+            $res.Annual += [PSCustomObject]@{ Key = $k[0]; Label = $k[1]; Kind = $k[2]; Points = @($pts | Select-Object -Last $Years) }
+        }
+    }
+    # quarterly P/E, P/S, P/B as valuation history (same shape as fund_history)
+    $q = $Json.series.quarterly
+    if ($null -ne $q) {
+        $byDate = @{}
+        foreach ($m in @(@("pe", "TrailingPE"), @("ps", "PriceToSales"), @("pb", "PriceToBook"))) {
+            $pp = $q.PSObject.Properties[$m[0]]
+            if ($null -eq $pp) { continue }
+            foreach ($x in @($pp.Value)) {
+                if ($null -eq $x -or $null -eq $x.v -or -not $x.period) { continue }
+                $d = [string]$x.period
+                if (-not $byDate.ContainsKey($d)) { $byDate[$d] = [ordered]@{ D = $d } }
+                $byDate[$d][$m[1]] = [double]$x.v
+            }
+        }
+        $res.Quarterly = @($byDate.Keys | Sort-Object | ForEach-Object { [PSCustomObject]$byDate[$_] })
+    }
+    return $res
+}
+
+function Format-SeriesTrend {
+    # "25,1 → 28,4 → 31,0 (2022–2024)"; Pct values are fractions? Finnhub sends margins in %
+    param($Points, [string]$Kind = "Ratio")
+    $p = @($Points)
+    if ($p.Count -eq 0) { return "" }
+    $fmt = if ($Kind -eq "Pct") { "{0:N1}%" } else { "{0:N1}" }
+    $vals = @($p | ForEach-Object { $fmt -f [double]$_.Value }) -join (" " + [string][char]0x2192 + " ")
+    return "{0} ({1}{2}{3})" -f $vals, $p[0].Year, [string][char]0x2013, $p[-1].Year
+}
+
+function Get-EarningsReaction {
+    # price move around a report: last close before the report day ("amc" =
+    # after the close: the report day itself counts as before) to the first
+    # close after it. NaN when the prices do not cover the date.
+    param([string[]]$Dates, [double[]]$Closes, [string]$ReportDate, [string]$Hour = "")
+    $n = [math]::Min(@($Dates).Count, @($Closes).Count)
+    if ($n -lt 2 -or -not $ReportDate) { return [double]::NaN }
+    $amc = ([string]$Hour -eq "amc")
+    $bi = -1; $ai = -1
+    for ($i = 0; $i -lt $n; $i++) {
+        $c = [string]::CompareOrdinal([string]$Dates[$i], $ReportDate)
+        if ($c -lt 0 -or ($amc -and $c -eq 0)) { $bi = $i }
+        elseif ($ai -lt 0 -and $bi -ge 0 -and ($c -gt 0 -or (-not $amc -and $c -eq 0))) { $ai = $i }
+    }
+    if ($bi -lt 0 -or $ai -lt 0 -or [double]$Closes[$bi] -le 0) { return [double]::NaN }
+    return ([double]$Closes[$ai] / [double]$Closes[$bi] - 1) * 100
+}
+
+function ConvertFrom-FinnhubEarnings {
+    # /stock/earnings + optional /calendar/earnings (report dates) + daily
+    # prices -> @(@{ Period; Actual; Estimate; SurprisePct; Date; ReactionPct }) newest first
+    param($Earnings, $Calendar = $null, [string[]]$Dates = @(), [double[]]$Closes = @())
+    $out = @()
+    if ($null -eq $Earnings -or (Get-ProviderError $Earnings)) { return $out }
+    $cal = @()
+    if ($null -ne $Calendar -and $null -ne $Calendar.earningsCalendar) { $cal = @($Calendar.earningsCalendar | Where-Object { $_.date } | Sort-Object { [string]$_.date }) }
+    foreach ($e in @($Earnings | Sort-Object { [string]$_.period } -Descending)) {
+        if ($null -eq $e -or -not $e.period) { continue }
+        $act = if ($null -ne $e.actual) { [double]$e.actual } else { [double]::NaN }
+        $est = if ($null -ne $e.estimate) { [double]$e.estimate } else { [double]::NaN }
+        $sp = if ($null -ne $e.surprisePercent) { [double]$e.surprisePercent } elseif (-not [double]::IsNaN($est) -and $est -ne 0 -and -not [double]::IsNaN($act)) { ($act / $est - 1) * 100 } else { [double]::NaN }
+        # report = first calendar date after the quarter end (within 100 days)
+        $rep = @($cal | Where-Object { [string]::CompareOrdinal([string]$_.date, [string]$e.period) -gt 0 -and ([DateTime]$_.date - [DateTime]$e.period).TotalDays -le 100 })
+        $rd = if ($rep.Count -gt 0) { [string]$rep[0].date } else { "" }
+        $hr = if ($rep.Count -gt 0) { [string]$rep[0].hour } else { "" }
+        $rx = if ($rd) { Get-EarningsReaction -Dates $Dates -Closes $Closes -ReportDate $rd -Hour $hr } else { [double]::NaN }
+        $out += [PSCustomObject]@{ Period = [string]$e.period; Actual = $act; Estimate = $est; SurprisePct = $sp; Date = $rd; ReactionPct = $rx }
+    }
+    return $out
+}
+
+function Get-RecommendationTrend {
+    # /stock/recommendation (monthly, newest first) -> counts now, 3 months ago,
+    # mean score (1 = strong buy ... 5 = strong sell) and a short trend text
+    param($Json)
+    $rows = @(@($Json) | Where-Object { $null -ne $_ -and $_.period } | Sort-Object { [string]$_.period } -Descending)
+    if ($rows.Count -eq 0 -or (Get-ProviderError $Json)) { return $null }
+    $score = {
+        param($r)
+        $sb = [double]$r.strongBuy; $b = [double]$r.buy; $h = [double]$r.hold; $s = [double]$r.sell; $ss = [double]$r.strongSell
+        $tot = $sb + $b + $h + $s + $ss
+        if ($tot -le 0) { return [double]::NaN }
+        return ($sb * 1 + $b * 2 + $h * 3 + $s * 4 + $ss * 5) / $tot
+    }
+    $now = $rows[0]
+    $old = if ($rows.Count -ge 4) { $rows[3] } else { $rows[-1] }
+    $s0 = & $score $now; $s1 = & $score $old
+    $trend = if ([double]::IsNaN($s0) -or [double]::IsNaN($s1) -or $rows.Count -lt 2) { "" } elseif ($s0 -lt $s1 - 0.1) { "positiver" } elseif ($s0 -gt $s1 + 0.1) { "negativer" } else { "unverändert" }
+    $cnt = { param($r) "{0} {1} / {2} {3} / {4} {5}" -f ([int]$r.strongBuy + [int]$r.buy), "Kauf", [int]$r.hold, "Halten", ([int]$r.sell + [int]$r.strongSell), "Verkauf" }
+    return [PSCustomObject]@{ Now = (& $cnt $now); Before = (& $cnt $old); Score = $s0; ScoreBefore = $s1; Trend = $trend; Period = [string]$now.period; PeriodBefore = [string]$old.period }
+}
+
+function Test-ProviderCacheFresh {
+    # provider_cache.json entries: @{ Day; Data } - refreshed once a day
+    param($Entry, [string]$Day)
+    return ($null -ne $Entry -and [string]$Entry.Day -eq $Day)
 }

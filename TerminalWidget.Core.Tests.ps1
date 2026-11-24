@@ -2547,6 +2547,90 @@ Describe "Analysis without new providers (v5.7)" {
     }
 }
 
+Describe "Data providers (V6)" {
+    It "maps symbols the free tiers cover" {
+        ConvertTo-ProviderSymbol "AAPL" "TwelveData" | Should -Be "AAPL"
+        ConvertTo-ProviderSymbol "BRK-B" "TwelveData" | Should -Be "BRK.B"
+        ConvertTo-ProviderSymbol "SAP.DE" "Finnhub" | Should -Be ""
+        ConvertTo-ProviderSymbol "^GSPC" "Finnhub" | Should -Be ""
+        Get-ProviderOfUrl "https://api.twelvedata.com/time_series?symbol=X" | Should -Be "TwelveData"
+        Get-ProviderOfUrl "https://finnhub.io/api/v1/quote" | Should -Be "Finnhub"
+    }
+    It "never logs API keys" {
+        $t = Hide-ApiKeys "HTTP 403: https://finnhub.io/api/v1/quote?symbol=AAPL&token=abc123 / https://api.twelvedata.com/q?apikey=zz&y=1"
+        $t | Should -Not -Match "abc123"
+        $t | Should -Not -Match "zz&"
+        $t | Should -Match "token=\*\*\*"
+    }
+    It "reads errors, also the HTTP-200 errors of Twelve Data" {
+        Get-ProviderError ('{"code":401,"message":"apikey is incorrect","status":"error"}' | ConvertFrom-Json) | Should -Match "401"
+        Get-ProviderError ('{"error":"You don''t have access to this resource."}' | ConvertFrom-Json) | Should -Match "access"
+        Get-ProviderError ('{"s":"no_data"}' | ConvertFrom-Json) | Should -Be "keine Daten"
+        Get-ProviderError $null | Should -Be "keine Antwort"
+        Get-ProviderError ('{"c":[1]}' | ConvertFrom-Json) | Should -Be ""
+    }
+    It "converts Twelve Data and Finnhub daily bars" {
+        $td = '{"meta":{"symbol":"AAPL","currency":"USD"},"values":[{"datetime":"2026-11-24","open":"230","high":"233","low":"229","close":"232.5","volume":"1000"},{"datetime":"2026-11-21","open":"228","high":"231","low":"227","close":"230.1","volume":"900"}],"status":"ok"}' | ConvertFrom-Json
+        $b = ConvertFrom-TwelveDataSeries $td
+        @($b.Dates) -join "," | Should -Be "2026-11-21,2026-11-24"
+        $b.Close[1] | Should -Be 232.5
+        $b.Currency | Should -Be "USD"
+        $b.Source | Should -Be "TwelveData"
+        ConvertFrom-TwelveDataSeries ('{"status":"error","code":429,"message":"limit"}' | ConvertFrom-Json) | Should -BeNullOrEmpty
+        $fc = ConvertFrom-FinnhubCandles ('{"c":[100,101.5],"h":[101,102],"l":[99,100],"o":[100,101],"s":"ok","t":[1763942400,1764028800],"v":[5,6]}' | ConvertFrom-Json)
+        @($fc.Dates) -join "," | Should -Be "2025-11-24,2025-11-25"
+        $fc.Volume[1] | Should -Be 6
+    }
+    It "keeps the per-minute and per-day budget" {
+        $now = [DateTime]"2026-11-24 12:00:00"
+        $log = @(1..7 | ForEach-Object { [PSCustomObject]@{ T = $now.AddSeconds(-10); P = "TwelveData" } })
+        (Test-ProviderBudget -Log $log -Provider "TwelveData" -Now $now).Ok | Should -BeFalse
+        (Test-ProviderBudget -Log $log -Provider "TwelveData" -Now $now.AddSeconds(61)).Ok | Should -BeTrue
+        (Test-ProviderBudget -Log @() -Provider "TwelveData" -Now $now -DayCount 780).Reason | Should -Match "Tageslimit"
+        (Test-ProviderBudget -Log $log -Provider "Finnhub" -Now $now).Ok | Should -BeTrue
+        (Test-ProviderBudget -Log @() -Provider "Yahoo" -Now $now).Ok | Should -BeTrue
+    }
+    It "reads figures over the years and the quarterly valuation history" {
+        $m = '{"series":{"annual":{"pe":[{"period":"2025-09-30","v":30.1},{"period":"2024-09-30","v":28.2}],"netMargin":[{"period":"2025-09-30","v":0.243}]},"quarterly":{"pe":[{"period":"2026-06-30","v":33},{"period":"2026-03-31","v":31}],"ps":[{"period":"2026-06-30","v":8}]}}}' | ConvertFrom-Json
+        $ms = ConvertFrom-FinnhubMetricSeries $m
+        $pe = @($ms.Annual | Where-Object { $_.Key -eq "pe" })[0]
+        @($pe.Points | ForEach-Object { $_.Year }) -join "," | Should -Be "2024,2025"
+        [math]::Round(@($ms.Annual | Where-Object { $_.Key -eq "netMargin" })[0].Points[0].Value, 1) | Should -Be 24.3
+        Format-SeriesTrend -Points $pe.Points | Should -Match "2024"
+        @($ms.Quarterly).Count | Should -Be 2
+        $ms.Quarterly[1].PriceToSales | Should -Be 8
+        @((ConvertFrom-FinnhubMetricSeries ('{"error":"x"}' | ConvertFrom-Json)).Annual).Count | Should -Be 0
+    }
+    It "puts earnings surprise and price reaction together" {
+        Get-EarningsReaction -Dates @("2026-07-29", "2026-07-30", "2026-07-31") -Closes @(200, 202, 210) -ReportDate "2026-07-30" -Hour "amc" | Should -BeGreaterThan 3.9
+        [math]::Round((Get-EarningsReaction -Dates @("2026-07-29", "2026-07-30", "2026-07-31") -Closes @(200, 202, 210) -ReportDate "2026-07-30" -Hour "bmo"), 2) | Should -Be 1
+        [double]::IsNaN((Get-EarningsReaction -Dates @("2026-01-01") -Closes @(1) -ReportDate "2026-07-30")) | Should -BeTrue
+        $e = '[{"actual":1.6,"estimate":1.5,"period":"2026-06-30","surprisePercent":6.67},{"actual":1.4,"estimate":1.45,"period":"2026-03-31"}]' | ConvertFrom-Json
+        $cal = '{"earningsCalendar":[{"date":"2026-07-30","hour":"amc"},{"date":"2026-05-01","hour":"amc"}]}' | ConvertFrom-Json
+        $r = @(ConvertFrom-FinnhubEarnings -Earnings $e -Calendar $cal -Dates @("2026-07-29", "2026-07-30", "2026-07-31") -Closes @(200, 202, 210))
+        $r[0].Period | Should -Be "2026-06-30"; $r[0].Date | Should -Be "2026-07-30"
+        [math]::Round($r[0].ReactionPct, 2) | Should -Be 3.96
+        [math]::Round($r[1].SurprisePct, 2) | Should -Be -3.45
+        [double]::IsNaN($r[1].ReactionPct) | Should -BeTrue
+    }
+    It "describes the analyst trend" {
+        $rec = '[{"buy":20,"hold":8,"period":"2026-11-01","sell":1,"strongBuy":12,"strongSell":0},{"buy":19,"hold":9,"period":"2026-10-01","sell":1,"strongBuy":10,"strongSell":0},{"buy":18,"hold":10,"period":"2026-09-01","sell":2,"strongBuy":9,"strongSell":0},{"buy":15,"hold":12,"period":"2026-08-01","sell":3,"strongBuy":8,"strongSell":1}]' | ConvertFrom-Json
+        $t = Get-RecommendationTrend $rec
+        $t.Now | Should -Be "32 Kauf / 8 Halten / 1 Verkauf"
+        $t.PeriodBefore | Should -Be "2026-08-01"
+        $t.Trend | Should -Be "positiver"
+        Get-RecommendationTrend @() | Should -BeNullOrEmpty
+    }
+    It "reports what the keys deliver" {
+        $txt = Format-ProviderReport @([PSCustomObject]@{ Provider = "Finnhub"; Kind = "Metric"; Ok = $true; Detail = "" }, [PSCustomObject]@{ Provider = "Finnhub"; Kind = "PriceTarget"; Ok = $false; Detail = "Premium" })
+        $txt | Should -Match "OK Kennzahlen"
+        $txt | Should -Match "-- Kursziele"
+        Test-ProviderCacheFresh -Entry ([PSCustomObject]@{ Day = "2026-11-24" }) -Day "2026-11-24" | Should -BeTrue
+        Test-ProviderCacheFresh -Entry $null -Day "2026-11-24" | Should -BeFalse
+        (ConvertFrom-TerminalCommand "PROV").Kind | Should -Be "Global"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
