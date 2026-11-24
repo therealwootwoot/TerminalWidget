@@ -2829,7 +2829,8 @@ function Get-TerminalFunctions {
         "LAYOUT" = @{ Scope = "G";  Desc = "Layout: LAYOUT TERMINAL / STANDARD / COMPACT / TICKER, LAYOUT SAVE <Name>, LAYOUT DEL <Name>" }
         "THEME"  = @{ Scope = "G";  Desc = "Theme wechseln (THEME <Name>)" }
         "STYLE"  = @{ Scope = "G";  Desc = "Design umschalten: STYLE / STYLE FRESH / STYLE REFINED" }
-        "SET"    = @{ Scope = "G";  Desc = "Einstellungen" }
+        "SET"    = @{ Scope = "G";  Desc = "Einstellungen (SET <Suchwort> springt zur Einstellung)" }
+        "MENU"   = @{ Scope = "G";  Desc = "Menüeintrag ausführen (MENU <Name>)" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
         "HELP"   = @{ Scope = "G";  Desc = "Tastenkürzel und Befehle" }
@@ -2913,7 +2914,9 @@ function ConvertFrom-AlertShorthand {
 
 function Get-CommandSuggestions {
     # Autocomplete: @(@{ Text; Desc }) for what has been typed so far
-    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12, [string[]]$Depots = @(), [string[]]$Layouts = @())
+    # v5.3: Extra = settings and menu entries @(@{ Text; Desc; Search }); they
+    # are offered when the typed words appear in Search ("SET <words>" = settings only)
+    param([string]$Text, [string[]]$Tickers = @(), [string[]]$Recent = @(), [int]$Max = 12, [string[]]$Depots = @(), [string[]]$Layouts = @(), $Extra = @())
     $out = New-Object System.Collections.Generic.List[PSObject]
     $seen = New-Object System.Collections.Generic.HashSet[string]
     $add = {
@@ -2930,13 +2933,29 @@ function Get-CommandSuggestions {
         foreach ($k in $fn.Keys) { if ($fn[$k].Scope -like "*G*") { & $add $k $fn[$k].Desc } }
         return $out.ToArray()
     }
+    $addExtra = {
+        param([string]$Q, [string]$Prefix = "")
+        if (-not $Q.Trim()) { return }
+        foreach ($x in @($Extra)) {
+            if ($null -eq $x) { continue }
+            if ($Prefix -and -not ([string]$x.Text).ToUpperInvariant().StartsWith($Prefix)) { continue }
+            if (Test-SettingMatch -Text ([string]$x.Text + " " + [string]$x.Search) -Query $Q) { & $add ([string]$x.Text) ([string]$x.Desc) }
+        }
+    }
     if ($tok.Count -eq 1 -and -not $endsSpace) {
         foreach ($r in @($Recent)) { if (([string]$r).ToUpperInvariant().StartsWith($tx)) { & $add ([string]$r) "zuletzt" } }
         foreach ($k in $fn.Keys) { if ($k.StartsWith($tx) -and $fn[$k].Scope -like "*G*") { & $add $k $fn[$k].Desc } }
         foreach ($t in @($Tickers)) { if (([string]$t).ToUpperInvariant().StartsWith($tx)) { & $add ([string]$t).ToUpperInvariant() "Ticker öffnen" } }
+        if ($tx.Length -ge 3) { & $addExtra $tx }
         return $out.ToArray()
     }
     $first = $tok[0]
+    if ($first -in @("SET", "MENU")) {
+        $rest = (@($tok | Select-Object -Skip 1) -join " ")
+        & $addExtra $rest ($first + " ")
+        if ($out.Count -eq 0 -and -not $rest) { & $add $first $fn[$first].Desc }
+        return $out.ToArray()
+    }
     if ($fn.Contains($first) -and $fn[$first].Scope -like "*G*") {
         $opts = switch ($first) {
             "TF"     { @("1D", "5D", "1M", "3M", "6M", "1Y") }
@@ -2963,6 +2982,8 @@ function Get-CommandSuggestions {
     if ($tok.Count -ge 2 -and $tok[1] -eq "GP") {
         foreach ($o in @("1D", "5D", "1M", "3M", "6M", "1Y")) { & $add ("{0} GP {1}" -f $first, $o) "Chart" }
     }
+    # free words that are no ticker command ("zebra zeilen") -> settings / menus
+    if (-not $fn.Contains($first) -and ($tok.Count -lt 2 -or -not $fn.Contains($tok[1]))) { & $addExtra $tx }
     return $out.ToArray()
 }
 
@@ -4596,4 +4617,171 @@ function ConvertTo-StoredFund {
     }
     $o["Currency"] = [string]$F.Currency
     return [PSCustomObject]$o
+}
+
+# ------------------------------------------------------------------------------
+# v5.3: settings window with pages, settings search, export / import
+# ------------------------------------------------------------------------------
+function Get-SettingsPages {
+    # The eight pages of the settings window, in display order
+    return @(
+        [PSCustomObject]@{ Id = "Display"; De = "Darstellung";                 En = "Display" }
+        [PSCustomObject]@{ Id = "Design";  De = "Design";                      En = "Design" }
+        [PSCustomObject]@{ Id = "Layout";  De = "Layout";                      En = "Layout" }
+        [PSCustomObject]@{ Id = "Data";    De = "Daten & Aktualisierung";      En = "Data & refresh" }
+        [PSCustomObject]@{ Id = "Alerts";  De = "Alarme & Benachrichtigungen"; En = "Alerts & notifications" }
+        [PSCustomObject]@{ Id = "Depot";   De = "Depot";                       En = "Depot" }
+        [PSCustomObject]@{ Id = "Keyboard"; De = "Tastatur & Befehle";          En = "Keyboard & commands" }
+        [PSCustomObject]@{ Id = "Misc";    De = "Sonstiges";                   En = "Other" }
+    )
+}
+
+function Get-SettingsPageTitle {
+    param([string]$Id, [string]$Language = "DE")
+    foreach ($pg in (Get-SettingsPages)) {
+        if ($pg.Id -eq $Id) { if ($Language -eq "EN") { return $pg.En } else { return $pg.De } }
+    }
+    return $Id
+}
+
+function Find-SettingsHits {
+    # Entries: @(@{ Page; Search }) - Search = label, tooltip, items, extra words.
+    # Returns @{ Entries = indices of matching entries; Counts = page -> hits;
+    # TitlePages = pages whose title matches (German or English) }
+    param($Entries, [string]$Query)
+    $res = [PSCustomObject]@{ Entries = @(); Counts = [ordered]@{}; TitlePages = @() }
+    foreach ($pg in (Get-SettingsPages)) { $res.Counts[$pg.Id] = 0 }
+    if (-not ([string]$Query).Trim()) { return $res }
+    $idx = New-Object System.Collections.Generic.List[int]
+    $all = @($Entries)
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $e = $all[$i]
+        if ($null -eq $e) { continue }
+        if (Test-SettingMatch -Text ([string]$e.Search) -Query $Query) {
+            $idx.Add($i)
+            if ($res.Counts.Contains([string]$e.Page)) { $res.Counts[[string]$e.Page]++ }
+        }
+    }
+    $res.Entries = $idx.ToArray()
+    # page titles by word start, so "fresh" does not land on "Data & refresh"
+    $qw = @((ConvertTo-SearchKey $Query).Trim() -split '\s+' | Where-Object { $_ })
+    $titleHit = {
+        param([string]$T)
+        $tw = @((ConvertTo-SearchKey $T) -split '[^a-z0-9]+' | Where-Object { $_ })
+        foreach ($w in $qw) { if (-not @($tw | Where-Object { $_.StartsWith($w) }).Count) { return $false } }
+        return $true
+    }
+    $res.TitlePages = @(Get-SettingsPages | Where-Object { (& $titleHit $_.De) -or (& $titleHit $_.En) } | ForEach-Object { $_.Id })
+    return $res
+}
+
+function Select-SettingsPage {
+    # Which page to show for a search: a matching page title wins, then the
+    # current page if it has hits, then the first page with hits
+    param([string]$Current, $Hits)
+    if ($null -eq $Hits) { return $Current }
+    if (@($Hits.TitlePages).Count -gt 0) { return [string]@($Hits.TitlePages)[0] }
+    if ($Hits.Counts.Contains($Current) -and [int]$Hits.Counts[$Current] -gt 0) { return $Current }
+    foreach ($k in @($Hits.Counts.get_Keys())) { if ([int]$Hits.Counts[$k] -gt 0) { return [string]$k } }
+    return $Current
+}
+
+function Test-SettingChanged {
+    # "changed from default" marker: compares what a control shows with its
+    # default (numbers by value, text case-sensitive, $null = no default)
+    param($Value, $Default)
+    if ($null -eq $Default) { return $false }
+    if ($Value -is [bool] -or $Default -is [bool]) { return ([bool]$Value -ne [bool]$Default) }
+    $dv = 0.0; $vv = 0.0
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $sty = [System.Globalization.NumberStyles]::Float
+    if (($Default -is [int] -or $Default -is [long] -or $Default -is [double] -or $Default -is [decimal]) -and
+        [double]::TryParse([string]::Format($inv, "{0}", $Value), $sty, $inv, [ref]$vv)) {
+        $dv = [double]$Default
+        return ([math]::Abs($vv - $dv) -gt 1e-9)
+    }
+    return (([string]$Value).Trim() -cne ([string]$Default).Trim())
+}
+
+function Get-PortableSettingKeys {
+    # Settings that make sense on another PC. Not included: window positions,
+    # histories, depots, the encrypted push token (bound to this Windows user)
+    return @(
+        "RefreshSeconds", "SlowRefreshSeconds", "HttpTimeoutSeconds", "ClosedPollMinutes",
+        "SmaFastPeriod", "SmaSlowPeriod", "RsiPeriod", "RsiOverbought", "RsiOversold", "MaType", "LowerPanel",
+        "Theme", "AccentColor", "AccentHex", "Language", "TopMost", "CompactTape",
+        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons",
+        "ShowTrayNotifications", "NotifyMarketOpen", "NotifyEarnings", "QuietFrom", "QuietTo",
+        "Layout", "Opacity", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalChartPct", "CompactShow",
+        "UpDownScheme", "UpColor", "DownColor", "ShowArrows", "PriceFlash", "TrayFollowsDepot", "SnapToEdges",
+        "GlobalHotkey", "MonoFont", "FontScale", "AlignNumbersRight", "RoundCorners",
+        "NewsRefreshMinutes", "NewsMoveThreshold", "NewsKeywords", "NewsKeywordWatch", "NewsMuted",
+        "TooltipMode", "TooltipDelayMs", "HoverCards",
+        "Currency", "AutoCurrency", "RiskFreePct",
+        "ChartType", "ShowVolume", "ShowRsi", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
+        "UserLayouts", "GridLayouts"
+    )
+}
+
+function ConvertTo-SettingsExport {
+    # Config -> export object (only the portable keys that exist)
+    param($Config, [string]$Version, [DateTime]$Now = (Get-Date))
+    $s = [ordered]@{}
+    foreach ($k in (Get-PortableSettingKeys)) {
+        $pp = $Config.PSObject.Properties[$k]
+        if ($null -ne $pp) { $s[$k] = $pp.Value }
+    }
+    return [PSCustomObject]@{
+        Format   = "TerminalWidget.Settings"
+        Version  = [string]$Version
+        Exported = $Now.ToString("yyyy-MM-ddTHH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+        Settings = [PSCustomObject]$s
+    }
+}
+
+function ConvertFrom-SettingsExport {
+    # Export object (from JSON) -> @{ Ok; Error; Settings (hashtable); Skipped }
+    # Only portable keys the defaults know are taken; each value is converted to
+    # the type of its default. Unknown or broken values are skipped, not guessed.
+    param($Data, $Defaults)
+    $r = [PSCustomObject]@{ Ok = $false; Error = ""; Settings = @{}; Skipped = @() }
+    if ($null -eq $Data -or [string]$Data.Format -ne "TerminalWidget.Settings" -or $null -eq $Data.Settings) {
+        $r.Error = "Keine Einstellungs-Datei des Terminal Widgets."
+        return $r
+    }
+    $skipped = New-Object System.Collections.Generic.List[string]
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $portable = @(Get-PortableSettingKeys)
+    foreach ($pp in $Data.Settings.PSObject.Properties) {
+        $k = $pp.Name
+        $dp = if ($null -ne $Defaults) { $Defaults.PSObject.Properties[$k] } else { $null }
+        if ($k -notin $portable -or $null -eq $dp) { $skipped.Add($k); continue }
+        $d = $dp.Value; $v = $pp.Value
+        try {
+            if ($d -is [bool]) {
+                if ($v -is [bool]) { $r.Settings[$k] = $v }
+                elseif ([string]$v -in @("true", "false", "True", "False")) { $r.Settings[$k] = ([string]$v -eq "true" -or [string]$v -eq "True") }
+                else { $skipped.Add($k) }
+            } elseif ($d -is [int] -or $d -is [long]) {
+                $x = 0.0
+                if ($null -ne $v -and $v -isnot [bool] -and [double]::TryParse([string]::Format($inv, "{0}", $v), [System.Globalization.NumberStyles]::Float, $inv, [ref]$x)) { $r.Settings[$k] = [int][math]::Round($x) } else { $skipped.Add($k) }
+            } elseif ($d -is [double] -or $d -is [decimal]) {
+                $x = 0.0
+                if ($null -ne $v -and $v -isnot [bool] -and [double]::TryParse([string]::Format($inv, "{0}", $v), [System.Globalization.NumberStyles]::Float, $inv, [ref]$x)) { $r.Settings[$k] = [double]$x } else { $skipped.Add($k) }
+            } elseif ($d -is [string]) {
+                if ($null -eq $v -or $v -is [string] -or $v -is [ValueType]) { $r.Settings[$k] = [string]$v } else { $skipped.Add($k) }
+            } elseif ($d -is [array]) {
+                if ($null -eq $v) { $r.Settings[$k] = @() }
+                elseif ($v -is [array]) { $r.Settings[$k] = @($v) }
+                else { $skipped.Add($k) }
+            } else {
+                # objects (saved layouts, column widths): taken as they are
+                if ($null -ne $v -and $v -isnot [string] -and $v -isnot [ValueType]) { $r.Settings[$k] = $v } else { $skipped.Add($k) }
+            }
+        } catch { $skipped.Add($k) }
+    }
+    $r.Skipped = $skipped.ToArray()
+    $r.Ok = ($r.Settings.Count -gt 0)
+    if (-not $r.Ok) { $r.Error = "Die Datei enthält keine bekannten Einstellungen." }
+    return $r
 }

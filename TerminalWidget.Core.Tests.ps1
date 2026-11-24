@@ -2115,6 +2115,123 @@ Describe "Design (v5.2)" {
     }
 }
 
+Describe "Settings pages (v5.3)" {
+    BeforeAll {
+        $script:SetEntries = @(
+            [PSCustomObject]@{ Page = "Design";  Search = "Stil Refined - wie gewohnt, feiner Fresh - Karten, mehr Luft Design Style" }
+            [PSCustomObject]@{ Page = "Design";  Search = "Zebra-Zeilen (jede zweite Zeile heller)" }
+            [PSCustomObject]@{ Page = "Display"; Search = "Schrift für Zahlen (ab Neustart)" }
+            [PSCustomObject]@{ Page = "Alerts";  Search = "Handy-Push einrichten ..." }
+            [PSCustomObject]@{ Page = "Display"; Search = "Schriftgröße Listen + Chart (ab Neustart)" }
+        )
+    }
+    It "has the eight agreed pages in order" {
+        $pg = @(Get-SettingsPages)
+        $pg.Count | Should -Be 8
+        ($pg | ForEach-Object { $_.De }) -join "|" | Should -Be "Darstellung|Design|Layout|Daten & Aktualisierung|Alarme & Benachrichtigungen|Depot|Tastatur & Befehle|Sonstiges"
+        Get-SettingsPageTitle -Id "Keyboard" -Language "EN" | Should -Be "Keyboard & commands"
+        Get-SettingsPageTitle -Id "nope" | Should -Be "nope"
+    }
+    It "finds the style by every name it goes by" {
+        foreach ($q in @("stil", "Style", "FRESH", "refined")) {
+            $h = Find-SettingsHits -Entries $script:SetEntries -Query $q
+            @($h.Entries) | Should -Contain 0
+            Select-SettingsPage -Current "Display" -Hits $h | Should -Be "Design"
+        }
+    }
+    It "counts hits per page and keeps the current page when it has hits" {
+        $h = Find-SettingsHits -Entries $script:SetEntries -Query "schrift"
+        $h.Counts["Display"] | Should -Be 2
+        $h.Counts["Design"] | Should -Be 0
+        Select-SettingsPage -Current "Display" -Hits $h | Should -Be "Display"
+        Select-SettingsPage -Current "Design" -Hits $h | Should -Be "Display"
+        $none = Find-SettingsHits -Entries $script:SetEntries -Query "gibtsnicht"
+        @($none.Entries).Count | Should -Be 0
+        Select-SettingsPage -Current "Layout" -Hits $none | Should -Be "Layout"
+    }
+    It "jumps to a page whose title matches" {
+        $h = Find-SettingsHits -Entries $script:SetEntries -Query "tastatur"
+        Select-SettingsPage -Current "Display" -Hits $h | Should -Be "Keyboard"
+        $h2 = Find-SettingsHits -Entries $script:SetEntries -Query "notifications"
+        Select-SettingsPage -Current "Display" -Hits $h2 | Should -Be "Alerts"
+        (Find-SettingsHits -Entries $script:SetEntries -Query "  ").Counts["Design"] | Should -Be 0
+        # "fresh" is inside "Data & refresh" - titles match by word start only
+        @((Find-SettingsHits -Entries $script:SetEntries -Query "fresh").TitlePages).Count | Should -Be 0
+        @((Find-SettingsHits -Entries $script:SetEntries -Query "daten").TitlePages) | Should -Contain "Data"
+    }
+    It "marks settings that differ from the default" {
+        Test-SettingChanged -Value 15 -Default 15 | Should -BeFalse
+        Test-SettingChanged -Value ([decimal]15) -Default 15 | Should -BeFalse
+        Test-SettingChanged -Value 20 -Default 15 | Should -BeTrue
+        Test-SettingChanged -Value $true -Default $true | Should -BeFalse
+        Test-SettingChanged -Value $false -Default $true | Should -BeTrue
+        Test-SettingChanged -Value "Fresh - Karten, mehr Luft" -Default "Refined - wie gewohnt, feiner" | Should -BeTrue
+        Test-SettingChanged -Value "Ctrl+Alt+W " -Default "Ctrl+Alt+W" | Should -BeFalse
+        Test-SettingChanged -Value "x" -Default $null | Should -BeFalse
+        Test-SettingChanged -Value ([decimal]2.5) -Default 2.0 | Should -BeTrue
+    }
+    It "exports only portable settings" {
+        $cfg = [PSCustomObject]@{ Theme = "Light"; UiStyle = "Fresh"; WindowX = 500; PushTokenEnc = "secret"; CommandHistory = @("NVDA") }
+        $x = ConvertTo-SettingsExport -Config $cfg -Version "5.3" -Now ([DateTime]"2026-11-24 10:00")
+        $x.Format | Should -Be "TerminalWidget.Settings"
+        $x.Exported | Should -Be "2026-11-24T10:00:00"
+        @($x.Settings.PSObject.Properties.Name) -join "," | Should -Be "Theme,UiStyle"
+        Get-PortableSettingKeys | Should -Not -Contain "PushTokenEnc"
+        Get-PortableSettingKeys | Should -Not -Contain "WindowX"
+    }
+    It "imports with type checks and skips what it does not know" {
+        $def = [PSCustomObject]@{ Theme = "Dark"; RefreshSeconds = 15; RiskFreePct = 2.0; ZebraRows = $false; NewsMuted = @(); UserLayouts = @(); WindowX = 100; GridLayouts = [PSCustomObject]@{} }
+        $json = @"
+{ "Format": "TerminalWidget.Settings", "Version": "5.3", "Settings": {
+  "Theme": "Light", "RefreshSeconds": "30", "RiskFreePct": 2.5, "ZebraRows": true,
+  "NewsMuted": ["Motley Fool"], "WindowX": 900, "Unknown": 1, "GridLayouts": { "Watch": "a" } } }
+"@
+        $r = ConvertFrom-SettingsExport -Data ($json | ConvertFrom-Json) -Defaults $def
+        $r.Ok | Should -BeTrue
+        $r.Settings["Theme"] | Should -Be "Light"
+        $r.Settings["RefreshSeconds"] | Should -Be 30
+        $r.Settings["RefreshSeconds"] | Should -BeOfType [int]
+        $r.Settings["RiskFreePct"] | Should -Be 2.5
+        $r.Settings["ZebraRows"] | Should -BeTrue
+        @($r.Settings["NewsMuted"]) -join "," | Should -Be "Motley Fool"
+        $r.Settings["GridLayouts"].Watch | Should -Be "a"
+        $r.Settings.ContainsKey("WindowX") | Should -BeFalse
+        $r.Skipped | Should -Contain "WindowX"
+        $r.Skipped | Should -Contain "Unknown"
+    }
+    It "rejects broken values and foreign files" {
+        $def = [PSCustomObject]@{ RefreshSeconds = 15; ZebraRows = $false }
+        $bad = '{ "Format": "TerminalWidget.Settings", "Settings": { "RefreshSeconds": "viel", "ZebraRows": "ja" } }' | ConvertFrom-Json
+        $r = ConvertFrom-SettingsExport -Data $bad -Defaults $def
+        $r.Ok | Should -BeFalse
+        @($r.Skipped).Count | Should -Be 2
+        (ConvertFrom-SettingsExport -Data ('{ "Theme": "Dark" }' | ConvertFrom-Json) -Defaults $def).Error | Should -Not -BeNullOrEmpty
+        (ConvertFrom-SettingsExport -Data $null -Defaults $def).Ok | Should -BeFalse
+    }
+    It "offers settings and menu entries in Ctrl+K" {
+        $extra = @(
+            [PSCustomObject]@{ Text = "SET STIL"; Desc = "Einstellung - Design"; Search = "Refined Fresh Style Design" }
+            [PSCustomObject]@{ Text = "SET ZEBRA-ZEILEN (JEDE ZWEITE ZEILE HELLER)"; Desc = "Einstellung - Design"; Search = "" }
+            [PSCustomObject]@{ Text = "MENU DURCHKLICKEN (MAUS GEHT DURCH)"; Desc = "Menü - Tray"; Search = "" }
+        )
+        $t = @(Get-CommandSuggestions -Text "fresh" -Extra $extra | ForEach-Object { $_.Text })
+        $t | Should -Contain "SET STIL"
+        $t = @(Get-CommandSuggestions -Text "SET zebra" -Extra $extra | ForEach-Object { $_.Text })
+        $t | Should -Contain "SET ZEBRA-ZEILEN (JEDE ZWEITE ZEILE HELLER)"
+        $t | Should -Not -Contain "MENU DURCHKLICKEN (MAUS GEHT DURCH)"
+        $t = @(Get-CommandSuggestions -Text "MENU durch" -Extra $extra | ForEach-Object { $_.Text })
+        $t | Should -Contain "MENU DURCHKLICKEN (MAUS GEHT DURCH)"
+        $t = @(Get-CommandSuggestions -Text "zebra zeile" -Extra $extra | ForEach-Object { $_.Text })
+        $t | Should -Contain "SET ZEBRA-ZEILEN (JEDE ZWEITE ZEILE HELLER)"
+        # two letters: tickers only, no settings noise
+        @(Get-CommandSuggestions -Text "st" -Extra $extra -Tickers @("STM") | ForEach-Object { $_.Text }) | Should -Not -Contain "SET STIL"
+        # ticker commands stay as they were
+        @(Get-CommandSuggestions -Text "NVDA G" -Extra $extra | ForEach-Object { $_.Text }) | Should -Contain "NVDA GP"
+        (ConvertFrom-TerminalCommand "SET STIL").Func | Should -Be "SET"
+        (ConvertFrom-TerminalCommand "MENU BEENDEN").Kind | Should -Be "Global"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

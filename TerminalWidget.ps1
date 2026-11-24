@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.2"
+$script:AppVersion    = "5.3"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -471,6 +471,9 @@ $defaultConfig = [PSCustomObject]@{
     ZebraRows             = $false            # v5.2: every second list row slightly lighter
     UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
     TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast
+    SettingsPage          = "Design"          # v5.3: last page of the settings window
+    SettingsW             = 0                 # v5.3: settings window size (0 = default)
+    SettingsH             = 0
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -596,6 +599,8 @@ $defaultConfig = [PSCustomObject]@{
     Watchlist            = @("NVDA", "ABBN.SW", "MSFT", "AAPL", "AMD", "AMZN", "AVGO")
 }
 
+# v5.3: untouched copy of the defaults ("changed" markers, reset page, settings import)
+$script:ConfigDefaults = $defaultConfig.PSObject.Copy()
 $script:Config = Load-JsonState -Path $script:ConfigPath -DefaultValue $defaultConfig
 
 # Schema migration (v3.0 / v4.0): back up the existing data files once, BEFORE
@@ -4114,6 +4119,26 @@ $script:EnText = @{
     "Design" = "Design"; "Stil" = "Style"; "Zeilenhöhe der Listen" = "List row height"; "Kompakt" = "Compact"; "Bequem" = "Comfortable"; "Laufleiste Tempo" = "Ticker bar speed"; "Langsam" = "Slow"; "Schnell" = "Fast"; "Zebra-Zeilen (jede zweite Zeile heller)" = "Zebra rows (every second row lighter)"; "Symbole auf Knöpfen und in Menüs" = "Icons on buttons and menus"; "Refined - wie gewohnt, feiner" = "Refined - familiar, cleaner"; "Fresh - Karten, mehr Luft" = "Fresh - cards, more space"
 }
 
+# v5.3: settings pages, quick access, settings file
+foreach ($kv in @{
+    "Schrift" = "Font"; "Chart-Indikatoren" = "Chart indicators"; "Farben" = "Colours"; "Listen und Fenster" = "Lists and window"
+    "Terminal-Layout" = "Terminal layout"; "Compact- und Ticker-Leiste" = "Compact and ticker bar"; "Fenster" = "Window"; "System" = "System"
+    "Auch ohne dieses Fenster: Befehl STYLE, Layout-Menü (oben rechts) und Tray-Menü." = "Also without this window: STYLE command, layout menu (top right) and tray menu."
+    "Datenquelle: Yahoo Finance. Weitere Quellen (Twelve Data, Finnhub) folgen mit V6." = "Data source: Yahoo Finance. More sources (Twelve Data, Finnhub) follow with V6."
+    "Hinweise" = "Notifications"; "Handy-Push" = "Phone push"; "Nachrichten mit Alarm-Wörtern" = "News with alert words"
+    "Währung und Kennzahlen" = "Currency and figures"; "Währung (Auto = Währung des Tickers)" = "Currency (Auto = the ticker's currency)"
+    "Risikofreier Zins für die Sharpe Ratio (%)" = "Risk-free rate for the Sharpe ratio (%)"; "Werkzeuge (speichert und öffnet)" = "Tools (saves and opens)"
+    "Cash-Konto ..." = "Cash account ..."; "Sparpläne ..." = "Savings plans ..."; "Broker-CSV importieren ..." = "Import broker CSV ..."; "Zielgewichte ..." = "Target weights ..."
+    "Globales Tastenkürzel" = "Global hotkey"; "Befehlszeile" = "Command line"
+    "Strg+K öffnet die Befehlszeile. Sie findet Befehle, Ticker, Menüeinträge und jede Einstellung - z. B. 'zebra', 'push' oder 'SET STIL'." = "Ctrl+K opens the command line. It finds commands, tickers, menu entries and every setting - e.g. 'zebra', 'push' or 'SET STYLE'."
+    "Alle Tastenkürzel und Befehle (HELP)" = "All shortcuts and commands (HELP)"; "Einstellungen übertragen" = "Move settings"
+    "Einstellungen exportieren ..." = "Export settings ..."; "Einstellungen importieren ..." = "Import settings ..."; "Einstellungen exportieren" = "Export settings"; "Einstellungen importieren" = "Import settings"
+    "Daten und Sicherung" = "Data and backup"; "Seite zurücksetzen" = "Reset page"; "wie gewohnt, feiner" = "familiar, cleaner"; "Karten, mehr Luft" = "cards, more space"
+    "Einstellung" = "Setting"; "Einstellungen - Seite" = "Settings - page"; "Menü" = "Menu"; "Einstellungen ..." = "Settings ..."
+    "Stil: Refined" = "Style: Refined"; "Stil: Fresh" = "Style: Fresh"; "Compact / Ticker zeigt ..." = "Compact / ticker shows ..."; "Theme" = "Theme"
+    "Menüeintrag ausführen (MENU <Name>)" = "Run a menu entry (MENU <name>)"; "Einstellungen (SET <Suchwort> springt zur Einstellung)" = "Settings (SET <word> jumps to the setting)"
+}.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
+
 function Tr {
     param([string]$Text)
     if ([string]$script:Config.Language -ne "EN" -or -not $Text) { return $Text }
@@ -4311,6 +4336,18 @@ foreach ($ln in @("Ticker", "Compact", "Standard", "Terminal")) {
     [void]$miLayout.DropDownItems.Add($tmi)
 }
 [void]$trayMenu.Items.Add($miLayout)
+# v5.3: the style is reachable without the settings window
+$miStyle = New-Object System.Windows.Forms.ToolStripMenuItem("Stil")
+foreach ($sn in @("Refined", "Fresh")) {
+    $smi = New-Object System.Windows.Forms.ToolStripMenuItem($sn)
+    $smi.Tag = $sn
+    $smi.Add_Click({ param($sender, $e) [void](Invoke-TerminalCommand ("STYLE " + ([string]$sender.Tag).ToUpper())) })
+    [void]$miStyle.DropDownItems.Add($smi)
+}
+[void]$trayMenu.Items.Add($miStyle)
+$miSettings = New-Object System.Windows.Forms.ToolStripMenuItem("Einstellungen ...")
+$miSettings.Add_Click({ Show-MainWindow; Show-SettingsDialog })
+[void]$trayMenu.Items.Add($miSettings)
 $miRefresh = $trayMenu.Items.Add("Jetzt aktualisieren (F5)")
 # v4.6: click-through (mouse goes to the window below; hotkey brings it back)
 $miClickThrough = New-Object System.Windows.Forms.ToolStripMenuItem("Durchklicken (Maus geht durch)")
@@ -4702,6 +4739,16 @@ $lmiWatch.Tag = "Opt:Watch"
 $lmiPort = New-Object System.Windows.Forms.ToolStripMenuItem("Terminal: Portfolio")
 $lmiPort.Tag = "Opt:Portfolio"
 [void]$layoutMenu.Items.Add($lmiPort)
+# v5.3: style right here (it used to hide deep in the settings)
+[void]$layoutMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+foreach ($sn in @("Refined", "Fresh")) {
+    $lmiS = New-Object System.Windows.Forms.ToolStripMenuItem(("Stil: {0}" -f $sn))
+    $lmiS.Tag = "Style:$sn"
+    [void]$layoutMenu.Items.Add($lmiS)
+}
+$lmiSet = New-Object System.Windows.Forms.ToolStripMenuItem("Einstellungen ...")
+$lmiSet.Tag = "Settings"
+[void]$layoutMenu.Items.Add($lmiSet)
 Set-Tip $btnCompact "Layout wählen: Ticker / Compact / Standard / Terminal (L = nächstes, C = Compact)" "LAYOUT"
 
 $btnTray = New-Object System.Windows.Forms.Button
@@ -7008,6 +7055,7 @@ function Update-LayoutButton {
             if ($tag -like "Layout:*") { $it.Checked = ($tag -eq ("Layout:" + $script:Config.Layout)) }
             elseif ($tag -eq "Opt:Watch") { $it.Checked = [bool]$script:Config.TerminalShowWatch }
             elseif ($tag -eq "Opt:Portfolio") { $it.Checked = [bool]$script:Config.TerminalShowPortfolio }
+            elseif ($tag -like "Style:*") { $it.Checked = ($tag -eq ("Style:" + $script:Config.UiStyle)) }
         }
     }
 }
@@ -11923,7 +11971,8 @@ function Invoke-TerminalCommand {
                 Apply-ThemeToAllControls
                 Set-TransientStatus ("Design: {0}" -f $script:Config.UiStyle) 3
             }
-            "SET"    { Show-SettingsDialog }
+            "SET"    { $null = Show-SettingsDialog -Search ((@($c.Args) -join " ").Trim()) }
+            "MENU"   { return (Invoke-MenuEntry ((@($c.Args) -join " ").Trim())) }
             "PUSH"   { [void](Show-PushDialog) }
             "GLOS"   { Show-GlossaryDialog }
             "HELP"   { Show-ShortcutHelp }
@@ -11992,13 +12041,52 @@ function Invoke-TerminalCommand {
 function Update-PaletteSuggestions {
     $pc = $script:PalCtl
     if ($null -eq $pc) { return }
-    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }) -Layouts @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name }))
+    $pc.Items = @(Get-CommandSuggestions -Text $pc.Text.Text -Tickers (Get-KnownTickers) -Recent @($script:Config.CommandHistory) -Max 12 -Depots @(Get-DepotList | ForEach-Object { $_.Name }) -Layouts @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name }) -Extra (Get-PaletteExtras))
     $pc.List.BeginUpdate()
     $pc.List.Items.Clear()
     foreach ($it in $pc.Items) { $it.Desc = Tr ([string]$it.Desc); [void]$pc.List.Items.Add($it.Text) }
     $pc.List.EndUpdate()
     $pc.List.SelectedIndex = -1
     $pc.Err.Text = ""
+}
+
+# v5.3: Ctrl+K also reaches every setting ("SET ...") and every menu entry ("MENU ...")
+function Get-MenuPaletteEntries {
+    $out = New-Object System.Collections.Generic.List[object]
+    $walk = {
+        param($Items, [string]$Where, [string]$Prefix)
+        foreach ($it in @($Items)) {
+            if ($it -isnot [System.Windows.Forms.ToolStripMenuItem]) { continue }
+            $t = (([string]$it.Text) -replace '&', '').Trim()
+            if (-not $t) { continue }
+            $full = if ($Prefix) { "$Prefix > $t" } else { $t }
+            if ($it.DropDownItems.Count -gt 0) { & $walk $it.DropDownItems $Where $full; continue }
+            $out.Add([PSCustomObject]@{ Text = ("MENU " + $full.ToUpperInvariant()); Desc = ("{0} - {1}" -f (Tr "Menü"), $Where); Search = $full; Item = $it; Where = $Where })
+        }
+    }
+    & $walk $trayMenu.Items "Tray" ""
+    & $walk $layoutMenu.Items "Layout" ""
+    if ($null -ne $chartContextMenu) { & $walk $chartContextMenu.Items "Chart" "" }
+    return $out.ToArray()
+}
+
+function Get-PaletteExtras {
+    return @(@(Get-SettingsPaletteEntries) + @(Get-MenuPaletteEntries))
+}
+
+function Invoke-MenuEntry {
+    param([string]$Name)
+    $q = ([string]$Name).Trim()
+    if (-not $q) { return "MENU <Name> - z. B. MENU DURCHKLICKEN" }
+    $all = @(Get-MenuPaletteEntries)
+    $hit = @($all | Where-Object { (ConvertTo-SearchKey ([string]$_.Text).Substring(5)) -eq (ConvertTo-SearchKey $q) })
+    if ($hit.Count -eq 0) { $hit = @($all | Where-Object { Test-SettingMatch -Text ([string]$_.Search) -Query $q }) }
+    if ($hit.Count -eq 0) { return "Kein Menüeintrag gefunden: $q" }
+    $it = $hit[0].Item
+    if (-not $it.Enabled) { return "Menüeintrag gerade nicht verfügbar: $q" }
+    if ($hit[0].Where -eq "Layout") { Invoke-LayoutMenuTag ([string]$it.Tag) }
+    else { $it.PerformClick() }
+    return ""
 }
 
 function Show-CommandPalette {
@@ -13493,18 +13581,128 @@ function Set-Autostart {
 # ------------------------------------------------------------------------------
 # Settings dialog (v2.8): everything that used to be config.json-only
 # ------------------------------------------------------------------------------
+# ---- v5.3: settings window with pages ----
+function Get-SettingCtlValue {
+    param($Ctl)
+    if ($Ctl -is [System.Windows.Forms.NumericUpDown]) { return [double]$Ctl.Value }
+    if ($Ctl -is [System.Windows.Forms.CheckBox]) { return [bool]$Ctl.Checked }
+    if ($Ctl -is [System.Windows.Forms.ComboBox]) { return [string]$Ctl.SelectedItem }
+    return ([string]$Ctl.Text).Trim()
+}
+
+function Set-SettingCtlValue {
+    param($Ctl, $Value)
+    if ($null -eq $Ctl -or $null -eq $Value) { return }
+    if ($Ctl -is [System.Windows.Forms.NumericUpDown]) {
+        $v = [decimal][double]$Value
+        $Ctl.Value = [math]::Max($Ctl.Minimum, [math]::Min($Ctl.Maximum, $v))
+    } elseif ($Ctl -is [System.Windows.Forms.CheckBox]) {
+        $Ctl.Checked = [bool]$Value
+    } elseif ($Ctl -is [System.Windows.Forms.ComboBox]) {
+        $ix = $Ctl.Items.IndexOf([string]$Value)
+        if ($ix -ge 0) { $Ctl.SelectedIndex = $ix }
+    } else {
+        $Ctl.Text = [string]$Value
+    }
+}
+
+function Update-SettingsMarkers {
+    # dot in front of every setting that differs from the default
+    $sc = $script:SettingsCtl
+    if ($null -eq $sc) { return }
+    foreach ($e in $sc.Reg) {
+        if ($null -eq $e.Marker -or $e.Ctl.IsDisposed) { continue }
+        $chg = Test-SettingChanged -Value (Get-SettingCtlValue $e.Ctl) -Default $e.Default
+        # (Visible reads false on hidden pages, so the state is kept separately)
+        $e.Changed = $chg
+        $e.Marker.Visible = $chg
+    }
+    $sc.Nav.Invalidate()
+}
+
+function Show-SettingsPage {
+    param([string]$Id)
+    $sc = $script:SettingsCtl
+    if ($null -eq $sc -or -not $sc.Pages.ContainsKey($Id)) { return }
+    $sc.Cur = $Id
+    foreach ($k in @($sc.Pages.Keys)) { $sc.Pages[$k].Visible = ($k -eq $Id) }
+    $ix = [array]::IndexOf([string[]]$sc.PageIds, $Id)
+    if ($ix -ge 0 -and $sc.Nav.SelectedIndex -ne $ix) { $sc.Nav.SelectedIndex = $ix }
+    $sc.Nav.Invalidate()
+}
+
+function Update-SettingsSearch {
+    # hits light up, the rest fades; the list on the left counts hits per page
+    $sc = $script:SettingsCtl
+    if ($null -eq $sc) { return }
+    $q = [string]$sc.Search.Text
+    $hits = Find-SettingsHits -Entries $sc.Reg -Query $q
+    $sc.Hits = $hits
+    $set = New-Object System.Collections.Generic.HashSet[int]
+    foreach ($i in @($hits.Entries)) { [void]$set.Add([int]$i) }
+    $first = @{}
+    for ($i = 0; $i -lt $sc.Reg.Count; $i++) {
+        $e = $sc.Reg[$i]
+        $tgt = if ($null -ne $e.Lbl) { $e.Lbl } else { $e.Ctl }
+        if ($null -eq $tgt -or $tgt.IsDisposed) { continue }
+        if (-not $q.Trim()) { $tgt.ForeColor = $e.Orig; continue }
+        if ($set.Contains($i)) {
+            $tgt.ForeColor = $script:Pal.Accent
+            if (-not $first.ContainsKey($e.Page)) { $first[$e.Page] = $tgt }
+        } else { $tgt.ForeColor = $script:Pal.Border }
+    }
+    $script:SettingsSearchHits = @($hits.Entries).Count
+    if ($q.Trim()) {
+        $pg = Select-SettingsPage -Current $sc.Cur -Hits $hits
+        Show-SettingsPage $pg
+        if ($first.ContainsKey($pg) -and $first[$pg].Visible) { try { $sc.Pages[$pg].ScrollControlIntoView($first[$pg]) } catch { } }
+    }
+    $sc.Nav.Invalidate()
+}
+
+function Invoke-SettingsPreview {
+    # live preview of style / theme / accent / rows in the main window;
+    # Cancel puts the saved values back
+    $sc = $script:SettingsCtl
+    if ($null -eq $sc -or $sc.Building) { return }
+    $cfg = $script:Config
+    $cfg.UiStyle    = if ([string]$sc.Style.SelectedItem -like "Fresh*") { "Fresh" } else { "Refined" }
+    $cfg.Theme      = [string]$sc.Theme.SelectedItem
+    $acc = [string]$sc.Accent.SelectedItem
+    if ($acc -ne "Eigene" -or $script:NewColors.Accent) { $cfg.AccentColor = $acc; $cfg.AccentHex = [string]$script:NewColors.Accent }
+    $cfg.RowDensity = switch ([string]$sc.Rows.SelectedItem) { "Kompakt" { "Compact" } "Bequem" { "Comfortable" } default { "Normal" } }
+    $cfg.ZebraRows  = [bool]$sc.Zebra.Checked
+    try { Apply-ThemeToAllControls } catch { Write-WidgetLog "Settings preview: $($_.Exception.Message)" "WARN" }
+}
+
+function Get-SettingsPaletteEntries {
+    # Ctrl+K: every setting as "SET <label>" (built once from the real window)
+    if ($null -ne $script:SettingsIndexCache) { return $script:SettingsIndexCache }
+    if ($null -ne $script:SettingsCtl) { return @() }
+    $list = @()
+    try { $list = @(Show-SettingsDialog -IndexOnly) } catch { Write-WidgetLog "Settings index: $($_.Exception.Message)" "WARN" }
+    $script:SettingsIndexCache = $list
+    return $list
+}
+
 function Show-SettingsDialog {
-    # v4.0: two columns (left: data / indicators / look / system, right: layout
-    # and explanations)
+    # v5.3: one page per topic (list on the left), the style at the top of the
+    # Design page, search across all pages, "changed" markers, reset per page,
+    # live preview of the look, size and last page remembered
+    param([string]$Search = "", [string]$Page = "", [switch]$IndexOnly)
+    if ($null -ne $script:SettingsCtl) { return }
     $p   = $script:Pal
     $cfg = $script:Config
-    $lay = @{ Y = (S 12); X = 0; MaxY = 0 }
+    $dc  = $script:ConfigDefaults
+    $lang = if ([string]$cfg.Language -eq "EN") { "EN" } else { "DE" }
+    $pages = @(Get-SettingsPages)
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = "Einstellungen - $($script:AppTitle)"
-    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
+    $dlg.ShowIcon = $false
     $dlg.ShowInTaskbar = $false
     $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
     $dlg.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
@@ -13513,206 +13711,515 @@ function Show-SettingsDialog {
     $dlg.Font = $fontUi
     $dlg.TopMost = $form.TopMost
     $dlg.KeyPreview = $true
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), (S 400))
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 640), (S 400))
+    $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $cw = if ([int]$cfg.SettingsW -gt 0) { [int]$cfg.SettingsW } else { S 780 }
+    $ch = if ([int]$cfg.SettingsH -gt 0) { [int]$cfg.SettingsH } else { S 560 }
+    $dlg.ClientSize = New-Object System.Drawing.Size([math]::Min($cw, $wa.Width - (S 24)), [math]::Min($ch, $wa.Height - (S 48)))
     $dlg.Add_HandleCreated($script:DialogChromeHandler)
 
-    $newColumn = {
-        param([int]$X)
-        if ($lay.Y -gt $lay.MaxY) { $lay.MaxY = $lay.Y }
-        $lay.X = $X
-        $lay.Y = S 12
+    # ---- frame: content (fill), page list (left), button bar (bottom) ----
+    $host0 = New-Object System.Windows.Forms.Panel
+    $host0.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $host0.BackColor = $p.BodyBg
+    $dlg.Controls.Add($host0)
+    $nav = New-Object System.Windows.Forms.ListBox
+    $nav.Dock = [System.Windows.Forms.DockStyle]::Left
+    $nav.Width = S 214
+    $nav.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $nav.BackColor = $p.Card
+    $nav.ForeColor = $p.Text
+    $nav.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+    $nav.ItemHeight = S 32
+    $nav.IntegralHeight = $false
+    $nav.Font = $fontUi
+    $dlg.Controls.Add($nav)
+    $bar = New-Object System.Windows.Forms.Panel
+    $bar.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $bar.Height = S 50
+    $bar.BackColor = $p.Card
+    $dlg.Controls.Add($bar)
+    $barLine = New-Object System.Windows.Forms.Label
+    $barLine.Dock = [System.Windows.Forms.DockStyle]::Top
+    $barLine.Height = 1
+    $barLine.BackColor = $p.Border
+    $bar.Controls.Add($barLine)
+
+    $reg = New-Object System.Collections.Generic.List[object]
+    $pagePanels = @{}
+    $lay = @{ Y = 0; Host = $null; Page = "" }
+    $X0 = S 24; $LW = S 266; $IX = S 300; $IW = S 196
+
+    $beginPage = {
+        param([string]$Id)
+        $pp = New-Object System.Windows.Forms.Panel
+        $pp.Dock = [System.Windows.Forms.DockStyle]::Fill
+        $pp.AutoScroll = $true
+        $pp.Visible = $false
+        $pp.BackColor = $p.BodyBg
+        $host0.Controls.Add($pp)
+        $pagePanels[$Id] = $pp
+        $t = New-Object System.Windows.Forms.Label
+        $t.Location = New-Object System.Drawing.Point($X0, (S 14))
+        $t.AutoSize = $true
+        $t.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+        $t.ForeColor = $p.Text
+        $t.Text = Get-SettingsPageTitle -Id $Id -Language $lang
+        $pp.Controls.Add($t)
+        $lay.Host = $pp; $lay.Page = $Id; $lay.Y = S 52
+    }
+    $register = {
+        # Search: label (German + English), tooltip, items, extra words
+        param($Ctl, $Lbl, [string]$Key = "", $Default = $null, [string]$Words = "")
+        $txt = if ($null -ne $Lbl) { [string]$Lbl.Text } else { [string]$Ctl.Text }
+        $items = if ($Ctl -is [System.Windows.Forms.ComboBox]) { (@($Ctl.Items) -join " ") } else { "" }
+        $tgt = if ($null -ne $Lbl) { $Lbl } else { $Ctl }
+        $mk = $null
+        if ($null -ne $Default) {
+            $mk = New-Object System.Windows.Forms.Label
+            $mk.SetBounds((S 8), ($tgt.Top + (S 2)), (S 14), (S 18))
+            $mk.Text = [string][char]0x25CF
+            $mk.ForeColor = $p.Accent
+            $mk.Visible = $false
+            $lay.Host.Controls.Add($mk)
+            $dShow = $Default
+            if ($Default -is [bool]) { $dShow = if ($Default) { "an" } else { "aus" } }
+            Set-DynTip $mk ("Geändert - Standard: {0}" -f $dShow)
+            if ($Ctl -is [System.Windows.Forms.NumericUpDown]) { $Ctl.Add_ValueChanged({ Update-SettingsMarkers }) }
+            elseif ($Ctl -is [System.Windows.Forms.CheckBox]) { $Ctl.Add_CheckedChanged({ Update-SettingsMarkers }) }
+            elseif ($Ctl -is [System.Windows.Forms.ComboBox]) { $Ctl.Add_SelectedIndexChanged({ Update-SettingsMarkers }) }
+            else { $Ctl.Add_TextChanged({ Update-SettingsMarkers }) }
+        }
+        $reg.Add([PSCustomObject]@{
+            Ctl = $Ctl; Lbl = $Lbl; Page = $lay.Page; Key = $Key; Default = $Default; Marker = $mk; Changed = $false; Orig = $tgt.ForeColor
+            Label = $txt; Search = ("{0} {1} {2} {3} {4}" -f $txt, (Tr $txt), $script:SetTipText, $items, $Words)
+        })
+        $script:SetTipText = ""
     }
     $addSection = {
         param([string]$Text)
         $l = New-Object System.Windows.Forms.Label
-        $l.Location = New-Object System.Drawing.Point(($lay.X + (S 14)), ($lay.Y + (S 4)))
-        $l.Size = New-Object System.Drawing.Size((S 400), (S 18))
+        $l.Location = New-Object System.Drawing.Point($X0, ($lay.Y + (S 8)))
+        $l.Size = New-Object System.Drawing.Size((S 460), (S 18))
         $l.Font = $fontUiBold
         $l.ForeColor = $p.Accent
         $l.Text = $Text
-        $dlg.Controls.Add($l)
-        $lay.Y += S 26
+        $lay.Host.Controls.Add($l)
+        $lay.Y += S 32
+    }
+    $mkLabel = {
+        param([string]$Text, [string]$Tip, [string]$TipKey)
+        $l = New-Object System.Windows.Forms.Label
+        $l.Location = New-Object System.Drawing.Point($X0, ($lay.Y + (S 3)))
+        $l.Size = New-Object System.Drawing.Size($LW, (S 18))
+        $l.Text = $Text
+        $lay.Host.Controls.Add($l)
+        if ($Tip -or $TipKey) { Set-DynTip $l $Tip $TipKey }
+        $script:SetTipText = $Tip
+        return $l
     }
     $addNum = {
-        param([string]$Label, [int]$Min, [int]$Max, [int]$Value, [string]$Tip = "", [string]$TipKey = "", [int]$Step = 1)
-        $l = New-Object System.Windows.Forms.Label
-        $l.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
-        $l.Size = New-Object System.Drawing.Size((S 258), (S 18))
-        $l.Text = $Label
-        $dlg.Controls.Add($l)
+        param([string]$Label, [double]$Min, [double]$Max, [double]$Value, [string]$Tip = "", [string]$TipKey = "", [double]$Step = 1, [string]$Key = "", $Default = $null, [int]$Decimals = 0, [string]$Words = "")
+        $l = & $mkLabel $Label $Tip $TipKey
         $n = New-Object System.Windows.Forms.NumericUpDown
-        $n.Location = New-Object System.Drawing.Point(($lay.X + (S 292)), $lay.Y)
+        $n.Location = New-Object System.Drawing.Point($IX, $lay.Y)
         $n.Size = New-Object System.Drawing.Size((S 112), (S 22))
-        $n.Minimum = $Min
-        $n.Maximum = $Max
-        $n.Increment = [math]::Max(1, $Step)
-        $n.Value = [math]::Max($Min, [math]::Min($Max, $Value))
+        $n.DecimalPlaces = $Decimals
+        $n.Minimum = [decimal]$Min
+        $n.Maximum = [decimal]$Max
+        $n.Increment = [decimal]([math]::Max([math]::Pow(10, -$Decimals), $Step))
+        $n.Value = [decimal]([math]::Max($Min, [math]::Min($Max, $Value)))
         $n.BackColor = $p.Input
         $n.ForeColor = $p.Text
         $n.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
         $n.Font = $fontMono
         $n.TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right
-        $dlg.Controls.Add($n)
-        if ($Tip -or $TipKey) { Set-DynTip $l $Tip $TipKey; Set-DynTip $n $Tip $TipKey }
-        $lay.Y += S 29
+        $lay.Host.Controls.Add($n)
+        if ($Tip -or $TipKey) { Set-DynTip $n $Tip $TipKey }
+        & $register $n $l $Key $Default $Words
+        $lay.Y += S 30
         return $n
     }
     $addCombo = {
-        param([string]$Label, [string[]]$Items, [string]$Value, [string]$Tip = "", [string]$TipKey = "")
-        $l = New-Object System.Windows.Forms.Label
-        $l.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
-        $l.Size = New-Object System.Drawing.Size((S 258), (S 18))
-        $l.Text = $Label
-        $dlg.Controls.Add($l)
+        param([string]$Label, [string[]]$Items, [string]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "", [int]$Width = 0)
+        $l = & $mkLabel $Label $Tip $TipKey
         $cb = New-Object System.Windows.Forms.ComboBox
-        $cb.Location = New-Object System.Drawing.Point(($lay.X + (S 292)), $lay.Y)
-        $cb.Size = New-Object System.Drawing.Size((S 112), (S 22))
+        $cb.Location = New-Object System.Drawing.Point($IX, $lay.Y)
+        $cb.Size = New-Object System.Drawing.Size($(if ($Width -gt 0) { $Width } else { $IW }), (S 22))
         $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
         $cb.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
         $cb.BackColor = $p.Input
         $cb.ForeColor = $p.Text
         foreach ($it in $Items) { [void]$cb.Items.Add($it) }
         $cb.SelectedIndex = [math]::Max(0, $cb.Items.IndexOf($Value))
-        $dlg.Controls.Add($cb)
-        if ($Tip -or $TipKey) { Set-DynTip $l $Tip $TipKey; Set-DynTip $cb $Tip $TipKey }
-        $lay.Y += S 29
+        $lay.Host.Controls.Add($cb)
+        if ($Tip -or $TipKey) { Set-DynTip $cb $Tip $TipKey }
+        & $register $cb $l $Key $Default $Words
+        $lay.Y += S 30
         return $cb
     }
     $addCheck = {
-        param([string]$Label, [bool]$Value, [string]$Tip = "", [string]$TipKey = "")
+        param([string]$Label, [bool]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "")
         $c = New-Object System.Windows.Forms.CheckBox
-        $c.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), $lay.Y)
-        $c.Size = New-Object System.Drawing.Size((S 390), (S 22))
+        $c.Location = New-Object System.Drawing.Point($X0, $lay.Y)
+        $c.Size = New-Object System.Drawing.Size((S 470), (S 22))
         $c.Text = $Label
         $c.Checked = $Value
         $c.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
         $c.ForeColor = $p.Text
-        $dlg.Controls.Add($c)
+        $lay.Host.Controls.Add($c)
         if ($Tip -or $TipKey) { Set-DynTip $c $Tip $TipKey }
-        $lay.Y += S 25
+        $script:SetTipText = $Tip
+        & $register $c $null $Key $Default $Words
+        $lay.Y += S 26
         return $c
     }
-
-    # ---- left column ----
-    & $addSection "Aktualisierung"
-    $nRefresh = & $addNum "Intervall (Sekunden)" 5 600 ([int]$cfg.RefreshSeconds) "Aktiver Ticker, Portfolio und aktive Alarme" "REFRESH"
-    $nSlow    = & $addNum "Nur-Watchlist-Ticker (Sekunden)" 15 1800 ([int]$cfg.SlowRefreshSeconds) "Ticker, die nur in der Watchlist stehen, und Wechselkurse" "REFRESH"
-    $nHttp    = & $addNum "HTTP-Timeout (Sekunden, ab Neustart)" 3 60 ([int]$cfg.HttpTimeoutSeconds)
-    $nClosed  = & $addNum "Alle Börsen zu: nur alle X Minuten (0 = aus)" 0 120 ([int]$cfg.ClosedPollMinutes) "Spart Abfragen nachts und am Wochenende. F5 aktualisiert jederzeit." "REFRESH"
-
-    & $addSection "Indikatoren"
-    $nSmaF  = & $addNum "SMA schnell (auch Bollinger-Periode)" 2 200 ([int]$cfg.SmaFastPeriod) "" "SMA"
-    $nSmaS  = & $addNum "SMA langsam" 3 400 ([int]$cfg.SmaSlowPeriod) "" "SMA"
-    $nRsi   = & $addNum "RSI-Periode" 2 100 ([int]$cfg.RsiPeriod) "" "RSI"
-    $nRsiOb = & $addNum "RSI überkauft ab" 51 99 ([int]$cfg.RsiOverbought) "" "RSI"
-    $nRsiOs = & $addNum "RSI überverkauft bis" 1 49 ([int]$cfg.RsiOversold) "" "RSI"
-    $cbMa   = & $addCombo "Gleitender Durchschnitt" @("SMA", "EMA") ([string]$cfg.MaType) "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" "EMA"
-    $cbLow  = & $addCombo "Unteres Feld im Chart" @("RSI", "MACD") ([string]$cfg.LowerPanel) "" "MACD"
-
-    & $addSection "Darstellung"
-    $cbTheme  = & $addCombo "Theme" @(Get-ThemeNames) ([string]$cfg.Theme) "" "THEME"
-    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Windows", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen"
-    $cbLang   = & $addCombo "Sprache" @("Deutsch", "English") $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart."
-    $chkTop   = & $addCheck "Immer im Vordergrund" ([bool]$cfg.TopMost) "" "PIN"
-    $chkTape  = & $addCheck "Laufleiste (Watchlist) im Compact-Layout" ([bool]$cfg.CompactTape)
-
-    # v5.2
-    & $addSection "Design"
-    $dsMap = @{ "Refined" = "Refined - wie gewohnt, feiner"; "Fresh" = "Fresh - Karten, mehr Luft" }
-    $cbStyle = & $addCombo "Stil" @($dsMap["Refined"], $dsMap["Fresh"]) $dsMap[[string]$cfg.UiStyle] "Refined: gleiche Anordnung, feinere Linien und runde Knöpfe. Fresh: abgerundete Karten, mehr Abstand, Akzentlinie unter dem Kopf. Befehl STYLE schaltet um."
-    $rdMap = @{ "Compact" = "Kompakt"; "Normal" = "Normal"; "Comfortable" = "Bequem" }
-    $cbRows = & $addCombo "Zeilenhöhe der Listen" @("Kompakt", "Normal", "Bequem") $rdMap[[string]$cfg.RowDensity] "Höhe der Zeilen in Watchlist, Portfolio, News und Analyse"
-    $tsMap = @{ "Slow" = "Langsam"; "Normal" = "Normal"; "Fast" = "Schnell" }
-    $cbTapeSp = & $addCombo "Laufleiste Tempo" @("Langsam", "Normal", "Schnell") $tsMap[[string]$cfg.TapeSpeed] "Geschwindigkeit der Laufleiste im Compact-Layout (Maus darüber = Pause)"
-    $chkZebra = & $addCheck "Zebra-Zeilen (jede zweite Zeile heller)" ([bool]$cfg.ZebraRows)
-    $chkIcons = & $addCheck "Symbole auf Knöpfen und in Menüs" ([bool]$cfg.UseIcons) $(if ($script:IconFont) { "Schrift: $($script:IconFont)" } else { "Segoe Fluent Icons / MDL2 Assets nicht gefunden - es bleibt beim Text" })
-
-    & $addSection "Benachrichtigungen"
-    $chkTray  = & $addCheck "Tray-Hinweis + Ton bei Alarmen" ([bool]$cfg.ShowTrayNotifications)
-    $chkOpen  = & $addCheck "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" ([bool]$cfg.NotifyMarketOpen)
-    $chkEarn  = & $addCheck "Hinweis am Vortag von Quartalszahlen (Portfolio)" ([bool]$cfg.NotifyEarnings) "" "EARNINGS"
-    # v4.3: quiet hours + phone push
-    $lQuiet = New-Object System.Windows.Forms.Label
-    $lQuiet.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
-    $lQuiet.Size = New-Object System.Drawing.Size((S 200), (S 18))
-    $lQuiet.Text = "Ruhezeit (kein Ton / Push) von - bis"
-    $dlg.Controls.Add($lQuiet)
-    $tQFrom = New-Object System.Windows.Forms.TextBox
-    $tQFrom.SetBounds(($lay.X + (S 292)), $lay.Y, (S 50), (S 22))
-    $tQTo = New-Object System.Windows.Forms.TextBox
-    $tQTo.SetBounds(($lay.X + (S 354)), $lay.Y, (S 50), (S 22))
-    foreach ($tq in @($tQFrom, $tQTo)) {
-        $tq.BackColor = $p.Input; $tq.ForeColor = $p.Text; $tq.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-        $tq.Font = $fontMono; $tq.MaxLength = 5
-        $dlg.Controls.Add($tq)
-        Set-DynTip $tq "HH:MM, z. B. 22:00 bis 07:00. Beide leer = keine Ruhezeit." "QUIET"
+    $addText = {
+        param([string]$Label, [string]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [int]$Width = 0, [string]$Words = "", [int]$X = 0)
+        $l = & $mkLabel $Label $Tip $TipKey
+        $t = New-Object System.Windows.Forms.TextBox
+        $t.SetBounds($(if ($X -gt 0) { $X } else { $IX }), $lay.Y, $(if ($Width -gt 0) { $Width } else { S 112 }), (S 22))
+        $t.BackColor = $p.Input; $t.ForeColor = $p.Text; $t.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        $t.Font = $fontMono; $t.Text = $Value
+        $lay.Host.Controls.Add($t)
+        if ($Tip -or $TipKey) { Set-DynTip $t $Tip $TipKey }
+        & $register $t $l $Key $Default $Words
+        $lay.Y += S 30
+        return $t
     }
-    Set-DynTip $lQuiet "" "QUIET"
-    $tQFrom.Text = [string]$cfg.QuietFrom
-    $tQTo.Text = [string]$cfg.QuietTo
-    $lay.Y += S 29
-    $btnPush = New-Object System.Windows.Forms.Button
-    $btnPush.SetBounds(($lay.X + (S 26)), $lay.Y, (S 190), (S 26))
-    Style-FlatButton -Btn $btnPush -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
-    $btnPush.Text = "Handy-Push einrichten ..."
-    $dlg.Controls.Add($btnPush)
-    $lPushState = New-Object System.Windows.Forms.Label
-    $lPushState.SetBounds(($lay.X + (S 224)), ($lay.Y + (S 5)), (S 180), (S 18))
-    $lPushState.ForeColor = $p.Muted
-    $lPushState.Text = if ([string]$cfg.PushService -eq "Aus") { "aus" } else { "aktiv: " + [string]$cfg.PushService }
-    $dlg.Controls.Add($lPushState)
-    Set-DynTip $btnPush "" "PUSH"
-    $btnPush.Add_Click({
+    $addButton = {
+        param([string]$Text, [string]$Tip = "", [scriptblock]$Act, [int]$Width = 0, [string]$Words = "", [switch]$SameRow)
+        $b = New-Object System.Windows.Forms.Button
+        $x = if ($SameRow -and $null -ne $lay.LastBtn) { $lay.LastBtn.Right + (S 8) } else { $X0 }
+        $y = if ($SameRow -and $null -ne $lay.LastBtn) { $lay.LastBtn.Top } else { $lay.Y }
+        $b.SetBounds($x, $y, $(if ($Width -gt 0) { $Width } else { S 230 }), (S 28))
+        Style-FlatButton -Btn $b -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+        $b.Text = $Text
+        if ($null -ne $Act) { $b.Add_Click($Act) }
+        $lay.Host.Controls.Add($b)
+        if ($Tip) { Set-DynTip $b $Tip }
+        $script:SetTipText = $Tip
+        & $register $b $null "" $null $Words
+        if (-not $SameRow -or $null -eq $lay.LastBtn) { $lay.Y += S 36 }
+        $lay.LastBtn = $b
+        return $b
+    }
+    $addNote = {
+        param([string]$Text, [int]$Lines = 1)
+        $l = New-Object System.Windows.Forms.Label
+        $l.SetBounds($X0, $lay.Y, (S 470), (S (18 * $Lines)))
+        $l.ForeColor = $p.Muted
+        $l.Text = $Text
+        $lay.Host.Controls.Add($l)
+        $lay.Y += S (18 * $Lines + 8)
+        return $l
+    }
+    $script:NewColors = @{ Up = [string]$cfg.UpColor; Down = [string]$cfg.DownColor; Accent = [string]$cfg.AccentHex }
+    $script:SetTipText = ""
+
+    # ================= Darstellung =================
+    & $beginPage "Display"
+    & $addSection "Sprache"
+    $cbLang = & $addCombo -Label "Sprache" -Items @("Deutsch", "English") -Value $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) -Tip "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart." -Key "Language" -Default "Deutsch" -Words "Language Englisch"
+    & $addSection "Farben für Plus / Minus"
+    $cbUd = & $addCombo -Label "Farben für Plus / Minus" -Items (@(@((Get-UpDownSchemes).Keys) + @("Eigene"))) -Value ([string]$cfg.UpDownScheme) -Tip "Farbenblind = Blau / Orange. Eigene = frei wählen." -TipKey "COLORS" -Key "UpDownScheme" -Default ([string]$dc.UpDownScheme) -Words "grün rot farbenblind"
+    $chkArrow = & $addCheck -Label "Pfeile vor Veränderungen anzeigen" -Value ([bool]$cfg.ShowArrows) -Tip "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" -TipKey "COLORS" -Key "ShowArrows" -Default ([bool]$dc.ShowArrows)
+    $chkFlash = & $addCheck -Label "Kurs kurz einfärben, wenn er sich ändert" -Value ([bool]$cfg.PriceFlash) -Key "PriceFlash" -Default ([bool]$dc.PriceFlash) -Words "blinken flash"
+    & $addSection "Schrift"
+    $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
+    $cbMono  = & $addCombo -Label "Schrift für Zahlen (ab Neustart)" -Items $monoOffered -Value ([string]$cfg.MonoFont) -Tip "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal." -Key "MonoFont" -Default ([string]$dc.MonoFont) -Words "Font"
+    $scaleItems = @(Get-FontScaleSteps | ForEach-Object { "$_ %" })
+    $cbScale = & $addCombo -Label "Schriftgröße Listen + Chart (ab Neustart)" -Items $scaleItems -Value ("{0} %" -f [int]$cfg.FontScale) -Tip "Vergrößert Tabellen (Zeilenhöhe wächst mit) und Chart-Beschriftung. Knöpfe und Eingabefelder bleiben gleich groß, damit nichts abgeschnitten wird." -Key "FontScale" -Default ("{0} %" -f [int]$dc.FontScale) -Words "Font size größer kleiner"
+    $chkAlignR = & $addCheck -Label "Zahlen rechtsbündig (Watchlist, Portfolio)" -Value ([bool]$cfg.AlignNumbersRight) -Tip "Ziffern bleiben beim Aktualisieren an ihrem Platz" -Key "AlignNumbersRight" -Default ([bool]$dc.AlignNumbersRight)
+    & $addSection "Chart-Indikatoren"
+    $nSmaF  = & $addNum -Label "SMA schnell (auch Bollinger-Periode)" -Min 2 -Max 200 -Value ([int]$cfg.SmaFastPeriod) -TipKey "SMA" -Key "SmaFastPeriod" -Default ([int]$dc.SmaFastPeriod) -Words "Indikatoren gleitender Durchschnitt"
+    $nSmaS  = & $addNum -Label "SMA langsam" -Min 3 -Max 400 -Value ([int]$cfg.SmaSlowPeriod) -TipKey "SMA" -Key "SmaSlowPeriod" -Default ([int]$dc.SmaSlowPeriod) -Words "Indikatoren gleitender Durchschnitt"
+    $nRsi   = & $addNum -Label "RSI-Periode" -Min 2 -Max 100 -Value ([int]$cfg.RsiPeriod) -TipKey "RSI" -Key "RsiPeriod" -Default ([int]$dc.RsiPeriod) -Words "Indikatoren"
+    $nRsiOb = & $addNum -Label "RSI überkauft ab" -Min 51 -Max 99 -Value ([int]$cfg.RsiOverbought) -TipKey "RSI" -Key "RsiOverbought" -Default ([int]$dc.RsiOverbought) -Words "Indikatoren"
+    $nRsiOs = & $addNum -Label "RSI überverkauft bis" -Min 1 -Max 49 -Value ([int]$cfg.RsiOversold) -TipKey "RSI" -Key "RsiOversold" -Default ([int]$dc.RsiOversold) -Words "Indikatoren"
+    $cbMa   = & $addCombo -Label "Gleitender Durchschnitt" -Items @("SMA", "EMA") -Value ([string]$cfg.MaType) -Tip "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" -TipKey "EMA" -Key "MaType" -Default ([string]$dc.MaType) -Words "Indikatoren"
+    $cbLow  = & $addCombo -Label "Unteres Feld im Chart" -Items @("RSI", "MACD") -Value ([string]$cfg.LowerPanel) -TipKey "MACD" -Key "LowerPanel" -Default ([string]$dc.LowerPanel) -Words "Indikatoren"
+
+    # ================= Design (style first: it has to be findable) =================
+    & $beginPage "Design"
+    $dsMap = @{ "Refined" = "Refined - wie gewohnt, feiner"; "Fresh" = "Fresh - Karten, mehr Luft" }
+    $lStyle = & $mkLabel "Stil" "Refined: gleiche Anordnung, feinere Linien und runde Knöpfe. Fresh: abgerundete Karten, mehr Abstand, Akzentlinie unter dem Kopf. Befehl STYLE schaltet um, auch im Layout-Menü und im Tray-Menü." ""
+    $lStyle.Font = $fontUiBold
+    $cbStyle = New-Object System.Windows.Forms.ComboBox
+    $cbStyle.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbStyle.Visible = $false
+    [void]$cbStyle.Items.Add($dsMap["Refined"]); [void]$cbStyle.Items.Add($dsMap["Fresh"])
+    $cbStyle.SelectedIndex = $(if ([string]$cfg.UiStyle -eq "Fresh") { 1 } else { 0 })
+    $lay.Host.Controls.Add($cbStyle)
+    & $register $cbStyle $lStyle "UiStyle" $dsMap["Refined"] "Style Design Aussehen Look Refined Fresh Karten feiner"
+    $lay.Y += S 26
+    $styleCards = @()
+    foreach ($si in @(@{ Ix = 0; T = "Refined"; D = "wie gewohnt, feiner" }, @{ Ix = 1; T = "Fresh"; D = "Karten, mehr Luft" })) {
+        $b = New-Object System.Windows.Forms.Button
+        $b.SetBounds(($X0 + $si.Ix * (S 236)), $lay.Y, (S 226), (S 58))
+        Style-FlatButton -Btn $b -BgColor $p.Card -FgColor $p.Text -BorderColor $p.Border
+        $b.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+        $b.Padding = New-Object System.Windows.Forms.Padding((S 10), 0, 0, 0)
+        $b.Text = "{0}`r`n{1}" -f $si.T, (Tr $si.D)
+        $b.Tag = $si.Ix
+        $b.Name = "StyleCard" + $si.T
+        $b.Add_Click({ param($sender, $e) $script:SettingsCtl.Style.SelectedIndex = [int]$sender.Tag })
+        $lay.Host.Controls.Add($b)
+        $styleCards += $b
+    }
+    $lay.Y += S 66
+    & $addNote "Auch ohne dieses Fenster: Befehl STYLE, Layout-Menü (oben rechts) und Tray-Menü." 1 | Out-Null
+    & $addSection "Farben"
+    $cbTheme  = & $addCombo -Label "Theme" -Items @(Get-ThemeNames) -Value ([string]$cfg.Theme) -TipKey "THEME" -Key "Theme" -Default ([string]$dc.Theme) -Words "dunkel hell dark light graphite Farbschema"
+    $cbAccent = & $addCombo -Label "Akzentfarbe" -Items @("Sky", "Amber", "Violet", "Windows", "Eigene") -Value ([string]$cfg.AccentColor) -Tip "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen" -Key "AccentColor" -Default ([string]$dc.AccentColor) -Words "Accent"
+    & $addSection "Listen und Fenster"
+    $rdMap = @{ "Compact" = "Kompakt"; "Normal" = "Normal"; "Comfortable" = "Bequem" }
+    $cbRows = & $addCombo -Label "Zeilenhöhe der Listen" -Items @("Kompakt", "Normal", "Bequem") -Value $rdMap[[string]$cfg.RowDensity] -Tip "Höhe der Zeilen in Watchlist, Portfolio, News und Analyse" -Key "RowDensity" -Default $rdMap[[string]$dc.RowDensity] -Words "Zeilen Dichte"
+    $chkZebra = & $addCheck -Label "Zebra-Zeilen (jede zweite Zeile heller)" -Value ([bool]$cfg.ZebraRows) -Key "ZebraRows" -Default ([bool]$dc.ZebraRows)
+    $chkIcons = & $addCheck -Label "Symbole auf Knöpfen und in Menüs" -Value ([bool]$cfg.UseIcons) -Tip $(if ($script:IconFont) { "Schrift: $($script:IconFont)" } else { "Segoe Fluent Icons / MDL2 Assets nicht gefunden - es bleibt beim Text" }) -Key "UseIcons" -Default ([bool]$dc.UseIcons) -Words "Icons"
+    $chkRound = & $addCheck -Label "Abgerundete Fensterecken (Windows 11)" -Value ([bool]$cfg.RoundCorners) -Key "RoundCorners" -Default ([bool]$dc.RoundCorners)
+
+    # ================= Layout =================
+    & $beginPage "Layout"
+    & $addSection "Layout"
+    $cbLayout = & $addCombo -Label "Layout" -Items @(Get-LayoutNames) -Value ([string]$cfg.Layout) -Tip "Auch über den Layout-Button rechts oben oder Taste L" -TipKey "LAYOUT" -Key "Layout" -Default ([string]$dc.Layout)
+    $nOpacity = & $addNum -Label "Deckkraft (%)" -Min 30 -Max 100 -Value ([int]$cfg.Opacity) -TipKey "OPACITY" -Step 5 -Key "Opacity" -Default ([int]$dc.Opacity) -Words "transparent durchsichtig"
+    & $addSection "Terminal-Layout"
+    $chkTWatch = & $addCheck -Label "Terminal: Watchlist und Alarme anzeigen" -Value ([bool]$cfg.TerminalShowWatch) -TipKey "LAYOUT" -Key "TerminalShowWatch" -Default ([bool]$dc.TerminalShowWatch)
+    $chkTPort  = & $addCheck -Label "Terminal: Portfolio anzeigen" -Value ([bool]$cfg.TerminalShowPortfolio) -TipKey "LAYOUT" -Key "TerminalShowPortfolio" -Default ([bool]$dc.TerminalShowPortfolio)
+    $nTChart   = & $addNum -Label "Terminal: Chart-Höhe (%)" -Min 25 -Max 80 -Value ([int]$cfg.TerminalChartPct) -Tip "Anteil des Charts an der Fensterhöhe; der Rest gehört den Listen" -TipKey "LAYOUT" -Step 5 -Key "TerminalChartPct" -Default ([int]$dc.TerminalChartPct)
+    & $addSection "Compact- und Ticker-Leiste"
+    $chkTape  = & $addCheck -Label "Laufleiste (Watchlist) im Compact-Layout" -Value ([bool]$cfg.CompactTape) -Key "CompactTape" -Default ([bool]$dc.CompactTape)
+    $tsMap = @{ "Slow" = "Langsam"; "Normal" = "Normal"; "Fast" = "Schnell" }
+    $cbTapeSp = & $addCombo -Label "Laufleiste Tempo" -Items @("Langsam", "Normal", "Schnell") -Value $tsMap[[string]$cfg.TapeSpeed] -Tip "Geschwindigkeit der Laufleiste im Compact-Layout (Maus darüber = Pause)" -Key "TapeSpeed" -Default $tsMap[[string]$dc.TapeSpeed]
+    [void](& $addButton -Text "Compact / Ticker zeigt ..." -Tip "Was die schmale Leiste anzeigt: Tagesänderung absolut, Vor-/Nachbörse, Mini-Chart, Marktstatus oder das Depot-Ergebnis von heute" -Act { Show-CompactOptions -Owner $script:SettingsCtl.Dlg })
+    & $addSection "Fenster"
+    $chkTop  = & $addCheck -Label "Immer im Vordergrund" -Value ([bool]$cfg.TopMost) -TipKey "PIN" -Key "TopMost" -Default ([bool]$dc.TopMost)
+    $chkSnap = & $addCheck -Label "Fenster am Bildschirmrand einrasten" -Value ([bool]$cfg.SnapToEdges) -Key "SnapToEdges" -Default ([bool]$dc.SnapToEdges)
+
+    # ================= Daten & Aktualisierung =================
+    & $beginPage "Data"
+    & $addSection "Aktualisierung"
+    $nRefresh = & $addNum -Label "Intervall (Sekunden)" -Min 5 -Max 600 -Value ([int]$cfg.RefreshSeconds) -Tip "Aktiver Ticker, Portfolio und aktive Alarme" -TipKey "REFRESH" -Key "RefreshSeconds" -Default ([int]$dc.RefreshSeconds) -Words "Kurse abfragen"
+    $nSlow    = & $addNum -Label "Nur-Watchlist-Ticker (Sekunden)" -Min 15 -Max 1800 -Value ([int]$cfg.SlowRefreshSeconds) -Tip "Ticker, die nur in der Watchlist stehen, und Wechselkurse" -TipKey "REFRESH" -Key "SlowRefreshSeconds" -Default ([int]$dc.SlowRefreshSeconds)
+    $nHttp    = & $addNum -Label "HTTP-Timeout (Sekunden, ab Neustart)" -Min 3 -Max 60 -Value ([int]$cfg.HttpTimeoutSeconds) -Key "HttpTimeoutSeconds" -Default ([int]$dc.HttpTimeoutSeconds) -Words "Verbindung"
+    $nClosed  = & $addNum -Label "Alle Börsen zu: nur alle X Minuten (0 = aus)" -Min 0 -Max 120 -Value ([int]$cfg.ClosedPollMinutes) -Tip "Spart Abfragen nachts und am Wochenende. F5 aktualisiert jederzeit." -TipKey "REFRESH" -Key "ClosedPollMinutes" -Default ([int]$dc.ClosedPollMinutes) -Words "nachts Wochenende"
+    & $addNote "Datenquelle: Yahoo Finance. Weitere Quellen (Twelve Data, Finnhub) folgen mit V6." 1 | Out-Null
+    & $addSection "Nachrichten (F4)"
+    $nNewsMin  = & $addNum -Label "Neu laden alle (Minuten)" -Min 5 -Max 240 -Value ([int]$cfg.NewsRefreshMinutes) -Tip "Eine Abfrage je Ticker in Depot und Watchlist (max. 40). Sind alle Börsen zu, halb so oft." -Step 5 -Key "NewsRefreshMinutes" -Default ([int]$dc.NewsRefreshMinutes) -Words "News"
+    $nNewsMove = & $addNum -Label "Ticker markieren ab Tagesbewegung (%)" -Min 0 -Max 50 -Value ([int]$cfg.NewsMoveThreshold) -Tip "Zeigt bei der neuesten Meldung, dass sich der Ticker heute stark bewegt (0 = aus)" -Key "NewsMoveThreshold" -Default ([int]$dc.NewsMoveThreshold) -Words "News"
+    $script:NewMuted = @($cfg.NewsMuted | Where-Object { $_ })
+    $btnMuted = & $addButton -Text ("{0} ({1})" -f "Ausgeblendete Quellen zeigen", @($script:NewMuted).Count) -Tip ("Ausgeblendet: " + $(if (@($script:NewMuted).Count -gt 0) { @($script:NewMuted) -join ", " } else { "keine" }) + ". Klick = alle wieder zeigen. Einzelne Quellen: Rechtsklick in der News-Liste.") -Words "News Quellen stumm" -Act {
+        param($sender, $e)
+        $script:NewMuted = @()
+        $sender.Text = "{0} (0)" -f (Tr "Ausgeblendete Quellen zeigen")
+        $sender.Enabled = $false
+    }
+    $btnMuted.Enabled = (@($script:NewMuted).Count -gt 0)
+
+    # ================= Alarme & Benachrichtigungen =================
+    & $beginPage "Alerts"
+    & $addSection "Hinweise"
+    $chkTray  = & $addCheck -Label "Tray-Hinweis + Ton bei Alarmen" -Value ([bool]$cfg.ShowTrayNotifications) -Key "ShowTrayNotifications" -Default ([bool]$dc.ShowTrayNotifications) -Words "Benachrichtigung Sound"
+    $chkOpen  = & $addCheck -Label "Hinweis bei Handelsstart (Börsen im Portfolio / aktiver Ticker)" -Value ([bool]$cfg.NotifyMarketOpen) -Key "NotifyMarketOpen" -Default ([bool]$dc.NotifyMarketOpen)
+    $chkEarn  = & $addCheck -Label "Hinweis am Vortag von Quartalszahlen (Portfolio)" -Value ([bool]$cfg.NotifyEarnings) -TipKey "EARNINGS" -Key "NotifyEarnings" -Default ([bool]$dc.NotifyEarnings) -Words "Earnings"
+    $quietTip = "HH:MM, z. B. 22:00 bis 07:00. Beide leer = keine Ruhezeit."
+    $tQFrom = & $addText -Label "Ruhezeit (kein Ton / Push) von - bis" -Value ([string]$cfg.QuietFrom) -Tip $quietTip -TipKey "QUIET" -Key "QuietFrom" -Default ([string]$dc.QuietFrom) -Width (S 54) -Words "Nacht still"
+    $lay.Y -= S 30
+    $tQTo = New-Object System.Windows.Forms.TextBox
+    $tQTo.SetBounds(($IX + (S 62)), $lay.Y, (S 54), (S 22))
+    $tQTo.BackColor = $p.Input; $tQTo.ForeColor = $p.Text; $tQTo.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tQTo.Font = $fontMono; $tQTo.Text = [string]$cfg.QuietTo
+    $lay.Host.Controls.Add($tQTo)
+    Set-DynTip $tQTo $quietTip "QUIET"
+    foreach ($tq in @($tQFrom, $tQTo)) { $tq.MaxLength = 5 }
+    $tQTo.Add_TextChanged({ Update-SettingsMarkers })
+    $lay.Y += S 30
+    & $addSection "Handy-Push"
+    $btnPush = & $addButton -Text "Handy-Push einrichten ..." -Width (S 200) -Words "Push ntfy Telegram Handy" -Act {
         $sc = $script:SettingsCtl
         if (Show-PushDialog -Owner $sc.Dlg) {
             $sc.PushState.Text = if ([string]$script:Config.PushService -eq "Aus") { "aus" } else { "aktiv: " + [string]$script:Config.PushService }
         }
-    })
-    $lay.Y += S 32
+    }
+    Set-DynTip $btnPush "" "PUSH"
+    $lPushState = New-Object System.Windows.Forms.Label
+    $lPushState.SetBounds(($btnPush.Right + (S 10)), ($btnPush.Top + (S 6)), (S 220), (S 18))
+    $lPushState.ForeColor = $p.Muted
+    $lPushState.Text = if ([string]$cfg.PushService -eq "Aus") { "aus" } else { "aktiv: " + [string]$cfg.PushService }
+    $lay.Host.Controls.Add($lPushState)
+    & $addSection "Nachrichten mit Alarm-Wörtern"
+    $kwTip = "Kommagetrennt, z. B.: downgrade, gewinnwarnung, übernahme, profit warning. Kommt eine Schlagzeile mit so einem Wort zu einem Ticker im Depot, gibt es einen Hinweis (und Handy-Push, falls eingerichtet). Leer = aus."
+    $tKw = & $addText -Label "Alarm-Wörter" -Value ([string]$cfg.NewsKeywords) -Tip $kwTip -Key "NewsKeywords" -Default ([string]$dc.NewsKeywords) -Width (S 196) -Words "News Schlagzeilen"
+    $chkKwWatch = & $addCheck -Label "Alarm-Wörter auch für Watchlist-Ticker" -Value ([bool]$cfg.NewsKeywordWatch) -Key "NewsKeywordWatch" -Default ([bool]$dc.NewsKeywordWatch)
 
+    # ================= Depot =================
+    & $beginPage "Depot"
+    & $addSection "Währung und Kennzahlen"
+    $curItems = @("Auto") + @(Get-DisplayCurrencies)
+    $cbCur = & $addCombo -Label "Währung (Auto = Währung des Tickers)" -Items $curItems -Value $(if ([bool]$cfg.AutoCurrency) { "Auto" } else { [string]$cfg.Currency }) -Tip "Auto: jeder Kurs und Chart in der Währung des Tickers, das Depot bleibt in der Basiswährung. Sonst alles in der gewählten Währung (auch Taste W)." -Key "Currency" -Default "Auto" -Words "Basiswährung EUR USD CHF GBP Currency"
+    $nRf = & $addNum -Label "Risikofreier Zins für die Sharpe Ratio (%)" -Min 0 -Max 10 -Value ([double]$cfg.RiskFreePct) -Tip "Wird in der Analyse (Risiko) von der Rendite abgezogen" -Step 0.1 -Decimals 1 -Key "RiskFreePct" -Default ([double]$dc.RiskFreePct) -Words "Sharpe Risiko Zins"
+    $chkTrayDepot = & $addCheck -Label "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" -Value ([bool]$cfg.TrayFollowsDepot) -Tip "Grün / Rot / Grau nach dem heutigen Ergebnis des Depots. Ohne Positionen: aktiver Ticker." -Key "TrayFollowsDepot" -Default ([bool]$dc.TrayFollowsDepot)
+    & $addSection "Werkzeuge (speichert und öffnet)"
+    $openAfter = { param([scriptblock]$Then) $script:SettingsThen = $Then; $script:SettingsCtl.Ok.PerformClick() }
+    $script:SettingsOpenAfter = $openAfter
+    [void](& $addButton -Text "Cash-Konto ..." -Width (S 170) -Tip "Speichert die Einstellungen und öffnet das Cash-Konto (Befehl CASH)" -Words "CASH Einzahlung" -Act { & $script:SettingsOpenAfter { Show-CashDialog } })
+    [void](& $addButton -Text "Sparpläne ..." -Width (S 170) -SameRow -Tip "Speichert die Einstellungen und öffnet die Sparpläne (Befehl SPAR)" -Words "SPAR Sparplan" -Act { & $script:SettingsOpenAfter { Show-SavingsPlansDialog } })
+    $lay.LastBtn = $null
+    [void](& $addButton -Text "Broker-CSV importieren ..." -Width (S 170) -Tip "Speichert die Einstellungen und öffnet den CSV-Import (Befehl IMP)" -Words "IMP Trading212 Import" -Act { & $script:SettingsOpenAfter { Show-CsvImportDialog } })
+    [void](& $addButton -Text "Zielgewichte ..." -Width (S 170) -SameRow -Tip "Speichert die Einstellungen und öffnet Zielgewichte / Rebalancing (Befehl REBAL)" -Words "REBAL Rebalancing" -Act { & $script:SettingsOpenAfter { Show-AnalysisDialog -Page "Target" } })
+    $lay.LastBtn = $null
+
+    # ================= Tastatur & Befehle =================
+    & $beginPage "Keyboard"
+    & $addSection "Globales Tastenkürzel"
+    $tHk = & $addText -Label "Globales Tastenkürzel (zeigen / verstecken)" -Value ([string]$cfg.GlobalHotkey) -Tip "Funktioniert auch, wenn ein anderes Programm vorne ist. Z. B. Ctrl+Alt+W, Win+F9. Leer = aus." -TipKey "HOTKEY" -Key "GlobalHotkey" -Default ([string]$dc.GlobalHotkey) -Width (S 140) -Words "Hotkey"
+    & $addSection "Befehlszeile"
+    & $addNote "Strg+K öffnet die Befehlszeile. Sie findet Befehle, Ticker, Menüeinträge und jede Einstellung - z. B. 'zebra', 'push' oder 'SET STIL'." 2 | Out-Null
+    [void](& $addButton -Text "Alle Tastenkürzel und Befehle (HELP)" -Width (S 260) -Words "Hilfe F1 Kürzel" -Act { Show-ShortcutHelp })
+    [void](& $addButton -Text "Glossar öffnen (G)" -Width (S 260) -Words "Begriffe Erklärungen" -Act { Show-GlossaryDialog })
+
+    # ================= Sonstiges =================
+    & $beginPage "Misc"
+    & $addSection "Erklärungen (Maus darüber)"
+    $modes = Get-TooltipModes
+    $cbTip = & $addCombo -Label "Ausführlichkeit" -Items @($modes.Values) -Value ([string]$modes[[string]$cfg.TooltipMode]) -TipKey "TOOLTIPS" -Key "TooltipMode" -Default ([string]$modes[[string]$dc.TooltipMode]) -Words "Tooltips Hinweise"
+    $nTipDelay = & $addNum -Label "Verzögerung (Millisekunden)" -Min 0 -Max 3000 -Value ([int]$cfg.TooltipDelayMs) -Tip "Wie lange die Maus stillstehen muss, bis der Hinweis erscheint" -TipKey "TOOLTIPS" -Step 100 -Key "TooltipDelayMs" -Default ([int]$dc.TooltipDelayMs) -Words "Tooltips"
+    $chkHover  = & $addCheck -Label "Infokarte, wenn die Maus auf einem Ticker ruht" -Value ([bool]$cfg.HoverCards) -Tip "Watchlist und Portfolio: Kurs, Tagesspanne, 52-Wochen-Balken, 5-Tage-Verlauf, Position, nächste Termine" -Key "HoverCards" -Default ([bool]$dc.HoverCards) -Words "Hover"
     & $addSection "System"
-    $autoNow  = Test-Autostart
-    $chkAuto  = & $addCheck "Mit Windows starten (Verknüpfung im Autostart-Ordner)" $autoNow
+    $autoNow = Test-Autostart
+    $chkAuto = & $addCheck -Label "Mit Windows starten (Verknüpfung im Autostart-Ordner)" -Value $autoNow -Words "Autostart"
+    & $addSection "Einstellungen übertragen"
+    [void](& $addButton -Text "Einstellungen exportieren ..." -Width (S 200) -Tip "Speichert die Einstellungen (gespeicherter Stand, ohne Depots und ohne Push-Zugang) als Datei, z. B. für einen neuen PC" -Words "Export Datei neuer PC sichern" -Act { [void](Export-SettingsFile) })
+    [void](& $addButton -Text "Einstellungen importieren ..." -Width (S 200) -SameRow -Tip "Liest eine exportierte Einstellungs-Datei ein (vorher automatisches Backup). Depot-Daten bleiben unberührt." -Words "Import Datei neuer PC" -Act { $script:SettingsAfter = { Import-SettingsFile }; $script:SettingsCtl.Dlg.Close() })
+    $lay.LastBtn = $null
+    & $addSection "Daten und Sicherung"
+    [void](& $addButton -Text "Datenordner öffnen" -Width (S 170) -Tip $script:DataDir -Act { try { Start-Process -FilePath "explorer.exe" -ArgumentList "`"$($script:DataDir)`"" } catch { } })
+    [void](& $addButton -Text "Log öffnen" -Width (S 170) -SameRow -Tip $script:LogPath -Act { if (Test-Path $script:LogPath) { try { Start-Process -FilePath "notepad.exe" -ArgumentList "`"$($script:LogPath)`"" } catch { } } })
+    $lay.LastBtn = $null
+    $btnBackup = & $addButton -Text "Backup jetzt" -Width (S 170) -Tip "Kopie von Einstellungen, Portfolio, Alarmen und Transaktionen in $($script:BackupDir)" -Act {
+        $dest = Backup-DataFiles -Reason "manuell"
+        $owner = if ($null -ne $script:SettingsCtl) { $script:SettingsCtl.Dlg } else { $form }
+        $txt = if ($dest) { "Backup erstellt:`r`n$dest`r`n`r`n(Es werden die letzten 10 Backups behalten.)" } else { "Backup fehlgeschlagen oder keine Daten vorhanden - siehe Log." }
+        [System.Windows.Forms.MessageBox]::Show($owner, $txt, "Backup", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
+    Set-DynTip $btnBackup "Kopie von Einstellungen, Portfolio, Alarmen und Transaktionen in $($script:BackupDir)" "BACKUP"
+    [void](& $addButton -Text "Wiederherstellen ..." -Width (S 170) -SameRow -Tip "Ein Backup zurückspielen (täglich wird automatisch gesichert)" -Act { $script:SettingsAfter = { Show-RestoreDialog }; $script:SettingsCtl.Dlg.Close() })
+    $lay.LastBtn = $null
+    [void](& $addButton -Text "Daten exportieren ..." -Width (S 170) -Tip "Alle Daten als ZIP sichern (z. B. für einen anderen PC)" -Act { Export-DataZip })
+    [void](& $addButton -Text "Daten importieren ..." -Width (S 170) -SameRow -Tip "Einen ZIP-Export einlesen (ersetzt alle Daten, vorher Backup)" -Act { $script:SettingsAfter = { Import-DataZip }; $script:SettingsCtl.Dlg.Close() })
+    $lay.LastBtn = $null
+    [void](& $addButton -Text $(if ($script:IsPortable) { "Portabel beenden ..." } else { "Portabel machen ..." }) -Width (S 170) -Tip $(if ($script:IsPortable) { "Daten liegen im Programmordner (data). Zurück nach %LOCALAPPDATA%." } else { "Daten in den Programmordner (data) verschieben, z. B. für einen USB-Stick" }) -Words "USB Stick" -Act { $script:SettingsAfter = { Switch-PortableMode }; $script:SettingsCtl.Dlg.Close() })
+    & $addNote ("Version {0} - Daten: {1}" -f $script:AppVersion, $script:DataDir) 1 | Out-Null
 
-    # ---- right column ----
-    & $newColumn (S 430)
-    & $addSection "Layout und Fenster"
-    $cbLayout = & $addCombo "Layout" @(Get-LayoutNames) ([string]$cfg.Layout) "Auch über den Layout-Button rechts oben oder Taste L" "LAYOUT"
-    $nOpacity = & $addNum "Deckkraft (%)" 30 100 ([int]$cfg.Opacity) "" "OPACITY" 5
-    $chkTWatch = & $addCheck "Terminal: Watchlist und Alarme anzeigen" ([bool]$cfg.TerminalShowWatch) "" "LAYOUT"
-    $chkTPort  = & $addCheck "Terminal: Portfolio anzeigen" ([bool]$cfg.TerminalShowPortfolio) "" "LAYOUT"
-    $nTChart   = & $addNum "Terminal: Chart-Höhe (%)" 25 80 ([int]$cfg.TerminalChartPct) "Anteil des Charts an der Fensterhöhe; der Rest gehört den Listen" "LAYOUT" 5
-    $btnBar = New-Object System.Windows.Forms.Button
-    $btnBar.SetBounds(($lay.X + (S 26)), $lay.Y, (S 230), (S 26))
-    Style-FlatButton -Btn $btnBar -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
-    $btnBar.Text = "Compact / Ticker zeigt ..."
-    $btnBar.Add_Click({ Show-CompactOptions -Owner $script:SettingsCtl.Dlg })
-    $dlg.Controls.Add($btnBar)
-    Set-DynTip $btnBar "Was die schmale Leiste anzeigt: Tagesänderung absolut, Vor-/Nachbörse, Mini-Chart, Marktstatus oder das Depot-Ergebnis von heute" "LAYOUT"
-    $lay.Y += S 32
+    # ---- index for Ctrl+K: built from the real window, then thrown away ----
+    if ($IndexOnly) {
+        $out = New-Object System.Collections.Generic.List[object]
+        $seen = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($pg in $pages) {
+            $tt = Get-SettingsPageTitle -Id $pg.Id -Language $lang
+            $t = "SET " + $tt.ToUpperInvariant()
+            if ($seen.Add($t)) { $out.Add([PSCustomObject]@{ Text = $t; Desc = (Tr "Einstellungen - Seite"); Search = ("{0} {1}" -f $pg.De, $pg.En) }) }
+        }
+        foreach ($e in $reg) {
+            $lbl = (Tr ([string]$e.Label)) -replace '\s*\.\.\.$', '' -replace '\s+\(\d+\)$', ''
+            if (-not $lbl.Trim()) { continue }
+            $t = "SET " + $lbl.ToUpperInvariant()
+            if ($seen.Add($t)) { $out.Add([PSCustomObject]@{ Text = $t; Desc = ("{0} - {1}" -f (Tr "Einstellung"), (Get-SettingsPageTitle -Id $e.Page -Language $lang)); Search = [string]$e.Search }) }
+        }
+        $dlg.Dispose()
+        return $out.ToArray()
+    }
 
-    # v4.6: colours and window
-    & $addSection "Farben und Fenster"
-    $cbUd     = & $addCombo "Farben für Plus / Minus" @(@((Get-UpDownSchemes).Keys) + @("Eigene")) ([string]$cfg.UpDownScheme) "Farbenblind = Blau / Orange. Eigene = frei wählen." "COLORS"
-    $chkArrow = & $addCheck "Pfeile vor Veränderungen anzeigen" ([bool]$cfg.ShowArrows) "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" "COLORS"
-    $chkFlash = & $addCheck "Kurs kurz einfärben, wenn er sich ändert" ([bool]$cfg.PriceFlash)
-    $chkTrayDepot = & $addCheck "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" ([bool]$cfg.TrayFollowsDepot) "Grün / Rot / Grau nach dem heutigen Ergebnis des Depots. Ohne Positionen: aktiver Ticker."
-    $chkSnap  = & $addCheck "Fenster am Bildschirmrand einrasten" ([bool]$cfg.SnapToEdges)
-    $lHk = New-Object System.Windows.Forms.Label
-    $lHk.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
-    $lHk.Size = New-Object System.Drawing.Size((S 258), (S 18))
-    $lHk.Text = "Globales Tastenkürzel (zeigen / verstecken)"
-    $dlg.Controls.Add($lHk)
-    $tHk = New-Object System.Windows.Forms.TextBox
-    $tHk.SetBounds(($lay.X + (S 292)), $lay.Y, (S 112), (S 22))
-    $tHk.BackColor = $p.Input; $tHk.ForeColor = $p.Text; $tHk.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $tHk.Font = $fontMono; $tHk.Text = [string]$cfg.GlobalHotkey
-    $dlg.Controls.Add($tHk)
-    Set-DynTip $tHk "Funktioniert auch, wenn ein anderes Programm vorne ist. Z. B. Ctrl+Alt+W, Win+F9. Leer = aus." "HOTKEY"
-    Set-DynTip $lHk "" "HOTKEY"
-    $lay.Y += S 29
-    $script:NewColors = @{ Up = [string]$cfg.UpColor; Down = [string]$cfg.DownColor; Accent = [string]$cfg.AccentHex }
-    $pickColor = {
+    # ---- page list ----
+    foreach ($pg in $pages) { [void]$nav.Items.Add((Get-SettingsPageTitle -Id $pg.Id -Language $lang)) }
+    $nav.Add_DrawItem({
+        param($sender, $e)
+        if ($e.Index -lt 0) { return }
+        $sc = $script:SettingsCtl
+        if ($null -eq $sc) { return }
+        $id = [string]$sc.PageIds[$e.Index]
+        $sel = ($id -eq $sc.Cur)
+        $pl = $script:Pal
+        $bgB = New-Object System.Drawing.SolidBrush($(if ($sel) { $pl.BodyBg } else { $pl.Card }))
+        $e.Graphics.FillRectangle($bgB, $e.Bounds)
+        $bgB.Dispose()
+        if ($sel) {
+            $ab = New-Object System.Drawing.SolidBrush($pl.Accent)
+            $e.Graphics.FillRectangle($ab, $e.Bounds.X, ($e.Bounds.Y + (S 6)), (S 3), ($e.Bounds.Height - (S 12)))
+            $ab.Dispose()
+        }
+        $q = [string]$sc.Search.Text
+        $n = 0; $titleHit = $false
+        if ($q.Trim() -and $null -ne $sc.Hits) { $n = [int]$sc.Hits.Counts[$id]; $titleHit = (@($sc.Hits.TitlePages) -contains $id) }
+        $fg = if ($q.Trim() -and $n -eq 0 -and -not $titleHit) { $pl.Border } elseif ($sel) { $pl.Text } else { $pl.Muted }
+        $chg = @($sc.Reg | Where-Object { $_.Page -eq $id -and $_.Changed }).Count
+        $fl = [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+        $rT = New-Object System.Drawing.Rectangle(($e.Bounds.X + (S 14)), $e.Bounds.Y, ($e.Bounds.Width - (S 52)), $e.Bounds.Height)
+        [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string]$sender.Items[$e.Index], $(if ($sel) { $fontUiBold } else { $fontUi }), $rT, $fg, $fl)
+        $rN = New-Object System.Drawing.Rectangle(($e.Bounds.Right - (S 40)), $e.Bounds.Y, (S 32), $e.Bounds.Height)
+        $flR = $fl -bor [System.Windows.Forms.TextFormatFlags]::Right
+        if ($q.Trim() -and $n -gt 0) { [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string]$n, $fontUiBold, $rN, $pl.Accent, $flR) }
+        elseif (-not $q.Trim() -and $chg -gt 0) { [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string][char]0x25CF, $fontUi, $rN, $pl.Accent, $flR) }
+    })
+    $nav.Add_SelectedIndexChanged({
+        param($sender, $e)
+        $sc = $script:SettingsCtl
+        if ($null -eq $sc -or $sender.SelectedIndex -lt 0) { return }
+        $id = [string]$sc.PageIds[$sender.SelectedIndex]
+        if ($id -ne $sc.Cur) { Show-SettingsPage $id }
+    })
+
+    # ---- button bar ----
+    $lSearch = New-Object System.Windows.Forms.Label
+    $lSearch.SetBounds((S 14), (S 17), (S 54), (S 18)); $lSearch.Text = "Suchen:"
+    $lSearch.ForeColor = $p.Muted
+    $bar.Controls.Add($lSearch)
+    $tSearch = New-Object System.Windows.Forms.TextBox
+    $tSearch.SetBounds((S 70), (S 13), (S 200), (S 24))
+    $tSearch.Name = "tSettingsSearch"
+    $tSearch.BackColor = $p.Input; $tSearch.ForeColor = $p.Text; $tSearch.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $bar.Controls.Add($tSearch)
+    Set-DynTip $tSearch "Einstellung auf allen Seiten suchen, z. B. 'stil', 'schrift', 'push' - die Seite mit Treffern öffnet sich, die Liste links zählt die Treffer"
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Size = New-Object System.Drawing.Size((S 94), (S 28))
+    Style-FlatButton -Btn $btnCancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $btnCancel.Text = "Abbrechen"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $bar.Controls.Add($btnCancel)
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Size = New-Object System.Drawing.Size((S 94), (S 28))
+    Style-FlatButton -Btn $btnOk -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $btnOk.Font = $fontUiBold
+    $btnOk.Text = "OK"
+    $bar.Controls.Add($btnOk)
+    $btnReset = New-Object System.Windows.Forms.Button
+    $btnReset.Size = New-Object System.Drawing.Size((S 154), (S 28))
+    Style-FlatButton -Btn $btnReset -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
+    $btnReset.Text = "Seite zurücksetzen"
+    $bar.Controls.Add($btnReset)
+    $btnCancel.Name = "btnSetCancel"; $btnOk.Name = "btnSetOk"; $btnReset.Name = "btnSetReset"
+    $bar.Add_Layout({
+        param($sender, $e)
+        $w = $sender.ClientSize.Width
+        $c = $sender.Controls
+        $c["btnSetCancel"].Location = New-Object System.Drawing.Point(($w - (S 108)), (S 11))
+        $c["btnSetOk"].Location = New-Object System.Drawing.Point(($w - (S 208)), (S 11))
+        $c["btnSetReset"].Location = New-Object System.Drawing.Point(($w - (S 370)), (S 11))
+    })
+    Set-DynTip $btnReset "Setzt alle Einstellungen dieser Seite auf den Standard zurück (gespeichert erst mit OK). Punkt vor einer Einstellung = vom Standard geändert."
+    $btnReset.Add_Click({
+        $sc = $script:SettingsCtl
+        foreach ($e in @($sc.Reg | Where-Object { $_.Page -eq $sc.Cur -and $null -ne $_.Default })) { Set-SettingCtlValue $e.Ctl $e.Default }
+        if ($sc.Cur -eq "Alerts") { $sc.QTo.Text = [string]$script:ConfigDefaults.QuietTo }
+        if ($sc.Cur -eq "Display") { $script:NewColors.Up = ""; $script:NewColors.Down = "" }
+        if ($sc.Cur -eq "Design") { $script:NewColors.Accent = ""; Invoke-SettingsPreview }
+        Update-SettingsMarkers
+        Set-TransientStatus ("Seite '{0}' auf Standard gesetzt - OK speichert" -f (Get-SettingsPageTitle -Id $sc.Cur -Language $(if ([string]$script:Config.Language -eq "EN") { "EN" } else { "DE" }))) 4
+    })
+
+    # ---- colour pickers ----
+    $script:PickColor = {
         param([string]$Start)
         $cd = New-Object System.Windows.Forms.ColorDialog
         $cd.FullOpen = $true
@@ -13723,7 +14230,6 @@ function Show-SettingsDialog {
         $cd.Dispose()
         return $hex
     }
-    $script:PickColor = $pickColor
     $cbUd.Add_SelectionChangeCommitted({
         param($sender, $e)
         if ([string]$sender.SelectedItem -ne "Eigene") { return }
@@ -13735,192 +14241,123 @@ function Show-SettingsDialog {
     })
     $cbAccent.Add_SelectionChangeCommitted({
         param($sender, $e)
-        if ([string]$sender.SelectedItem -ne "Eigene") { return }
-        $a = & $script:PickColor $script:NewColors.Accent
-        if ($a) { $script:NewColors.Accent = $a }
-    })
-
-    # v4.9: fonts, window frame, news
-    & $addSection "Schrift und Rahmen"
-    $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
-    $cbMono  = & $addCombo "Schrift für Zahlen (ab Neustart)" $monoOffered ([string]$cfg.MonoFont) "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal."
-    $scaleItems = @(Get-FontScaleSteps | ForEach-Object { "$_ %" })
-    $cbScale = & $addCombo "Schriftgröße Listen + Chart (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Vergrößert Tabellen (Zeilenhöhe wächst mit) und Chart-Beschriftung. Knöpfe und Eingabefelder bleiben gleich groß, damit nichts abgeschnitten wird."
-    $chkAlignR = & $addCheck "Zahlen rechtsbündig (Watchlist, Portfolio)" ([bool]$cfg.AlignNumbersRight) "Ziffern bleiben beim Aktualisieren an ihrem Platz"
-    $chkRound  = & $addCheck "Abgerundete Fensterecken (Windows 11)" ([bool]$cfg.RoundCorners)
-
-    & $addSection "Nachrichten (F4)"
-    $nNewsMin  = & $addNum "Neu laden alle (Minuten)" 5 240 ([int]$cfg.NewsRefreshMinutes) "Eine Abfrage je Ticker in Depot und Watchlist (max. 40). Sind alle Börsen zu, halb so oft." "" 5
-    $nNewsMove = & $addNum "Ticker markieren ab Tagesbewegung (%)" 0 50 ([int]$cfg.NewsMoveThreshold) "Zeigt bei der neuesten Meldung, dass sich der Ticker heute stark bewegt (0 = aus)"
-    # v4.9.5: keyword alerts + muted sources
-    $lKw = New-Object System.Windows.Forms.Label
-    $lKw.Location = New-Object System.Drawing.Point(($lay.X + (S 26)), ($lay.Y + (S 3)))
-    $lKw.Size = New-Object System.Drawing.Size((S 140), (S 18))
-    $lKw.Text = "Alarm-Wörter"
-    $dlg.Controls.Add($lKw)
-    $tKw = New-Object System.Windows.Forms.TextBox
-    $tKw.SetBounds(($lay.X + (S 170)), $lay.Y, (S 234), (S 22))
-    $tKw.BackColor = $p.Input; $tKw.ForeColor = $p.Text; $tKw.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $tKw.Font = $fontMono; $tKw.Text = [string]$cfg.NewsKeywords
-    $dlg.Controls.Add($tKw)
-    $kwTip = "Kommagetrennt, z. B.: downgrade, gewinnwarnung, übernahme, profit warning. Kommt eine Schlagzeile mit so einem Wort zu einem Ticker im Depot, gibt es einen Hinweis (und Handy-Push, falls eingerichtet). Leer = aus."
-    Set-DynTip $tKw $kwTip; Set-DynTip $lKw $kwTip
-    $lay.Y += S 29
-    $chkKwWatch = & $addCheck "Alarm-Wörter auch für Watchlist-Ticker" ([bool]$cfg.NewsKeywordWatch)
-    $script:NewMuted = @($cfg.NewsMuted | Where-Object { $_ })
-    $btnMuted = New-Object System.Windows.Forms.Button
-    $btnMuted.SetBounds(($lay.X + (S 26)), $lay.Y, (S 230), (S 26))
-    Style-FlatButton -Btn $btnMuted -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
-    $btnMuted.Text = "{0} ({1})" -f "Ausgeblendete Quellen zeigen", @($script:NewMuted).Count
-    $btnMuted.Enabled = (@($script:NewMuted).Count -gt 0)
-    Set-DynTip $btnMuted ("Ausgeblendet: " + $(if (@($script:NewMuted).Count -gt 0) { @($script:NewMuted) -join ", " } else { "keine" }) + ". Klick = alle wieder zeigen. Einzelne Quellen: Rechtsklick in der News-Liste.")
-    $btnMuted.Add_Click({
-        param($sender, $e)
-        $script:NewMuted = @()
-        $sender.Text = "{0} (0)" -f (Tr "Ausgeblendete Quellen zeigen")
-        $sender.Enabled = $false
-    })
-    $dlg.Controls.Add($btnMuted)
-    $lay.Y += S 32
-
-    & $addSection "Erklärungen (Maus darüber)"
-    $modes = Get-TooltipModes
-    $cbTip = & $addCombo "Ausführlichkeit" @($modes.Values) ([string]$modes[[string]$cfg.TooltipMode]) "" "TOOLTIPS"
-    $nTipDelay = & $addNum "Verzögerung (Millisekunden)" 0 3000 ([int]$cfg.TooltipDelayMs) "Wie lange die Maus stillstehen muss, bis der Hinweis erscheint" "TOOLTIPS" 100
-    $chkHover  = & $addCheck "Infokarte, wenn die Maus auf einem Ticker ruht" ([bool]$cfg.HoverCards) "Watchlist und Portfolio: Kurs, Tagesspanne, 52-Wochen-Balken, 5-Tage-Verlauf, Position, nächste Termine"
-    $btnGloss = New-Object System.Windows.Forms.Button
-    $btnGloss.SetBounds(($lay.X + (S 26)), $lay.Y, (S 150), (S 26))
-    Style-FlatButton -Btn $btnGloss -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
-    $btnGloss.Text = "Glossar öffnen (G)"
-    $btnGloss.Add_Click({ Show-GlossaryDialog })
-    $dlg.Controls.Add($btnGloss)
-    $lay.Y += S 34
-    & $newColumn 0
-
-    $by = $lay.MaxY + (S 12)
-    $btnDir = New-Object System.Windows.Forms.Button
-    $btnDir.SetBounds((S 14), $by, (S 130), (S 28))
-    Style-FlatButton -Btn $btnDir -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
-    $btnDir.Text = "Datenordner öffnen"
-    $btnDir.Add_Click({ try { Start-Process -FilePath "explorer.exe" -ArgumentList "`"$($script:DataDir)`"" } catch { } })
-    $dlg.Controls.Add($btnDir)
-    Set-DynTip $btnDir $script:DataDir
-
-    # v3.0: manual backup + log access (the window runs hidden, errors only go to the log)
-    $btnBackup = New-Object System.Windows.Forms.Button
-    $btnBackup.SetBounds((S 150), $by, (S 110), (S 28))
-    Style-FlatButton -Btn $btnBackup -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
-    $btnBackup.Text = "Backup jetzt"
-    $btnBackup.Add_Click({
-        $dest = Backup-DataFiles -Reason "manuell"
-        $owner = if ($null -ne $script:SettingsCtl) { $script:SettingsCtl.Dlg } else { $form }
-        $txt = if ($dest) { "Backup erstellt:`r`n$dest`r`n`r`n(Es werden die letzten 10 Backups behalten.)" } else { "Backup fehlgeschlagen oder keine Daten vorhanden - siehe Log." }
-        [System.Windows.Forms.MessageBox]::Show($owner, $txt, "Backup", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-    })
-    $dlg.Controls.Add($btnBackup)
-    Set-DynTip $btnBackup "Kopie von Einstellungen, Portfolio, Alarmen und Transaktionen in $($script:BackupDir)" "BACKUP"
-
-    $btnLog = New-Object System.Windows.Forms.Button
-    $btnLog.SetBounds((S 266), $by, (S 100), (S 28))
-    # v5.0: search - matching settings light up, the rest fades
-    $lSearch = New-Object System.Windows.Forms.Label
-    $lSearch.SetBounds((S 384), ($by + (S 6)), (S 52), (S 18)); $lSearch.Text = "Suchen:"
-    $dlg.Controls.Add($lSearch)
-    $tSearch = New-Object System.Windows.Forms.TextBox
-    $tSearch.SetBounds((S 438), ($by + (S 2)), (S 200), (S 24))
-    $tSearch.Name = "tSettingsSearch"
-    $tSearch.BackColor = $p.Input; $tSearch.ForeColor = $p.Text; $tSearch.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $dlg.Controls.Add($tSearch)
-    Set-DynTip $tSearch "Einstellung suchen, z. B. 'schrift', 'push', 'news' - Treffer werden hervorgehoben"
-    $script:SetSearchColors = @{}
-    foreach ($sc0 in $dlg.Controls) {
-        if (($sc0 -is [System.Windows.Forms.Label] -or $sc0 -is [System.Windows.Forms.CheckBox] -or $sc0 -is [System.Windows.Forms.Button]) -and $sc0.Text) { $script:SetSearchColors[$sc0] = $sc0.ForeColor }
-    }
-    $script:SetSearchColors.Remove($lSearch)
-    $tSearch.Add_TextChanged({
-        param($sender, $e)
-        $qq = $sender.Text
-        $hits = 0
-        foreach ($c0 in @($script:SetSearchColors.Keys)) {
-            if ($c0.IsDisposed) { continue }
-            if (-not $qq.Trim()) { $c0.ForeColor = $script:SetSearchColors[$c0]; continue }
-            $tipT = ""
-            try { $tipT = [string]$toolTip.GetToolTip($c0) } catch { }
-            if (Test-SettingMatch -Text ($c0.Text + " " + $tipT) -Query $qq) { $c0.ForeColor = $script:Pal.Accent; $hits++ } else { $c0.ForeColor = $script:Pal.Border }
+        if ([string]$sender.SelectedItem -eq "Eigene") {
+            $a = & $script:PickColor $script:NewColors.Accent
+            if ($a) { $script:NewColors.Accent = $a }
         }
-        $script:SettingsSearchHits = $hits
+        Invoke-SettingsPreview
     })
-    # v4.5: restore / export / import / portable
-    $mkDataBtn = {
-        param([string]$T, [int]$X, [string]$Tip, [scriptblock]$Act)
-        $b = New-Object System.Windows.Forms.Button
-        $b.SetBounds($X, ($by + (S 36)), (S 130), (S 28))
-        Style-FlatButton -Btn $b -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
-        $b.Text = $T
-        $b.Add_Click($Act)
-        $dlg.Controls.Add($b)
-        Set-DynTip $b $Tip
-    }
-    & $mkDataBtn "Wiederherstellen ..." (S 14) "Ein Backup zurückspielen (täglich wird automatisch gesichert)" { $script:SettingsAfter = { Show-RestoreDialog }; $script:SettingsCtl.Dlg.Close() }
-    & $mkDataBtn "Daten exportieren ..." (S 150) "Alle Daten als ZIP sichern (z. B. für einen anderen PC)" { Export-DataZip }
-    & $mkDataBtn "Daten importieren ..." (S 286) "Einen ZIP-Export einlesen (ersetzt alle Daten, vorher Backup)" { $script:SettingsAfter = { Import-DataZip }; $script:SettingsCtl.Dlg.Close() }
-    & $mkDataBtn $(if ($script:IsPortable) { "Portabel beenden ..." } else { "Portabel machen ..." }) (S 422) $(if ($script:IsPortable) { "Daten liegen im Programmordner (data). Zurück nach %LOCALAPPDATA%." } else { "Daten in den Programmordner (data) verschieben, z. B. für einen USB-Stick" }) { $script:SettingsAfter = { Switch-PortableMode }; $script:SettingsCtl.Dlg.Close() }
-    Style-FlatButton -Btn $btnLog -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
-    $btnLog.Text = "Log öffnen"
-    $btnLog.Add_Click({
-        if (Test-Path $script:LogPath) { try { Start-Process -FilePath "notepad.exe" -ArgumentList "`"$($script:LogPath)`"" } catch { } }
+
+    # ---- style cards + live preview ----
+    $cbStyle.Add_SelectedIndexChanged({
+        $sc = $script:SettingsCtl
+        if ($null -eq $sc) { return }
+        $pl = $script:Pal
+        foreach ($b in $sc.Cards) {
+            $on = ([int]$b.Tag -eq $sc.Style.SelectedIndex)
+            $b.FlatAppearance.BorderSize = if ($on) { 2 } else { 1 }
+            $b.FlatAppearance.BorderColor = if ($on) { $pl.Accent } else { $pl.Border }
+            $b.ForeColor = if ($on) { $pl.Accent } else { $pl.Text }
+            $b.Font = if ($on) { $fontUiBold } else { $fontUi }
+        }
+        Invoke-SettingsPreview
     })
-    $dlg.Controls.Add($btnLog)
-    Set-DynTip $btnLog $script:LogPath
+    $cbTheme.Add_SelectionChangeCommitted({ Invoke-SettingsPreview })
+    $cbRows.Add_SelectionChangeCommitted({ Invoke-SettingsPreview })
+    $chkZebra.Add_CheckedChanged({ Invoke-SettingsPreview })
 
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.SetBounds((S 752), $by, (S 94), (S 28))
-    Style-FlatButton -Btn $btnCancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
-    $btnCancel.Text = "Abbrechen"
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $dlg.Controls.Add($btnCancel)
-
-    $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.SetBounds((S 652), $by, (S 94), (S 28))
-    Style-FlatButton -Btn $btnOk -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $btnOk.Font = $fontUiBold
-    $btnOk.Text = "OK"
-    # (handlers reach the controls through script scope, not via the caller's locals)
-    $script:SettingsCtl = @{ Dlg = $dlg; SmaF = $nSmaF; SmaS = $nSmaS; Slow = $nSlow; Refresh = $nRefresh; PushState = $lPushState; QFrom = $tQFrom; QTo = $tQTo }
     $btnOk.Add_Click({
         $sc = $script:SettingsCtl
         if ($sc.SmaF.Value -ge $sc.SmaS.Value) {
+            Show-SettingsPage "Display"
             [System.Windows.Forms.MessageBox]::Show($sc.Dlg, "SMA schnell muss kleiner als SMA langsam sein.", "Einstellungen",
                 [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            $script:SettingsThen = $null
             return
         }
         if ($sc.Slow.Value -lt $sc.Refresh.Value) { $sc.Slow.Value = $sc.Refresh.Value }
         foreach ($tq in @($sc.QFrom, $sc.QTo)) {
             $tv = $tq.Text.Trim()
             if ($tv -and $tv -notmatch '^([01]?\d|2[0-3]):[0-5]\d$') {
+                Show-SettingsPage "Alerts"
                 [System.Windows.Forms.MessageBox]::Show($sc.Dlg, "Ruhezeit bitte als HH:MM eingeben (z. B. 22:00), oder leer lassen.", "Einstellungen",
                     [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
                 $tq.Focus() | Out-Null
+                $script:SettingsThen = $null
                 return
             }
         }
         $sc.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $sc.Dlg.Close()
     })
-    $dlg.Controls.Add($btnOk)
     $dlg.AcceptButton = $btnOk
     $dlg.CancelButton = $btnCancel
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 860), ($by + (S 78)))
+    $tSearch.Add_TextChanged({ Update-SettingsSearch })
+    # Enter in the search box must not press OK (the dialog key would come first)
+    $tSearch.Add_PreviewKeyDown({ param($sender, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.IsInputKey = $true } })
+    $tSearch.Add_KeyDown({
+        param($sender, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Update-SettingsSearch }
+    })
+    $dlg.Add_KeyDown({
+        param($sender, $e)
+        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) { $e.SuppressKeyPress = $true; $script:SettingsCtl.Search.Focus() | Out-Null }
+    })
+    $dlg.Add_FormClosing({
+        param($sender, $e)
+        $sc = $script:SettingsCtl
+        if ($null -eq $sc) { return }
+        if ($sender.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+            $script:Config.SettingsW = $sender.ClientSize.Width
+            $script:Config.SettingsH = $sender.ClientSize.Height
+        }
+        $script:Config.SettingsPage = [string]$sc.Cur
+    })
+
+    $orig = @{ UiStyle = [string]$cfg.UiStyle; Theme = [string]$cfg.Theme; AccentColor = [string]$cfg.AccentColor; AccentHex = [string]$cfg.AccentHex; RowDensity = [string]$cfg.RowDensity; ZebraRows = [bool]$cfg.ZebraRows }
+    $pageIds = @($pages | ForEach-Object { $_.Id })
+    # (handlers reach the controls through script scope, not via the caller's locals)
+    $script:SettingsCtl = @{
+        Dlg = $dlg; Nav = $nav; Pages = $pagePanels; PageIds = $pageIds; Cur = ""; Reg = $reg; Search = $tSearch; Hits = $null; Building = $true
+        SmaF = $nSmaF; SmaS = $nSmaS; Slow = $nSlow; Refresh = $nRefresh; PushState = $lPushState; QFrom = $tQFrom; QTo = $tQTo; Ok = $btnOk; Reset = $btnReset
+        Style = $cbStyle; Cards = $styleCards; Theme = $cbTheme; Accent = $cbAccent; Rows = $cbRows; Zebra = $chkZebra
+    }
+    # style cards show the current choice (the preview is still off while building)
+    $cbStyle.SelectedIndex = -1
+    $cbStyle.SelectedIndex = $(if ([string]$cfg.UiStyle -eq "Fresh") { 1 } else { 0 })
+    $start = if ($Page -and $pageIds -contains $Page) { $Page } elseif ($pageIds -contains [string]$cfg.SettingsPage) { [string]$cfg.SettingsPage } else { "Design" }
+    Show-SettingsPage $start
+    Update-SettingsMarkers
+    $script:SettingsCtl.Building = $false
+    if ($Search) {
+        $script:SettingsInitialSearch = $Search
+        $dlg.Add_Shown({
+            $sc = $script:SettingsCtl
+            if ($null -eq $sc) { return }
+            $sc.Search.Text = [string]$script:SettingsInitialSearch
+            $sc.Search.SelectionStart = $sc.Search.Text.Length
+        })
+    }
+    $dlg.Add_Shown({ param($sender, $e) $sender.Activate() })
 
     $script:SettingsAfter = $null
+    $script:SettingsThen = $null
     Apply-Language $dlg
-    $res = $dlg.ShowDialog($form)
-    $script:SettingsCtl = $null
+    try { $res = $dlg.ShowDialog($form) } finally { $script:SettingsCtl = $null }
     # v4.5: data actions run after the settings window is gone (changes there are discarded)
     $after = $script:SettingsAfter
     $script:SettingsAfter = $null
-    if ($null -ne $after) { $dlg.Dispose(); & $after; return }
-    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { $dlg.Dispose(); return }
+    $then = $script:SettingsThen
+    $script:SettingsThen = $null
+    if ($res -ne [System.Windows.Forms.DialogResult]::OK) {
+        # undo the live preview
+        foreach ($k in @($orig.Keys)) { $cfg.$k = $orig[$k] }
+        $dlg.Dispose()
+        Save-JsonState -Path $script:ConfigPath -Data $cfg
+        try { Apply-ThemeToAllControls } catch { }
+        if ($null -ne $after) { & $after }
+        return
+    }
 
     $needRefresh = ([int]$nSmaF.Value -ne [int]$cfg.SmaFastPeriod) -or ([int]$nSmaS.Value -ne [int]$cfg.SmaSlowPeriod) -or ([int]$nRsi.Value -ne [int]$cfg.RsiPeriod)
     $cfg.RefreshSeconds        = [int]$nRefresh.Value
@@ -13946,7 +14383,6 @@ function Show-SettingsDialog {
     $cfg.NotifyEarnings        = [bool]$chkEarn.Checked
     $cfg.QuietFrom             = $tQFrom.Text.Trim()
     $cfg.QuietTo               = $tQTo.Text.Trim()
-    # v4.0
     $newLayout                 = [string]$cbLayout.SelectedItem
     $cfg.Opacity               = [int]$nOpacity.Value
     $cfg.TerminalShowWatch     = [bool]$chkTWatch.Checked
@@ -13958,7 +14394,6 @@ function Show-SettingsDialog {
     $newLang = if ([string]$cbLang.SelectedItem -eq "English") { "EN" } else { "DE" }
     $langChanged = ($newLang -ne [string]$cfg.Language)
     $cfg.Language              = $newLang
-    # v4.6
     if ([string]$cbMa.SelectedItem -ne [string]$cfg.MaType -or [string]$cbLow.SelectedItem -ne [string]$cfg.LowerPanel) { $needRefresh = $true }
     $cfg.MaType                = [string]$cbMa.SelectedItem
     $cfg.LowerPanel            = [string]$cbLow.SelectedItem
@@ -13972,7 +14407,9 @@ function Show-SettingsDialog {
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
     $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked
-    # v4.9
+    $cfg.RiskFreePct           = [double]$nRf.Value
+    $newCur = [string]$cbCur.SelectedItem
+    $curChanged = if ($newCur -eq "Auto") { -not [bool]$cfg.AutoCurrency } else { [bool]$cfg.AutoCurrency -or $newCur -ne [string]$cfg.Currency }
     $newMono  = [string]$cbMono.SelectedItem
     $newScale = [int](([string]$cbScale.SelectedItem) -replace '[^0-9]', '')
     $fontChanged = ($newMono -ne [string]$cfg.MonoFont) -or ($newScale -ne [int]$cfg.FontScale)
@@ -13992,6 +14429,7 @@ function Show-SettingsDialog {
     else { Set-TransientStatus "Tastenkürzel '$hkNew' nicht erkannt - z. B. Ctrl+Alt+W" 6; $hkChanged = $false }
     $autoWanted = [bool]$chkAuto.Checked
     $dlg.Dispose()
+    $script:SettingsIndexCache = $null
     if ($autoWanted -ne $autoNow) {
         $aErr = Set-Autostart -Enable $autoWanted
         if ($aErr) {
@@ -14017,7 +14455,8 @@ function Show-SettingsDialog {
     Save-JsonState -Path $script:ConfigPath -Data $cfg
     Apply-ThemeToAllControls
     Apply-Layout $newLayout
-    if ($needRefresh) { Refresh-AllMarketData -Force }
+    if ($curChanged) { Set-ActiveCurrency -NewCurrency $newCur }
+    elseif ($needRefresh) { Refresh-AllMarketData -Force }
     Set-TransientStatus "Einstellungen gespeichert" 3
     if ($langChanged -and (Confirm-Action -Text "Die Sprache wirkt nach einem Neustart. Jetzt neu starten? / Restart now to switch the language?" -Title "Sprache / Language")) {
         Restart-Widget
@@ -14031,6 +14470,59 @@ function Show-SettingsDialog {
         $hm = Register-GlobalHotkey
         if ($hm -and $hm -ne "aus") { Set-TransientStatus "Tastenkürzel: $hm" 6 }
     }
+    if ($null -ne $then) { & $then }
+}
+
+# ---- v5.3: settings as a file (e.g. to move to a new PC) ----
+function Export-SettingsFile {
+    param([string]$Path = "")
+    if (-not $Path) {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "Einstellungen (*.json)|*.json"
+        $sfd.FileName = "TerminalWidget-Einstellungen-{0}.json" -f (Get-Date -Format "yyyyMMdd")
+        $sfd.Title = Tr "Einstellungen exportieren"
+        if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { $sfd.Dispose(); return "" }
+        $Path = $sfd.FileName
+        $sfd.Dispose()
+    }
+    try {
+        $x = ConvertTo-SettingsExport -Config $script:Config -Version $script:AppVersion
+        [System.IO.File]::WriteAllText($Path, ($x | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+        Write-WidgetLog "Settings exported: $Path"
+        Set-TransientStatus ("Einstellungen exportiert: {0}" -f [System.IO.Path]::GetFileName($Path)) 4
+        return $Path
+    } catch {
+        Write-WidgetLog "Settings export failed: $($_.Exception.Message)" "ERROR"
+        Show-InfoBox ("Export fehlgeschlagen: {0}" -f $_.Exception.Message) "Einstellungen"
+        return ""
+    }
+}
+
+function Import-SettingsFile {
+    param([string]$Path = "", [switch]$NoRestart)
+    if (-not $Path) {
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Filter = "Einstellungen (*.json)|*.json|Alle Dateien (*.*)|*.*"
+        $ofd.Title = Tr "Einstellungen importieren"
+        if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { $ofd.Dispose(); return $false }
+        $Path = $ofd.FileName
+        $ofd.Dispose()
+    }
+    $data = $null
+    try { $data = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json } catch { $data = $null }
+    $r = ConvertFrom-SettingsExport -Data $data -Defaults $script:ConfigDefaults
+    if (-not $r.Ok) { Show-InfoBox ($(if ($r.Error) { $r.Error } else { "Die Datei konnte nicht gelesen werden." })) "Einstellungen importieren"; return $false }
+    $txt = "{0} Einstellungen aus '{1}' übernehmen?`r`n`r`nDepots, Alarme und Transaktionen bleiben unverändert. Vorher wird ein Backup angelegt." -f $r.Settings.Count, [System.IO.Path]::GetFileName($Path)
+    if (-not (Confirm-Action -Text $txt -Title "Einstellungen importieren")) { return $false }
+    [void](Backup-DataFiles -Reason "vor_einstellungen_import")
+    foreach ($k in @($r.Settings.Keys)) { $script:Config.$k = $r.Settings[$k] }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    $script:SettingsIndexCache = $null
+    Write-WidgetLog ("Settings imported from {0}: {1} keys, skipped {2}" -f $Path, $r.Settings.Count, (@($r.Skipped) -join ","))
+    if ($NoRestart -or $script:SmokeMode) { try { Apply-ThemeToAllControls } catch { }; return $true }
+    if (Confirm-Action -Text "Einstellungen übernommen. Das Widget startet jetzt neu, damit alles wirkt." -Title "Einstellungen importieren") { Restart-Widget }
+    else { Apply-ThemeToAllControls }
+    return $true
 }
 
 function Show-GlossaryDialog {
@@ -14193,6 +14685,16 @@ New in 5.2
 STYLE           Refined / Fresh design (also Settings > Design:
                 row height, zebra rows, icons, ticker bar speed)
 THEME GRAPHITE  neutral grey theme; accent colour "Windows"
+
+New in 5.3
+Settings        eight pages: Display, Design, Layout, Data & refresh,
+                Alerts & notifications, Depot, Keyboard & commands, Other
+Style           at the top of Settings > Design; also in the layout
+                menu (top right), the tray menu and the STYLE command
+Search          finds settings on every page ("style", "push", ...);
+                a dot = changed from default, "Reset page" button
+Ctrl+K          also finds every setting (SET ...) and menu entry (MENU ...)
+Other           export / import the settings as a file (new PC)
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -14308,6 +14810,18 @@ Neu in 5.2
 STYLE           Design Refined / Fresh (auch Einstellungen > Design:
                 Zeilenhöhe, Zebra-Zeilen, Symbole, Tempo der Laufleiste)
 THEME GRAPHITE  neutrales Grau; Akzentfarbe "Windows"
+
+Neu in 5.3
+Einstellungen   acht Seiten: Darstellung, Design, Layout, Daten &
+                Aktualisierung, Alarme & Benachrichtigungen, Depot,
+                Tastatur & Befehle, Sonstiges
+Stil            ganz oben in Einstellungen > Design; auch im Layout-Menü
+                (rechts oben), im Tray-Menü und mit dem Befehl STYLE
+Suchen          findet Einstellungen auf allen Seiten ("stil", "push" ...);
+                Punkt = vom Standard geändert, Knopf "Seite zurücksetzen"
+Strg+K          findet auch jede Einstellung (SET ...) und jeden
+                Menüeintrag (MENU ...)
+Sonstiges       Einstellungen als Datei exportieren / importieren (neuer PC)
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
@@ -14410,10 +14924,19 @@ $btnCompact.Add_Click({
 })
 $layoutMenu.Add_ItemClicked({
     param($sender, $e)
-    $tag = [string]$e.ClickedItem.Tag
+    $sender.Close()
+    Invoke-LayoutMenuTag ([string]$e.ClickedItem.Tag)
+})
+function Invoke-LayoutMenuTag {
+    # v5.3: shared by the menu and by MENU <name> in Ctrl+K
+    param([string]$Tag)
     if ($tag -like "Layout:*") {
-        $sender.Close()
         Apply-Layout ($tag.Substring(7))
+    } elseif ($tag -like "Style:*") {
+        [void](Invoke-TerminalCommand ("STYLE " + $tag.Substring(6).ToUpper()))
+        Update-LayoutButton
+    } elseif ($tag -eq "Settings") {
+        Show-SettingsDialog
     } elseif ($tag -eq "Opt:Watch" -or $tag -eq "Opt:Portfolio") {
         if ($tag -eq "Opt:Watch") { $script:Config.TerminalShowWatch = -not [bool]$script:Config.TerminalShowWatch }
         else { $script:Config.TerminalShowPortfolio = -not [bool]$script:Config.TerminalShowPortfolio }
@@ -14421,7 +14944,7 @@ $layoutMenu.Add_ItemClicked({
         Update-LayoutButton
         if ([string]$script:Config.Layout -eq "Terminal") { Update-MainLayout }
     }
-})
+}
 
 $btnTray.Add_Click({ $form.Hide() })
 function Show-MainWindow {
@@ -14434,6 +14957,7 @@ function Show-MainWindow {
 $miShow.Add_Click({ Show-MainWindow })
 $trayMenu.Add_Opening({
     foreach ($it in $miLayout.DropDownItems) { $it.Checked = ([string]$it.Tag -eq [string]$script:Config.Layout) }
+    foreach ($it in $miStyle.DropDownItems) { $it.Checked = ([string]$it.Tag -eq [string]$script:Config.UiStyle) }
 })
 $miRefresh.Add_Click({ Refresh-AllMarketData -Force; Evaluate-GlobalAlerts; Update-AllUiViews })
 $miExit.Add_Click({ $trayIcon.Visible = $false; $form.Close() })
@@ -16539,6 +17063,70 @@ function Invoke-SmokeTest {
     [void](Invoke-TerminalCommand "STYLE FRESH")
     Invoke-SmokeStep "Design ticker analysis" { & $probeRun { Show-TickerAnalysis "NVDA" } { & $script:SmokeShot "07-fresh-ticker-analysis" ([System.Windows.Forms.Form]::ActiveForm); "" } 8000 } 10000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
+    # v5.3: settings pages, style findable, search, markers, reset, preview, Ctrl+K, settings file
+    Invoke-SmokeStep "Settings pages" {
+        $styleBefore = [string]$script:Config.UiStyle
+        & $probeRun { Show-SettingsDialog -Page "Display" } {
+            $sc = $script:SettingsCtl
+            if ($null -eq $sc) { return "window not open" }
+            if ($sc.Pages.Count -ne 8) { return "pages: $($sc.Pages.Count)" }
+            $wa = [System.Windows.Forms.Screen]::FromControl($sc.Dlg).WorkingArea
+            if ($sc.Dlg.Height -gt $wa.Height) { return "window $($sc.Dlg.Height) px is taller than the screen ($($wa.Height) px)" }
+            foreach ($q in @("stil", "Style", "Fresh", "Refined")) {
+                Show-SettingsPage "Display"
+                $sc.Search.Text = $q; [System.Windows.Forms.Application]::DoEvents()
+                if ($sc.Cur -ne "Design") { return "search '$q' opened page '$($sc.Cur)'" }
+                }
+            $sc.Search.Text = ""
+            $eS = @($sc.Reg | Where-Object { $_.Key -eq "UiStyle" })[0]
+            $sc.Style.SelectedIndex = 0; [System.Windows.Forms.Application]::DoEvents()
+            if ($script:UiSpec.Fresh -or $eS.Changed) { return "live preview did not switch to Refined" }
+            $sc.Style.SelectedIndex = 1; [System.Windows.Forms.Application]::DoEvents()
+            if (-not $script:UiSpec.Fresh) { return "live preview did not switch to Fresh" }
+            if (-not $eS.Changed -or -not $eS.Marker.Visible) { return "no 'changed' marker for Fresh" }
+            & $script:SmokeShot "10-settings-design-page" $sc.Dlg
+            Show-SettingsPage "Design"
+            $sc.Reset.PerformClick(); [System.Windows.Forms.Application]::DoEvents()
+            if ($sc.Style.SelectedIndex -ne 0 -or $eS.Changed -or $script:UiSpec.Fresh) { return "reset page did not restore the style" }
+            foreach ($id in @($sc.PageIds)) { Show-SettingsPage $id; [System.Windows.Forms.Application]::DoEvents() }
+            $sc.Search.Text = "push"; [System.Windows.Forms.Application]::DoEvents()
+            if ($sc.Cur -ne "Alerts") { return "search 'push' opened page '$($sc.Cur)'" }
+            & $script:SmokeShot "11-settings-search" $sc.Dlg
+            return ""
+        } 2500
+        if ([string]$script:Config.UiStyle -ne $styleBefore) { throw "Cancel did not undo the preview ($($script:Config.UiStyle))" }
+    } 6000
+    Invoke-SmokeStep "SET opens the right page" {
+        & $probeRun { [void](Invoke-TerminalCommand "SET ZEBRA") } {
+            $sc = $script:SettingsCtl
+            if ($null -eq $sc) { return "window not open" }
+            if ($sc.Cur -ne "Design") { return "SET ZEBRA opened '$($sc.Cur)'" }
+            return ""
+        } 1500
+    } 3500
+    Invoke-SmokeStep "Settings in Ctrl+K" {
+        $script:SettingsIndexCache = $null
+        $ix = @(Get-SettingsPaletteEntries)
+        if ($ix.Count -lt 40) { throw "only $($ix.Count) settings in the index" }
+        if (@($ix | Where-Object { $_.Text -eq "SET STIL" }).Count -eq 0) { throw "SET STIL missing" }
+        if (@(Get-MenuPaletteEntries).Count -lt 8) { throw "menu entries missing" }
+        $sug = @(Get-CommandSuggestions -Text "zebra" -Extra (Get-PaletteExtras) | ForEach-Object { $_.Text })
+        if (@($sug | Where-Object { $_ -like "SET ZEBRA*" }).Count -eq 0) { throw "'zebra' finds no setting: $($sug -join ', ')" }
+        $m = Invoke-MenuEntry "Stil: Fresh"; & $pump
+        if ($m -or -not $script:UiSpec.Fresh) { throw "MENU Stil: Fresh failed ($m)" }
+        $m = Invoke-MenuEntry "Stil > Refined"; & $pump
+        if ($m -or $script:UiSpec.Fresh) { throw "MENU Stil > Refined (tray) failed ($m)" }
+    }
+    Invoke-SmokeStep "Settings file" {
+        $tmp = Join-Path $env:TEMP ("tw-settings-{0}.json" -f $PID)
+        $themeBefore = [string]$script:Config.Theme
+        if (-not (Export-SettingsFile -Path $tmp)) { throw "export failed" }
+        $script:Config.Theme = "Light"
+        if (-not (Import-SettingsFile -Path $tmp -NoRestart)) { throw "import failed" }
+        if ([string]$script:Config.Theme -ne $themeBefore) { throw "import did not restore the theme ($($script:Config.Theme))" }
+        Remove-Item $tmp -ErrorAction SilentlyContinue
+        & $pump
+    }
     Invoke-SmokeStep "Design analysis" { & $probeRun { Show-AnalysisDialog -Page "Bench" } { & $script:SmokeShot "09-fresh-analysis-bench" ([System.Windows.Forms.Form]::ActiveForm); "" } 9000 } 11000
     [void](Invoke-TerminalCommand "STYLE REFINED")
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
