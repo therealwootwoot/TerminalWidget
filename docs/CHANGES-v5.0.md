@@ -77,5 +77,8 @@ Data format version 5: on the first start the widget makes a backup of all data 
 ### Back where you were
 - A list shown as a full page (Terminal) and an open Analyse window come back after a restart; `P` opens Analyse on the page you used last.
 
+### Help
+- `H` now opens a scrollable, resizable help window (the list had outgrown a message box) with a "Neu in 5.0" section.
+
 ### Tests
-- 4 new Pester tests (divider percentage, split widths, groups, settings search); the UI smoke test drags the chart height, checks the full-page memory, filters the watchlist by a group via the right-click menu and shows / hides the hover card.
+- 4 new Pester tests (divider percentage, split widths, groups, settings search); the UI smoke test drags the chart height, checks the full-page memory, filters the watchlist by a group via the right-click menu, shows / hides the hover card, types into the settings search and opens the help window in both languages.

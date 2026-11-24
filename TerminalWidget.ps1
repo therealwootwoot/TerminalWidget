@@ -13143,6 +13143,36 @@ function Show-GlossaryDialog {
     $dlg.Dispose()
 }
 
+# v5.0: the help outgrew a message box - scrollable, resizable window
+function Show-HelpTextDialog {
+    param([string]$Title, [string]$Text)
+    $p = $script:Pal
+    $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $dlg = New-DialogForm -Title $Title -W ([math]::Min((S 640), $wa.Width - 40)) -H ([math]::Min((S 640), $wa.Height - 60))
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 420), (S 300))
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.Multiline = $true; $tb.ReadOnly = $true; $tb.WordWrap = $false
+    $tb.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
+    $tb.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $tb.BackColor = $p.BodyBg; $tb.ForeColor = $p.Text; $tb.Font = $fontMono
+    $tb.Text = ($Text -replace "`r?`n", "`r`n")
+    $tb.SetBounds((S 12), (S 10), ($dlg.ClientSize.Width - (S 24)), ($dlg.ClientSize.Height - (S 56)))
+    $tb.Anchor = [System.Windows.Forms.AnchorStyles]"Top, Bottom, Left, Right"
+    $dlg.Controls.Add($tb)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = "Schließen"
+    $ok.SetBounds(($dlg.ClientSize.Width - (S 112)), ($dlg.ClientSize.Height - (S 38)), (S 100), (S 28))
+    $ok.Anchor = [System.Windows.Forms.AnchorStyles]"Bottom, Right"
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    Style-FlatButton -Btn $ok -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $dlg.Controls.Add($ok)
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $ok
+    $dlg.Add_Shown({ param($sender, $e) $sender.ActiveControl = $sender.AcceptButton })
+    [void]$dlg.ShowDialog($form)
+    $dlg.Dispose()
+}
+
 function Show-ShortcutHelp {
     if ([string]$script:Config.Language -eq "EN") {
         $txtEn = @"
@@ -13180,9 +13210,23 @@ IND MACD, PF <depot>, IMP, BAK, SET, PUSH, ABOUT, TOUR
 
 Right-click a column header = choose columns, drag = reorder.
 Hover over controls for explanations (glossary is German).
+
+New in 5.0
+K               Line / candles / Heikin-Ashi
+D               Draw a trend line (right-click chart > Draw:
+                horizontal line, Fibonacci, alert on a line)
+X               Compare - up to 3 tickers (right-click a ticker)
+Terminal        Drag the dividers between chart and lists,
+                double-click = default sizes
+Watchlist       Group drop-down next to the title,
+                right-click a ticker > To group
+Hover card      Rest the mouse on a ticker
+Settings        "Search:" at the bottom lights up matches
+Portfolio (v)   Cash account, savings plans
+P               Risk, target weights (rebalancing), heatmap
+Commands        CASH SPAR REBAL RISK HEAT DRAW H/T/F FULL PRIV
 "@
-        [System.Windows.Forms.MessageBox]::Show($form, $txtEn, "Help - $($script:AppTitle)",
-            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
     }
     $txt = @"
@@ -13267,9 +13311,23 @@ Rechtsklick auf Spaltenkopf = Spalten wählen, Kopf ziehen = Reihenfolge
 Alarme: Kurs, Tag%, RSI, SMA, Trailing-Stopp, EK%, 52W-Hoch/-Tief,
 Volumen-Spitze, Depotwert und Depot-Tag%. "Verlauf" zeigt alle
 Treffer. Handy-Push (ntfy/Telegram) und Ruhezeit: Einstellungen.
+
+Neu in 5.0
+K               Linie / Kerzen / Heikin-Ashi
+D               Trendlinie zeichnen (Rechtsklick Chart > Zeichnen:
+                Horizontale, Fibonacci, Alarm auf eine Linie)
+X               Vergleich - bis zu 3 Ticker (Rechtsklick auf Ticker)
+Terminal        Trennlinien zwischen Chart und Listen ziehen,
+                Doppelklick = Standardgrößen
+Watchlist       Gruppen-Auswahl neben dem Titel,
+                Rechtsklick auf Ticker > Zu Gruppe
+Infokarte       Maus auf einem Ticker ruhen lassen
+Einstellungen   "Suchen:" unten hebt passende Optionen hervor
+Portfolio (v)   Cash-Konto, Sparpläne
+P               Risiko, Ziel-Gewichte (Rebalancing), Heatmap
+Befehle         CASH SPAR REBAL RISK HEAT DRAW H/T/F FULL PRIV
 "@
-    [System.Windows.Forms.MessageBox]::Show($form, $txt, "Hilfe - $($script:AppTitle)",
-        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
 
 $btnToggleExt.Add_Click({ Toggle-ExtendedHours })
@@ -15305,6 +15363,7 @@ function Invoke-SmokeTest {
         "Movers" = { Show-MoversDialog }
         "FX" = { Show-FxDialog }
         "About" = { Show-AboutDialog }
+        "Help" = { Show-ShortcutHelp }
         "Restore" = { Show-RestoreDialog }
         "Compare" = { Show-CompareDialog }
         "Command palette" = { Show-CommandPalette -Initial "NV" }
@@ -15369,7 +15428,7 @@ function Invoke-SmokeTest {
     Invoke-SmokeStep "English settings" { Show-SettingsDialog } 2500
     Invoke-SmokeStep "English analysis" { Show-AnalysisDialog -Page "Div" } 2500
     Invoke-SmokeStep "English palette" { Show-CommandPalette -Initial "NVDA " } 2000
-    Invoke-SmokeStep "English help text" { if (-not (Get-Command Show-ShortcutHelp -ErrorAction SilentlyContinue)) { throw "help missing" } }
+    Invoke-SmokeStep "English help text" { Show-ShortcutHelp } 2000
     $script:Config.Language = "DE"
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
 
