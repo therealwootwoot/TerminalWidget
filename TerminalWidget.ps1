@@ -5379,6 +5379,9 @@ $cmbWlGroup.BackColor = $script:Pal.Input
 $cmbWlGroup.ForeColor = $script:Pal.Accent
 $cmbWlGroup.Font = $fontUi
 $cmbWlGroup.DropDownWidth = S 200
+# not a tab stop and focus goes back to the list after a choice - otherwise
+# single-key shortcuts (K, D, 1-6, ...) would type into the drop-down
+$cmbWlGroup.TabStop = $false
 $viewWatch.Controls.Add($cmbWlGroup)
 Set-Tip $cmbWlGroup "Gruppe anzeigen: Alle oder eine eigene Gruppe. Ticker per Rechtsklick > 'Zu Gruppe' einsortieren."
 $script:WlGroupKeys = New-Object System.Collections.Generic.List[string]
@@ -5442,6 +5445,7 @@ $cmbWlGroup.Add_SelectionChangeCommitted({
         return
     }
     Set-WatchGroup $k
+    if ($dgvWatchlist.CanFocus) { [void]$dgvWatchlist.Focus() }
 })
 
 $btnWlAddActive = New-Object System.Windows.Forms.Button
@@ -15181,7 +15185,7 @@ function Invoke-SmokeTest {
         $tradeTips = @($script:LastChartLayout.Legends | Where-Object { [string]$_.Tip -like "Kauf*" })
         if (@($script:ActiveSeries).Count -ge 2 -and $tradeTips.Count -eq 0) { throw "today's buy is not drawn as a marker" }
         & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::K)); & $pump
-        if ([string]$script:Config.ChartType -ne "Candle") { throw "K did not cycle the chart type ($($script:Config.ChartType))" }
+        if ([string]$script:Config.ChartType -ne "Candle") { $acN = if ($form.ActiveControl) { $form.ActiveControl.GetType().Name + "/" + $form.ActiveControl.Name } else { "none" }; throw "K did not cycle the chart type ($($script:Config.ChartType), focus $acN)" }
         $script:Config.ChartType = "Line"; Update-AllUiViews
     }
     Invoke-SmokeStep "Compare three" {
