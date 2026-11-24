@@ -4958,3 +4958,72 @@ function Get-DialogPlacement {
     }
     return $null
 }
+
+# ---- v5.5: chart - percent axis, drag zoom, zones; daily history cache ----
+function Format-PctAxisLabel {
+    # price -> change since the first visible bar ("+3.2%")
+    param([double]$Value, [double]$Base)
+    if ($Base -le 0 -or [double]::IsNaN($Value)) { return "" }
+    $pc = ($Value / $Base - 1) * 100
+    if ([math]::Abs($pc) -lt 0.05) { return "0%" }
+    $fmt = if ([math]::Abs($pc) -ge 100) { "{0:+0;-0}%" } else { "{0:+0.0;-0.0}%" }
+    return ($fmt -f $pc)
+}
+
+function Get-ZoomWindow {
+    # Ctrl + drag from bar A to bar B (absolute indices) -> @{ Count; Offset }
+    # for the chart view (Offset = bars hidden on the right); $null if too small
+    param([int]$A, [int]$B, [int]$Total, [int]$MinBars = 10)
+    if ($Total -lt 2) { return $null }
+    $lo = [math]::Max(0, [math]::Min($A, $B)); $hi = [math]::Min($Total - 1, [math]::Max($A, $B))
+    if ($hi - $lo + 1 -lt 3) { return $null }
+    $cnt = $hi - $lo + 1
+    if ($cnt -lt $MinBars) {
+        $mid = ($lo + $hi) / 2.0
+        $cnt = [math]::Min($Total, $MinBars)
+        $lo = [int][math]::Round($mid - ($cnt - 1) / 2.0)
+        $lo = [math]::Max(0, [math]::Min($Total - $cnt, $lo))
+        $hi = $lo + $cnt - 1
+    }
+    if ($cnt -ge $Total) { return [PSCustomObject]@{ Count = 0; Offset = 0 } }
+    return [PSCustomObject]@{ Count = $cnt; Offset = ($Total - 1 - $hi) }
+}
+
+function Test-PointInZone {
+    # zone drawing: inside the rectangle, or within Tol of its border
+    param([double]$X, [double]$Y, [double]$X1, [double]$Y1, [double]$X2, [double]$Y2, [double]$Tol = 4)
+    $l = [math]::Min($X1, $X2) - $Tol; $r = [math]::Max($X1, $X2) + $Tol
+    $t = [math]::Min($Y1, $Y2) - $Tol; $b = [math]::Max($Y1, $Y2) + $Tol
+    return ($X -ge $l -and $X -le $r -and $Y -ge $t -and $Y -le $b)
+}
+
+function ConvertTo-DailyCacheEntry {
+    # daily bars + signals of one ticker, as stored in daily_cache.json
+    param($Bars, $Sig, [string]$Day)
+    if ($null -eq $Bars) { return $null }
+    $r2 = { param($a) @(@($a) | ForEach-Object { [math]::Round([double]$_, 4) }) }
+    $sup = [double]::NaN; $res = [double]::NaN
+    if ($null -ne $Sig -and $null -ne $Sig.Support) { $sup = [double]$Sig.Support.Support; $res = [double]$Sig.Support.Resistance }
+    return [PSCustomObject]@{
+        Day = $Day; Currency = [string]$Bars.Currency
+        Dates = @($Bars.Dates); Close = (& $r2 $Bars.Close); High = (& $r2 $Bars.High); Low = (& $r2 $Bars.Low); Volume = @(@($Bars.Volume) | ForEach-Object { [math]::Round([double]$_) })
+        Score = $(if ($null -ne $Sig) { [int]$Sig.Score } else { 0 }); Summary = $(if ($null -ne $Sig) { [string]$Sig.Summary } else { "" })
+        Positive = $(if ($null -ne $Sig) { [int]$Sig.Positive } else { 0 }); Negative = $(if ($null -ne $Sig) { [int]$Sig.Negative } else { 0 })
+        Support = $(if ([double]::IsNaN($sup)) { $null } else { [math]::Round($sup, 4) }); Resistance = $(if ([double]::IsNaN($res)) { $null } else { [math]::Round($res, 4) })
+    }
+}
+
+function Test-DailyCacheFresh {
+    param($Entry, [string]$Day)
+    return ($null -ne $Entry -and [string]$Entry.Day -eq $Day -and @($Entry.Close).Count -ge 30)
+}
+
+function Format-SignalCell {
+    # watchlist column: "+4" / "-2" / "0" with a sign for the colour
+    param($Entry)
+    if ($null -eq $Entry -or @($Entry.Close).Count -lt 30) { return [PSCustomObject]@{ Text = "-"; Sign = 0; Tip = "" } }
+    $s = [int]$Entry.Score
+    $t = if ($s -gt 0) { "+$s" } else { "$s" }
+    $tip = "{0} ({1} positiv, {2} negativ) - Stand {3}" -f [string]$Entry.Summary, [int]$Entry.Positive, [int]$Entry.Negative, [string]$Entry.Day
+    return [PSCustomObject]@{ Text = $t; Sign = [math]::Sign($s); Tip = $tip }
+}

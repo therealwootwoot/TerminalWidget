@@ -2331,6 +2331,47 @@ Describe "Privacy, export, dialog places (v5.5)" {
     }
 }
 
+Describe "Chart and signal cache (v5.5)" {
+    It "labels the percent axis from the first visible bar" {
+        Format-PctAxisLabel -Value 110 -Base 100 | Should -Be ("{0:+0.0;-0.0}%" -f 10.0)
+        Format-PctAxisLabel -Value 100.01 -Base 100 | Should -Be "0%"
+        Format-PctAxisLabel -Value 350 -Base 100 | Should -Be "+250%"
+        Format-PctAxisLabel -Value 10 -Base 0 | Should -Be ""
+    }
+    It "turns a Ctrl-drag into a zoom window" {
+        $z = Get-ZoomWindow -A 40 -B 80 -Total 100
+        $z.Count | Should -Be 41
+        $z.Offset | Should -Be 19
+        (Get-ZoomWindow -A 80 -B 40 -Total 100).Offset | Should -Be 19
+        (Get-ZoomWindow -A 95 -B 99 -Total 100 -MinBars 10).Count | Should -Be 10
+        (Get-ZoomWindow -A 95 -B 99 -Total 100 -MinBars 10).Offset | Should -Be 0
+        Get-ZoomWindow -A 5 -B 6 -Total 100 | Should -BeNullOrEmpty
+        (Get-ZoomWindow -A 0 -B 99 -Total 100).Count | Should -Be 0
+    }
+    It "hits a zone inside and on its border" {
+        Test-PointInZone -X 50 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeTrue
+        Test-PointInZone -X 103 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeTrue
+        Test-PointInZone -X 120 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeFalse
+    }
+    It "stores daily bars and signals and knows when they are stale" {
+        $bars = [PSCustomObject]@{ Currency = "USD"; Dates = @(1..40 | ForEach-Object { "2026-01-{0:00}" -f ($_ % 28 + 1) }); Close = @(1..40 | ForEach-Object { 100.123456 + $_ }); High = @(1..40 | ForEach-Object { 102 + $_ }); Low = @(1..40 | ForEach-Object { 99 + $_ }); Volume = @(1..40 | ForEach-Object { 1000.4 }) }
+        $sig = Get-TechnicalSignals -Closes ([double[]]$bars.Close) -Highs ([double[]]$bars.High) -Lows ([double[]]$bars.Low)
+        $e = ConvertTo-DailyCacheEntry -Bars $bars -Sig $sig -Day "2026-11-24"
+        $e.Close[0] | Should -Be 101.1235
+        $e.Volume[0] | Should -Be 1000
+        $e.Score | Should -Be $sig.Score
+        Test-DailyCacheFresh -Entry $e -Day "2026-11-24" | Should -BeTrue
+        Test-DailyCacheFresh -Entry $e -Day "2026-11-25" | Should -BeFalse
+        Test-DailyCacheFresh -Entry $null -Day "2026-11-24" | Should -BeFalse
+        ($e | ConvertTo-Json -Depth 4 | ConvertFrom-Json).Day | Should -Be "2026-11-24"
+    }
+    It "formats the signal column" {
+        (Format-SignalCell ([PSCustomObject]@{ Close = @(1..30); Score = 3; Summary = "überwiegend positiv"; Positive = 4; Negative = 1; Day = "2026-11-24" })).Text | Should -Be "+3"
+        (Format-SignalCell ([PSCustomObject]@{ Close = @(1..30); Score = -2; Summary = "gemischt"; Positive = 1; Negative = 3; Day = "x" })).Sign | Should -Be -1
+        (Format-SignalCell $null).Text | Should -Be "-"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
