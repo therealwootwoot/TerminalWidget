@@ -1789,6 +1789,96 @@ Describe "Polish (v4.9.5)" {
     }
 }
 
+Describe "Depot tools (v5.0)" {
+    It "derives cash movements from new trades and the ledger" {
+        $tx = @(
+            [PSCustomObject]@{ Id = "old"; Date = "2026-01-02"; Ticker = "nvda"; Type = "Kauf"; Shares = 10; Price = 100; Fee = 5; Currency = "USD" },
+            [PSCustomObject]@{ Id = "b"; Date = "2026-03-01"; Ticker = "SAP.DE"; Type = "Kauf"; Shares = 2; Price = 200; Fee = 1; Currency = "EUR" },
+            [PSCustomObject]@{ Id = "s"; Date = "2026-04-01"; Ticker = "SAP.DE"; Type = "Verkauf"; Shares = 1; Price = 250; Fee = 1; Currency = "EUR" },
+            [PSCustomObject]@{ Id = "d"; Date = "2026-05-01"; Ticker = "MSFT"; Type = "Dividende"; Shares = 5; Price = 4; Fee = 0.6; Currency = "USD" }
+        )
+        $led = @([PSCustomObject]@{ Id = "c1"; Date = "2026-02-01"; Kind = "Start"; Amount = 1000; Currency = "EUR" })
+        $mv = @(Get-CashMovements -Transactions $tx -Entries $led -ExcludeIds @("old"))
+        $mv.Count | Should -Be 4
+        ($mv | ForEach-Object { $_.Kind }) -join "," | Should -Be "Start,Kauf,Verkauf,Dividende"
+        $mv[1].Amount | Should -Be -401
+        $mv[2].Amount | Should -Be 249
+        [math]::Round($mv[3].Amount, 2) | Should -Be 3.4
+        $b = Get-CashBalance -Movements $mv -Currency "EUR" -Rates @{ USD = 0.9 }
+        [math]::Round($b.Balance, 2) | Should -Be ([math]::Round(1000 - 401 + 249 + 3.4 * 0.9, 2))
+        (Get-CashBalance -Movements $mv -Currency "EUR" -Rates @{}).Missing | Should -Be @("USD")
+    }
+    It "computes returns without the deposits" {
+        # 100 -> 110 (+10 %), then +100 deposit -> 210, then 231 (+10 %)
+        $r = Get-FlowAdjustedReturns -Value @(100, 110, 210, 231) -Invested @(100, 100, 200, 200)
+        (@($r) | ForEach-Object { [math]::Round($_, 4) }) -join "," | Should -Be "0.1,0,0.1"
+        @(Get-FlowAdjustedReturns -Value @(100) -Invested @(100)).Count | Should -Be 0
+    }
+    It "rates risk: volatility, drawdown, best and worst" {
+        $s = Get-ReturnStats -Returns @(0.1, -0.2, 0.05, 0.1) -PeriodsPerYear 4 -RiskFreePct 0
+        [math]::Round($s.MaxDd, 2) | Should -Be -20
+        $s.DdPeak | Should -Be 0
+        $s.DdTrough | Should -Be 1
+        [math]::Round($s.Best, 2) | Should -Be 10
+        $s.WorstIdx | Should -Be 1
+        [math]::Round($s.Total, 2) | Should -Be ([math]::Round((1.1 * 0.8 * 1.05 * 1.1 - 1) * 100, 2))
+        $s.Vol | Should -BeGreaterThan 0
+        [double]::IsNaN((Get-ReturnStats -Returns @(0.1)).Vol) | Should -BeTrue
+        [math]::Round((Get-PeriodsPerYear -Dates @("2025-01-01", "2025-07-02", "2026-01-01")), 1) | Should -Be 2
+    }
+    It "measures beta and correlation" {
+        $b = @(0.01, -0.02, 0.03, 0.0, -0.01)
+        $r = @($b | ForEach-Object { 2 * $_ })
+        [math]::Round((Get-Beta -R $r -B $b), 6) | Should -Be 2
+        [math]::Round((Get-Correlation -A $r -B $b), 6) | Should -Be 1
+        [math]::Round((Get-Correlation -A $b -B @($b | ForEach-Object { -$_ })), 6) | Should -Be -1
+        [double]::IsNaN((Get-Correlation -A @(1, 2) -B @(1, 2))) | Should -BeTrue
+        $h = Get-DailyReturnsByDate -Dates @("a", "b", "c") -Closes @(100, 110, 99)
+        [math]::Round($h["c"], 4) | Should -Be -0.1
+        $m = Get-CorrelationMatrix -BySym @{ A = @{ d1 = 0.1; d2 = -0.1; d3 = 0.2 }; B = @{ d1 = 0.2; d2 = -0.2; d3 = 0.4 } } -MinCommon 3
+        ($m.Syms -join ",") | Should -Be "A,B"
+        [math]::Round($m.M[0, 1], 6) | Should -Be 1
+    }
+    It "plans a rebalancing with and without sales" {
+        $pos = @(@{ Sym = "A"; Value = 600; Price = 10 }, @{ Sym = "B"; Value = 400; Price = 20 }, @{ Sym = "C"; Value = 50; Price = 5 })
+        $p = Get-RebalancePlan -Positions $pos -Targets @{ A = 50; B = 50 } -Money 0
+        @($p.Rows).Count | Should -Be 2
+        ($p.Rows | Where-Object Sym -eq "A").Trade | Should -Be -100
+        ($p.Rows | Where-Object Sym -eq "B").Shares | Should -Be 5
+        [math]::Round($p.Left, 2) | Should -Be 0
+        $q = Get-RebalancePlan -Positions $pos -Targets @{ A = 50; B = 50 } -Money 100 -BuyOnly $true
+        ($q.Rows | Where-Object Sym -eq "A").Trade | Should -Be 0
+        ($q.Rows | Where-Object Sym -eq "B").Trade | Should -Be 100
+        $q.Left | Should -Be 0
+        $r = Get-RebalancePlan -Positions $pos -Targets @{ A = 40; B = 40 } -Money 0
+        $r.TargetSum | Should -Be 80
+        [math]::Round($r.Left, 2) | Should -Be 200
+    }
+    It "finds due savings plan dates and the close of that day" {
+        (Get-DueSavingsDates -Plan @{ Day = 5; Start = "2026-09-01"; LastBooked = "" } -Today "2026-11-24") -join "," | Should -Be "2026-09-05,2026-10-05,2026-11-05"
+        (Get-DueSavingsDates -Plan @{ Day = 5; Start = "2026-09-01"; LastBooked = "2026-10-05" } -Today "2026-11-24") -join "," | Should -Be "2026-11-05"
+        @(Get-DueSavingsDates -Plan @{ Day = 31; Start = "2026-11-01"; LastBooked = "" } -Today "2026-11-24").Count | Should -Be 0
+        (Get-DueSavingsDates -Plan @{ Day = 31; Start = "2026-10-01"; LastBooked = "" } -Today "2026-11-24") -join "," | Should -Be "2026-10-28"
+        $c = Get-CloseOnOrBefore -Dates @("2026-11-05", "2026-11-06", "2026-11-09") -Closes @(10, 11, 12) -Date "2026-11-08"
+        $c.Date | Should -Be "2026-11-06"
+        $c.Close | Should -Be 11
+        Get-CloseOnOrBefore -Dates @("2026-11-05") -Closes @(10) -Date "2026-11-01" | Should -BeNullOrEmpty
+    }
+    It "lays out a squarified treemap that fills the area" {
+        $r = Get-TreemapRects -Values @(6, 6, 4, 3, 2, 2, 1) -X 0 -Y 0 -W 6 -H 4
+        $r[0] | Should -Be @(0, 0, 3, 2)
+        $r[1] | Should -Be @(0, 2, 3, 2)
+        $area = 0.0; foreach ($x in $r) { $area += $x[2] * $x[3] }
+        [math]::Round($area, 6) | Should -Be 24
+        $z = Get-TreemapRects -Values @(5, 0) -X 0 -Y 0 -W 10 -H 10
+        $z[1] | Should -Be @(0, 0, 0, 0)
+        $z[0] | Should -Be @(0, 0, 10, 10)
+    }
+    It "knows the depot commands" {
+        foreach ($c in @("CASH", "SPAR", "REBAL", "RISK", "HEAT")) { (ConvertFrom-TerminalCommand $c).Kind | Should -Be "Global" }
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

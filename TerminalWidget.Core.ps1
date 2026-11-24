@@ -1230,6 +1230,12 @@ function Get-GlossaryEntries {
     & $add "HOLIDAY" "Börsenfeiertag" "An diesem Tag wird nicht gehandelt." "Regelbasierte Feiertagskalender (inkl. Ostern) für NYSE/Nasdaq, Xetra, SIX, LSE und Wiener Börse. Verkürzte Handelstage kommen von Yahoo."
     & $add "BACKUP" "Backup" "Kopie deiner Daten." "Kopie von Einstellungen, Portfolio, Alarmen und Transaktionen im Datenordner unter backups. Die letzten 10 werden behalten."
     # v4.1: portfolio analytics
+    & $add "SHARPE" "Sharpe-Quote" "Rendite über dem risikolosen Zins je Einheit Schwankung." "(Rendite p.a. - risikoloser Zins) / Volatilität p.a. Über 1 gilt als gut, unter 0 heißt: weniger als der sichere Zins. Hängt stark vom gewählten Zeitraum ab."
+    & $add "DRAWDOWN" "Max. Drawdown" "Größter Rückgang vom bisherigen Hoch bis zum folgenden Tief." "Zeigt, wie viel ein Depot zwischenzeitlich verloren hat, bevor es sich erholt hat - aus der zeitgewichteten Wertentwicklung (Einzahlungen herausgerechnet)."
+    & $add "VOLA" "Volatilität" "Schwankung der Tagesrenditen, aufs Jahr hochgerechnet." "Standardabweichung der Tagesrenditen mal Wurzel der Handelstage pro Jahr. 15 % heißt grob: in zwei von drei Jahren liegt das Ergebnis innerhalb von ±15 % um den Durchschnitt."
+    & $add "BETA" "Beta" "Wie stark das Depot mit der Benchmark mitgeht." "1 = bewegt sich im Schnitt wie die Benchmark, 1,5 = um 50 % stärker, 0,5 = halb so stark. Aus den Tagesrenditen im gewählten Zeitraum."
+    & $add "REBAL" "Rebalancing" "Zurück zu den gewünschten Anteilen kaufen / verkaufen." "Für Positionen mit Ziel-Anteil rechnet das Widget aus, wie viel zu kaufen oder zu verkaufen wäre. 'Nur kaufen' verteilt neues Geld (und Cash) auf die untergewichteten Positionen, ohne zu verkaufen."
+    & $add "CASH" "Cash-Konto" "Kontostand des Depots, bewegt durch Käufe, Verkäufe, Dividenden und Einzahlungen." "Beim Einschalten trägst du den heutigen Kontostand ein. Danach ziehen neue Käufe Kurs x Stück + Gebühr ab, Verkäufe bringen den Erlös, Dividenden den Nettobetrag. Ein- und Auszahlungen, Zinsen und Gebühren bucht man im Cash-Fenster."
     & $add "XIRR" "Rendite p.a. (XIRR)" "Geldgewichtete Jahresrendite deiner Ein- und Auszahlungen." "Interner Zinsfuß: die Jahresrendite, die alle Käufe (Auszahlungen), Verkäufe und Dividenden (Einzahlungen) plus den heutigen Wert genau ausgleicht. Berücksichtigt, wann wie viel Geld investiert war. Bei weniger als 30 Tagen Haltedauer nicht aussagekräftig und daher ausgeblendet."
     & $add "NETINVEST" "Netto investiert" "Käufe minus Verkaufserlöse, zum Kurs am Buchungstag." "Summe aller Käufe inklusive Gebühren minus aller Verkaufserlöse, jeweils mit dem Wechselkurs am Buchungstag in die Basiswährung umgerechnet. Liegt die Wertkurve darüber, bist du insgesamt im Plus."
     & $add "BENCHMARK" "Benchmark (Schattendepot)" "Was dein Geld im Vergleichsindex gemacht hätte." "Jeder Kauf und Verkauf deines Depots wird zum selben Tag mit demselben Betrag im Vergleichs-ETF (Standard: iShares Core MSCI World, EUNL.DE) nachgespielt. So vergleichst du fair: gleiche Beträge, gleiche Zeitpunkte. Thesaurierende ETFs enthalten ihre Ausschüttungen im Kurs."
@@ -2681,6 +2687,11 @@ function Get-TerminalFunctions {
         "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
         "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
         "PRIV"   = @{ Scope = "G";  Desc = "Privat-Modus: Beträge ausblenden (PRIV ON / OFF, Taste F9)" }
+        "CASH"   = @{ Scope = "G";  Desc = "Cash-Konto des Depots (Einzahlung, Auszahlung, Kontostand)" }
+        "SPAR"   = @{ Scope = "G";  Desc = "Sparpläne (monatliche Käufe automatisch buchen)" }
+        "REBAL"  = @{ Scope = "G";  Desc = "Zielgewichte und Rebalancing-Vorschlag" }
+        "RISK"   = @{ Scope = "G";  Desc = "Risiko: Drawdown, Volatilität, Sharpe, Beta, Korrelation" }
+        "HEAT"   = @{ Scope = "G";  Desc = "Heatmap des Depots (Größe = Anteil, Farbe = Tag %)" }
         "FULL"   = @{ Scope = "G";  Desc = "Liste als ganze Seite (Terminal): FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }
         "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
         "SCALE"  = @{ Scope = "G";  Desc = "Preisachse: SCALE LOG / SCALE LIN" }
@@ -3556,4 +3567,302 @@ function Get-LatestVersionFromJson {
     try { $v = [string]$Json.version } catch { $v = "" }
     if ($v -match '^\d+(\.\d+){1,2}$') { return $v }
     return ""
+}
+
+# ==============================================================================
+# v5.0 Stage A: cash, risk, rebalancing, savings plans, heatmap
+# ==============================================================================
+function Get-CashMovements {
+    # Trades booked after cash tracking started (Id not in ExcludeIds) plus the
+    # cash ledger -> @(@{ Date; Kind; Ticker; Amount (signed); Currency; Source; Id }) oldest first.
+    # Buy = -(shares x price + fee), sell = +(shares x price - fee), dividend = +(amount - fee).
+    param($Transactions, $Entries, [string[]]$ExcludeIds = @())
+    $skip = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($i in @($ExcludeIds)) { if ($i) { [void]$skip.Add([string]$i) } }
+    $out = @()
+    foreach ($t in @($Transactions)) {
+        if ($null -eq $t -or $skip.Contains([string]$t.Id)) { continue }
+        $sh = [double]$t.Shares; $px = [double]$t.Price; $fee = [double]$t.Fee
+        $amt = switch ([string]$t.Type) {
+            "Kauf"      { -($sh * $px + $fee) }
+            "Verkauf"   { $sh * $px - $fee }
+            "Dividende" { $px - $fee }
+            default     { $null }
+        }
+        if ($null -eq $amt) { continue }
+        $out += [PSCustomObject]@{ Date = [string]$t.Date; Kind = [string]$t.Type; Ticker = ([string]$t.Ticker).ToUpper(); Amount = [double]$amt; Currency = ([string]$t.Currency).ToUpper(); Source = "Trade"; Id = [string]$t.Id }
+    }
+    foreach ($e in @($Entries)) {
+        if ($null -eq $e) { continue }
+        $out += [PSCustomObject]@{ Date = [string]$e.Date; Kind = [string]$e.Kind; Ticker = ""; Amount = [double]$e.Amount; Currency = ([string]$e.Currency).ToUpper(); Source = "Cash"; Id = [string]$e.Id }
+    }
+    return @($out | Sort-Object -Property @{ Expression = { $_.Date } }, @{ Expression = { $_.Source -eq "Trade" } })
+}
+
+function Get-CashBalance {
+    # Sum of movements in Currency; Rates: other currency -> factor into Currency.
+    # Currencies without a rate are left out and listed in Missing.
+    param($Movements, [string]$Currency, [hashtable]$Rates = @{})
+    $cc = ([string]$Currency).ToUpper()
+    $sum = 0.0
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($m in @($Movements)) {
+        if ($null -eq $m) { continue }
+        $mc = ([string]$m.Currency).ToUpper()
+        if (-not $mc -or $mc -eq $cc) { $sum += [double]$m.Amount; continue }
+        $f = $Rates[$mc]
+        if ($null -eq $f -or [double]::IsNaN([double]$f) -or [double]$f -le 0) { if (-not $missing.Contains($mc)) { $missing.Add($mc) }; continue }
+        $sum += [double]$m.Amount * [double]$f
+    }
+    return [PSCustomObject]@{ Balance = $sum; Missing = @($missing) }
+}
+
+function Get-FlowAdjustedReturns {
+    # Value history with deposits / withdrawals -> period returns that ignore
+    # the flows: (V_t + dDividends - dInvested) / V_(t-1) - 1
+    param([double[]]$Value, [double[]]$Invested, [double[]]$Dividends = $null)
+    $out = New-Object System.Collections.Generic.List[double]
+    if ($null -eq $Value -or $Value.Count -lt 2) { return }
+    for ($i = 1; $i -lt $Value.Count; $i++) {
+        $v0 = [double]$Value[$i - 1]
+        if ($v0 -le 0 -or [double]::IsNaN($v0) -or [double]::IsNaN([double]$Value[$i])) { continue }
+        $dI = if ($null -ne $Invested -and $Invested.Count -gt $i) { [double]$Invested[$i] - [double]$Invested[$i - 1] } else { 0.0 }
+        $dD = if ($null -ne $Dividends -and $Dividends.Count -gt $i) { [double]$Dividends[$i] - [double]$Dividends[$i - 1] } else { 0.0 }
+        $out.Add((([double]$Value[$i] + $dD - $dI) / $v0) - 1.0)
+    }
+    return $out.ToArray()
+}
+
+function Get-PeriodsPerYear {
+    # Data points per year from the date axis (daily trading data ~252)
+    param([string[]]$Dates)
+    if ($null -eq $Dates -or $Dates.Count -lt 2) { return 252.0 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $a = [DateTime]::ParseExact([string]$Dates[0], "yyyy-MM-dd", $inv)
+    $b = [DateTime]::ParseExact([string]$Dates[$Dates.Count - 1], "yyyy-MM-dd", $inv)
+    $years = ($b - $a).TotalDays / 365.25
+    if ($years -le 0.02) { return 252.0 }
+    return [math]::Max(1.0, ($Dates.Count - 1) / $years)
+}
+
+function Get-ReturnStats {
+    # Returns (fractions per period) -> annualized return / volatility in %,
+    # Sharpe (risk-free in % p.a.), max drawdown in % with its peak/trough
+    # period, best/worst period
+    param([double[]]$Returns, [double]$PeriodsPerYear = 252, [double]$RiskFreePct = 0.0)
+    $o = [PSCustomObject]@{ N = 0; AnnReturn = [double]::NaN; Vol = [double]::NaN; Sharpe = [double]::NaN; MaxDd = [double]::NaN
+        DdPeak = -1; DdTrough = -1; Best = [double]::NaN; BestIdx = -1; Worst = [double]::NaN; WorstIdx = -1; Total = [double]::NaN }
+    if ($null -eq $Returns -or $Returns.Count -lt 2) { return $o }
+    $n = $Returns.Count
+    $o.N = $n
+    $mean = 0.0; foreach ($r in $Returns) { $mean += $r }; $mean /= $n
+    $ss = 0.0; foreach ($r in $Returns) { $ss += ($r - $mean) * ($r - $mean) }
+    $sd = [math]::Sqrt($ss / ($n - 1))
+    $o.Vol = $sd * [math]::Sqrt($PeriodsPerYear) * 100.0
+    $idx = 1.0; $peak = 1.0; $peakI = -1; $maxDd = 0.0
+    for ($i = 0; $i -lt $n; $i++) {
+        $r = $Returns[$i]
+        $idx *= (1.0 + $r)
+        if ($idx -gt $peak) { $peak = $idx; $peakI = $i }
+        $dd = $idx / $peak - 1.0
+        if ($dd -lt $maxDd) { $maxDd = $dd; $o.DdPeak = $peakI; $o.DdTrough = $i }
+        if ($o.BestIdx -lt 0 -or $r -gt $o.Best) { $o.Best = $r; $o.BestIdx = $i }
+        if ($o.WorstIdx -lt 0 -or $r -lt $o.Worst) { $o.Worst = $r; $o.WorstIdx = $i }
+    }
+    $o.Total = ($idx - 1.0) * 100.0
+    $o.MaxDd = $maxDd * 100.0
+    $o.Best *= 100.0; $o.Worst *= 100.0
+    $years = $n / $PeriodsPerYear
+    if ($idx -gt 0 -and $years -gt 0) { $o.AnnReturn = ([math]::Pow($idx, 1.0 / $years) - 1.0) * 100.0 }
+    if ($o.Vol -gt 0) { $o.Sharpe = ($o.AnnReturn - $RiskFreePct) / $o.Vol }
+    return $o
+}
+
+function Get-Correlation {
+    # Pearson correlation of two equally long series (NaN below 3 points)
+    param([double[]]$A, [double[]]$B)
+    $n = [math]::Min(@($A).Count, @($B).Count)
+    if ($n -lt 3) { return [double]::NaN }
+    $ma = 0.0; $mb = 0.0
+    for ($i = 0; $i -lt $n; $i++) { $ma += $A[$i]; $mb += $B[$i] }
+    $ma /= $n; $mb /= $n
+    $c = 0.0; $va = 0.0; $vb = 0.0
+    for ($i = 0; $i -lt $n; $i++) { $da = $A[$i] - $ma; $db = $B[$i] - $mb; $c += $da * $db; $va += $da * $da; $vb += $db * $db }
+    if ($va -le 0 -or $vb -le 0) { return [double]::NaN }
+    return $c / [math]::Sqrt($va * $vb)
+}
+
+function Get-Beta {
+    # Sensitivity of R to the benchmark B: cov(R, B) / var(B)
+    param([double[]]$R, [double[]]$B)
+    $n = [math]::Min(@($R).Count, @($B).Count)
+    if ($n -lt 3) { return [double]::NaN }
+    $mr = 0.0; $mb = 0.0
+    for ($i = 0; $i -lt $n; $i++) { $mr += $R[$i]; $mb += $B[$i] }
+    $mr /= $n; $mb /= $n
+    $c = 0.0; $vb = 0.0
+    for ($i = 0; $i -lt $n; $i++) { $c += ($R[$i] - $mr) * ($B[$i] - $mb); $vb += ($B[$i] - $mb) * ($B[$i] - $mb) }
+    if ($vb -le 0) { return [double]::NaN }
+    return $c / $vb
+}
+
+function Get-DailyReturnsByDate {
+    # Closes on dates -> hashtable date -> return vs. the previous close
+    param([string[]]$Dates, [double[]]$Closes, [string]$FromDate = "")
+    $h = @{}
+    if ($null -eq $Dates -or $null -eq $Closes) { return $h }
+    $n = [math]::Min($Dates.Count, $Closes.Count)
+    for ($i = 1; $i -lt $n; $i++) {
+        $p0 = [double]$Closes[$i - 1]; $p1 = [double]$Closes[$i]
+        if ($p0 -le 0 -or $p1 -le 0 -or [double]::IsNaN($p0) -or [double]::IsNaN($p1)) { continue }
+        if ($FromDate -and [string]::CompareOrdinal([string]$Dates[$i], $FromDate) -lt 0) { continue }
+        $h[[string]$Dates[$i]] = $p1 / $p0 - 1.0
+    }
+    return $h
+}
+
+function Get-CorrelationMatrix {
+    # sym -> (date -> return) => @{ Syms; M = double[,]; Counts = int[,] } on common dates
+    param([hashtable]$BySym, [int]$MinCommon = 20)
+    $syms = @($BySym.Keys | Sort-Object)
+    $n = $syms.Count
+    $m = New-Object 'double[,]' $n, $n
+    $cnt = New-Object 'int[,]' $n, $n
+    for ($i = 0; $i -lt $n; $i++) {
+        $m[$i, $i] = 1.0
+        for ($j = $i + 1; $j -lt $n; $j++) {
+            $a = $BySym[$syms[$i]]; $b = $BySym[$syms[$j]]
+            $xa = New-Object System.Collections.Generic.List[double]; $xb = New-Object System.Collections.Generic.List[double]
+            foreach ($d in $a.Keys) { if ($b.ContainsKey($d)) { $xa.Add([double]$a[$d]); $xb.Add([double]$b[$d]) } }
+            $c = if ($xa.Count -ge $MinCommon) { Get-Correlation -A $xa.ToArray() -B $xb.ToArray() } else { [double]::NaN }
+            $m[$i, $j] = $c; $m[$j, $i] = $c
+            $cnt[$i, $j] = $xa.Count; $cnt[$j, $i] = $xa.Count
+        }
+    }
+    return [PSCustomObject]@{ Syms = $syms; M = $m; Counts = $cnt }
+}
+
+function Get-RebalancePlan {
+    # Positions: @(@{ Sym; Value; Price }) in one currency; Targets: sym -> % .
+    # Only positions with a target take part; Money (cash + new money) can be
+    # invested. BuyOnly: no sales, the money goes to the most underweight
+    # positions. -> @{ Rows; Base; Invest; Left; TargetSum }
+    param($Positions, [hashtable]$Targets, [double]$Money = 0.0, [bool]$BuyOnly = $false)
+    $rows = @()
+    $sumV = 0.0; $tSum = 0.0
+    foreach ($p in @($Positions)) {
+        if ($null -eq $p) { continue }
+        $s = ([string]$p.Sym).ToUpper()
+        if (-not $Targets.ContainsKey($s)) { continue }
+        $t = [math]::Max(0.0, [double]$Targets[$s])
+        $sumV += [double]$p.Value; $tSum += $t
+        $rows += [PSCustomObject]@{ Sym = $s; Value = [double]$p.Value; Price = [double]$p.Price; Target = $t; Pct = 0.0; TargetValue = 0.0; Drift = 0.0; Trade = 0.0; Shares = 0.0; After = 0.0 }
+    }
+    $money = [math]::Max(0.0, $Money)
+    $base = $sumV + $money
+    $res = [PSCustomObject]@{ Rows = $rows; Base = $base; Invest = 0.0; Left = $money; TargetSum = $tSum }
+    if ($rows.Count -eq 0 -or $base -le 0) { return $res }
+    foreach ($r in $rows) {
+        $r.Pct = if ($sumV -gt 0) { $r.Value / $sumV * 100.0 } else { 0.0 }
+        $r.TargetValue = $base * $r.Target / 100.0
+        $r.Drift = $r.Pct - $r.Target
+        $r.Trade = $r.TargetValue - $r.Value
+    }
+    if ($BuyOnly) {
+        $short = 0.0
+        foreach ($r in $rows) { if ($r.Trade -gt 0) { $short += $r.Trade } else { $r.Trade = 0.0 } }
+        $f = if ($short -gt $money -and $short -gt 0) { $money / $short } else { 1.0 }
+        foreach ($r in $rows) { $r.Trade = $r.Trade * $f }
+    }
+    $net = 0.0
+    foreach ($r in $rows) {
+        if ([math]::Abs($r.Trade) -lt 0.005) { $r.Trade = 0.0 }
+        $r.Shares = if ($r.Price -gt 0) { $r.Trade / $r.Price } else { 0.0 }
+        $r.After = $r.Value + $r.Trade
+        $net += $r.Trade
+    }
+    $res.Invest = $net
+    $res.Left = $money - $net
+    return $res
+}
+
+function Get-DueSavingsDates {
+    # Savings plan (Day 1-28, Start, LastBooked as yyyy-MM-dd) -> booking
+    # dates after LastBooked (or from Start) up to Today, at most 24
+    param($Plan, [string]$Today)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $out = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Plan -or -not $Plan.Start) { return @($out) }
+    $day = [math]::Max(1, [math]::Min(28, [int]$Plan.Day))
+    $start = [DateTime]::ParseExact([string]$Plan.Start, "yyyy-MM-dd", $inv)
+    $after = if ($Plan.LastBooked) { [DateTime]::ParseExact([string]$Plan.LastBooked, "yyyy-MM-dd", $inv) } else { $start.AddDays(-1) }
+    $today = [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv)
+    $m = New-Object DateTime($start.Year, $start.Month, 1)
+    while ($m -le $today -and $out.Count -lt 24) {
+        $d = New-Object DateTime($m.Year, $m.Month, $day)
+        if ($d -ge $start -and $d -gt $after -and $d -le $today) { $out.Add($d.ToString("yyyy-MM-dd", $inv)) }
+        $m = $m.AddMonths(1)
+    }
+    return @($out)
+}
+
+function Get-CloseOnOrBefore {
+    # Last close on or before Date (weekend / holiday -> the trading day before)
+    param([string[]]$Dates, [double[]]$Closes, [string]$Date)
+    if ($null -eq $Dates -or $null -eq $Closes) { return $null }
+    $best = -1
+    for ($i = 0; $i -lt [math]::Min($Dates.Count, $Closes.Count); $i++) {
+        if ([string]::CompareOrdinal([string]$Dates[$i], $Date) -le 0 -and [double]$Closes[$i] -gt 0) { $best = $i }
+    }
+    if ($best -lt 0) { return $null }
+    return [PSCustomObject]@{ Date = [string]$Dates[$best]; Close = [double]$Closes[$best] }
+}
+
+function Get-TreemapRects {
+    # Squarified treemap: values -> @(x, y, w, h) per value (input order).
+    # Zero / negative values get an empty rect.
+    param([double[]]$Values, [double]$X, [double]$Y, [double]$W, [double]$H)
+    $n = @($Values).Count
+    $rects = New-Object 'object[]' $n
+    for ($i = 0; $i -lt $n; $i++) { $rects[$i] = @(0.0, 0.0, 0.0, 0.0) }
+    $idx = @(0..($n - 1) | Where-Object { $n -gt 0 -and [double]$Values[$_] -gt 0 } | Sort-Object -Property @{ Expression = { [double]$Values[$_] }; Descending = $true })
+    $total = 0.0; foreach ($i in $idx) { $total += [double]$Values[$i] }
+    if ($idx.Count -eq 0 -or $total -le 0 -or $W -le 0 -or $H -le 0) { return ,$rects }
+    $scale = ($W * $H) / $total
+    $rx = $X; $ry = $Y; $rw = $W; $rh = $H
+    $worst = {
+        param($Areas, [double]$Side)
+        $s = 0.0; $mx = 0.0; $mn = [double]::MaxValue
+        foreach ($a in $Areas) { $s += $a; if ($a -gt $mx) { $mx = $a }; if ($a -lt $mn) { $mn = $a } }
+        if ($s -le 0 -or $Side -le 0) { return [double]::MaxValue }
+        return [math]::Max(($Side * $Side * $mx) / ($s * $s), ($s * $s) / ($Side * $Side * $mn))
+    }
+    $pos = 0
+    while ($pos -lt $idx.Count) {
+        $side = [math]::Min($rw, $rh)
+        $row = New-Object System.Collections.Generic.List[int]
+        $areas = New-Object System.Collections.Generic.List[double]
+        $row.Add($idx[$pos]); $areas.Add([double]$Values[$idx[$pos]] * $scale); $pos++
+        while ($pos -lt $idx.Count) {
+            $cand = New-Object System.Collections.Generic.List[double]
+            $cand.AddRange($areas)
+            $cand.Add([double]$Values[$idx[$pos]] * $scale)
+            if ((& $worst $cand $side) -le (& $worst $areas $side)) { $row.Add($idx[$pos]); $areas.Add([double]$Values[$idx[$pos]] * $scale); $pos++ } else { break }
+        }
+        $sumA = 0.0; foreach ($a in $areas) { $sumA += $a }
+        if ($rw -ge $rh) {
+            # column on the left
+            $cw = if ($rh -gt 0) { $sumA / $rh } else { 0.0 }
+            $yy = $ry
+            for ($k = 0; $k -lt $row.Count; $k++) { $hh = if ($cw -gt 0) { $areas[$k] / $cw } else { 0.0 }; $rects[$row[$k]] = @($rx, $yy, $cw, $hh); $yy += $hh }
+            $rx += $cw; $rw -= $cw
+        } else {
+            # row on top
+            $chh = if ($rw -gt 0) { $sumA / $rw } else { 0.0 }
+            $xx = $rx
+            for ($k = 0; $k -lt $row.Count; $k++) { $ww = if ($chh -gt 0) { $areas[$k] / $chh } else { 0.0 }; $rects[$row[$k]] = @($xx, $ry, $ww, $chh); $xx += $ww }
+            $ry += $chh; $rh -= $chh
+        }
+    }
+    return ,$rects
 }
