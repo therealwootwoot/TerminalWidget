@@ -248,7 +248,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.7"
+$script:AppVersion    = "6.0"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -280,6 +280,8 @@ function Write-WidgetLog {
         if ((Test-Path $script:LogPath) -and ((Get-Item $script:LogPath).Length -gt 1MB)) {
             Move-Item -Path $script:LogPath -Destination "$($script:LogPath).old" -Force
         }
+        # V6: API keys in URLs never reach the log (or a diagnostics ZIP)
+        $Message = [string]$Message -replace '(?i)\b(apikey|token|api_key)=[^&\s"'']+', '$1=***'
         $line = "{0} [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
         [System.IO.File]::AppendAllText($script:LogPath, $line + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
     } catch { }
@@ -482,6 +484,10 @@ $defaultConfig = [PSCustomObject]@{
     SignalAlerts          = "Depot"           # v5.7: signal-change alerts for Depot / Alle (+ watchlist) / Aus
     PeerGroups            = [PSCustomObject]@{} # v5.7: own comparison group per ticker
     NewsFeeds             = ""                # v5.7: extra RSS / Atom feeds (one URL per line)
+    TwelveDataKeyEnc      = ""                # V6: API keys (Windows DPAPI, this user only)
+    FinnhubKeyEnc         = ""
+    ProviderCaps          = [PSCustomObject]@{} # V6: "Provider|Kind" -> works with this key (from the test)
+    ProviderUsage         = [PSCustomObject]@{ Day = ""; TwelveData = 0; Finnhub = 0 }
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -933,6 +939,22 @@ function Save-DailyCache {
     Save-JsonState -Path $script:DailyCachePath -Data $script:DailyCache
 }
 
+function Save-DailyFromBars {
+    # bars from any provider -> daily cache entry (+ signal-change check)
+    param([string]$Sym, $Bars)
+    if ($null -eq $Bars -or @($Bars.Close).Count -lt 30) { return }
+    $sig = Get-TechnicalSignals -Closes ([double[]]$Bars.Close) -Highs ([double[]]$Bars.High) -Lows ([double[]]$Bars.Low) -Volumes ([double[]]$Bars.Volume)
+    $old = $script:DailyCache[$Sym]
+    $script:DailyCache[$Sym] = ConvertTo-DailyCacheEntry -Bars $Bars -Sig $sig -Day (Get-TodayKey)
+    $script:DailyCache[$Sym] | Add-Member -NotePropertyName Source -NotePropertyValue ([string]$Bars.Source) -Force
+    [void]$script:DailyFailed.Remove($Sym)
+    try { Send-SignalChangeAlerts -Sym $Sym -Old $old -New $script:DailyCache[$Sym] } catch { }
+    try { Save-DailyCache } catch { }
+    Update-ChartCacheSignature
+    $pnlChartCanvas.Invalidate()
+    if ($dgvWatchlist.Columns["Signal"].Visible) { Refresh-WatchlistAndAlerts }
+}
+
 function Request-DailyBars {
     # fetches what is not fresh today (in the background); OnDone runs on the UI thread
     param([string[]]$Symbols, [scriptblock]$OnDone = $null)
@@ -948,7 +970,13 @@ function Request-DailyBars {
             [void]$script:DailyPending.Remove($sy)
             $bars = $null
             try { $bars = ConvertFrom-YahooOhlc -Json $Box.Results[$Ctx.Map[$sy]] } catch { $bars = $null }
-            if ($null -eq $bars -or @($bars.Close).Count -lt 30) { $script:DailyFailed[$sy] = $Ctx.Day; continue }
+            if ($null -eq $bars -or @($bars.Close).Count -lt 30) {
+                $script:DailyFailed[$sy] = $Ctx.Day
+                # V6: Twelve Data / Finnhub step in (US tickers on the free tiers)
+                $script:FallbackDay = $Ctx.Day
+                [void](Request-ProviderBars -Sym $sy -OnBars ([scriptblock]::Create(('param($b) Save-DailyFromBars -Sym "{0}" -Bars $b' -f $sy))))
+                continue
+            }
             $sig = Get-TechnicalSignals -Closes ([double[]]$bars.Close) -Highs ([double[]]$bars.High) -Lows ([double[]]$bars.Low) -Volumes ([double[]]$bars.Volume)
             $oldE = $script:DailyCache[$sy]
             $script:DailyCache[$sy] = ConvertTo-DailyCacheEntry -Bars $bars -Sig $sig -Day $Ctx.Day
@@ -961,6 +989,170 @@ function Request-DailyBars {
         if ($dgvWatchlist.Columns["Signal"].Visible) { Refresh-WatchlistAndAlerts }
         if ($null -ne $Ctx.OnDone) { & $Ctx.OnDone }
     }
+}
+
+# ==============================================================================
+# V6: Twelve Data / Finnhub - keys, budget, test, fallback, analysis data
+# ==============================================================================
+$script:ProvCachePath = Join-Path $script:DataDir "provider_cache.json"
+$script:ProvCache = @{}
+$rawPc = Load-JsonState -Path $script:ProvCachePath -DefaultValue $null
+if ($null -ne $rawPc) { foreach ($prop in $rawPc.PSObject.Properties) { $script:ProvCache[$prop.Name] = $prop.Value } }
+
+function Get-ProviderKey {
+    param([string]$Provider)
+    $enc = if ($Provider -eq "TwelveData") { [string]$script:Config.TwelveDataKeyEnc } else { [string]$script:Config.FinnhubKeyEnc }
+    if (-not $enc) { return "" }
+    return (Unprotect-Secret $enc)
+}
+
+function Test-ProviderCap {
+    # unknown (not tested yet) counts as "try it"; a failed test as "no"
+    param([string]$Provider, [string]$Kind)
+    $c = $script:Config.ProviderCaps
+    if ($null -eq $c -or $c -is [string]) { return $true }
+    $pp = $c.PSObject.Properties["$Provider|$Kind"]
+    if ($null -eq $pp) { return $true }
+    return [bool]$pp.Value
+}
+
+function Add-ProviderUsage {
+    param([string]$Provider)
+    $u = $script:Config.ProviderUsage
+    $day = (Get-Date).ToString("yyyy-MM-dd")
+    if ($null -eq $u -or $u -is [string] -or [string]$u.Day -ne $day) { $u = [PSCustomObject]@{ Day = $day; TwelveData = 0; Finnhub = 0 }; $script:Config.ProviderUsage = $u }
+    if ($null -eq $u.PSObject.Properties[$Provider]) { $u | Add-Member -NotePropertyName $Provider -NotePropertyValue 0 -Force }
+    $u.$Provider = [int]$u.$Provider + 1
+}
+
+function Get-ProviderDayCount {
+    param([string]$Provider)
+    $u = $script:Config.ProviderUsage
+    if ($null -eq $u -or $u -is [string] -or [string]$u.Day -ne (Get-Date).ToString("yyyy-MM-dd") -or $null -eq $u.PSObject.Properties[$Provider]) { return 0 }
+    return [int]$u.$Provider
+}
+
+function Select-ProviderUrls {
+    # keeps only the requests the per-minute / per-day budget allows; says why once
+    param([array]$Requests)
+    $ok = @()
+    $count = @{}
+    foreach ($r in @($Requests)) {
+        $pv = [string]$r.Provider
+        $log = @($script:FetchLog.ToArray())
+        $extra = [int]$count[$pv]
+        $fake = @(1..$extra | Where-Object { $extra -gt 0 } | ForEach-Object { [PSCustomObject]@{ T = (Get-Date); P = $pv } })
+        $b = Test-ProviderBudget -Log ($log + $fake) -Provider $pv -DayCount ((Get-ProviderDayCount $pv) + $extra)
+        if (-not $b.Ok) {
+            if ($script:LastBudgetMsg -ne $b.Reason) { $script:LastBudgetMsg = $b.Reason; Set-TransientStatus $b.Reason 6; Write-WidgetLog $b.Reason "WARN" }
+            continue
+        }
+        $count[$pv] = $extra + 1
+        $ok += $r
+    }
+    return $ok
+}
+
+function Request-ProviderBars {
+    # fallback for daily bars when Yahoo had nothing: Twelve Data, then Finnhub (US only on the free tiers)
+    param([string]$Sym, [scriptblock]$OnBars)
+    foreach ($pv in @("TwelveData", "Finnhub")) {
+        $key = Get-ProviderKey $pv
+        $ps = ConvertTo-ProviderSymbol -Symbol $Sym -Provider $pv
+        if (-not $key -or -not $ps -or -not (Test-ProviderCap $pv "Daily")) { continue }
+        $from = [DateTimeOffset]::UtcNow.AddDays(-380).ToUnixTimeSeconds(); $to = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $url = Get-ProviderRequestUrl -Provider $pv -Kind "Daily" -Symbol $ps -Key $key -From $from -To $to
+        if (@(Select-ProviderUrls @([PSCustomObject]@{ Provider = $pv; Url = $url })).Count -eq 0) { continue }
+        Write-WidgetLog ("Daily bars {0}: Yahoo empty, trying {1}" -f $Sym, $pv)
+        Start-FetchJob -Urls @($url) -MaxConcurrency 1 -Context @{ Url = $url; Sym = $Sym; Pv = $pv; OnBars = $OnBars } -OnComplete {
+            param($Box, $Ctx)
+            $j = $Box.Results[$Ctx.Url]
+            $bars = if ($Ctx.Pv -eq "TwelveData") { ConvertFrom-TwelveDataSeries $j } else { ConvertFrom-FinnhubCandles $j }
+            if ($null -eq $bars) { Write-WidgetLog ("{0} {1}: {2}" -f $Ctx.Pv, $Ctx.Sym, (Get-ProviderError $j)) "WARN"; return }
+            & $Ctx.OnBars $bars
+        }
+        return $true
+    }
+    return $false
+}
+
+function Test-Providers {
+    # probes every endpoint with the user's keys (AAPL), stores what works
+    param([switch]$Quiet)
+    $reqs = @()
+    $from = (Get-Date).AddDays(-400).ToString("yyyy-MM-dd"); $to = (Get-Date).ToString("yyyy-MM-dd")
+    $fromU = [DateTimeOffset]::UtcNow.AddDays(-30).ToUnixTimeSeconds(); $toU = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $tdKey = Get-ProviderKey "TwelveData"; $fhKey = Get-ProviderKey "Finnhub"
+    if ($tdKey) { foreach ($k in @("Daily", "Quote")) { $reqs += [PSCustomObject]@{ Provider = "TwelveData"; Kind = $k; Url = (Get-ProviderRequestUrl -Provider "TwelveData" -Kind $k -Symbol "AAPL" -Key $tdKey) } } }
+    if ($fhKey) {
+        foreach ($k in @("Quote", "Daily", "Metric", "Earnings", "Calendar", "Recommendation", "PriceTarget")) {
+            $f = if ($k -eq "Daily") { $fromU } else { $from }; $t = if ($k -eq "Daily") { $toU } else { $to }
+            $reqs += [PSCustomObject]@{ Provider = "Finnhub"; Kind = $k; Url = (Get-ProviderRequestUrl -Provider "Finnhub" -Kind $k -Symbol "AAPL" -Key $fhKey -From $f -To $t) }
+        }
+    }
+    if ($reqs.Count -eq 0) { if (-not $Quiet) { Show-InfoBox -Text (Tr "Noch kein API-Schlüssel eingetragen (Einstellungen > Daten & Aktualisierung).") -Title "Datenquellen" }; return }
+    $reqs = @(Select-ProviderUrls $reqs)
+    Set-TransientStatus "Datenquellen werden getestet ..." 4
+    Start-FetchJob -Urls @($reqs | ForEach-Object { $_.Url }) -MaxConcurrency 3 -Context @{ Reqs = $reqs; Quiet = [bool]$Quiet } -OnComplete {
+        param($Box, $Ctx)
+        $res = @()
+        if ($null -eq $script:Config.ProviderCaps -or $script:Config.ProviderCaps -is [string]) { $script:Config.ProviderCaps = [PSCustomObject]@{} }
+        foreach ($r in $Ctx.Reqs) {
+            $j = $Box.Results[$r.Url]
+            $err = Get-ProviderError $j
+            $empty = (-not $err) -and ((@($j).Count -eq 0) -or ($r.Kind -eq "Calendar" -and @($j.earningsCalendar).Count -eq 0))
+            $ok = (-not $err) -and -not $empty
+            $det = if ($ok) { "" } elseif ($null -eq $j) { Tr "kein Zugriff (kostenpflichtig oder Schlüssel falsch)" } elseif ($empty) { Tr "leer" } else { $err }
+            $res += [PSCustomObject]@{ Provider = $r.Provider; Kind = $r.Kind; Ok = $ok; Detail = $det }
+            $script:Config.ProviderCaps | Add-Member -NotePropertyName ("{0}|{1}" -f $r.Provider, $r.Kind) -NotePropertyValue $ok -Force
+        }
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        $script:LastProviderReport = Format-ProviderReport $res
+        Write-WidgetLog ("Provider test:`r`n" + $script:LastProviderReport)
+        if (-not $Ctx.Quiet -and -not $script:SmokeMode) {
+            Show-HelpTextDialog -Title ("{0} - {1}" -f (Tr "Datenquellen"), $script:AppTitle) -Text ($script:LastProviderReport + "`r`n`r`n" + (Tr "Twelve Data (kostenlos): nur US-Börsen, 8 Anfragen pro Minute, 800 pro Tag. Finnhub (kostenlos): 60 pro Minute; Kennzahlen, Quartalszahlen und Analysten-Empfehlungen. Was hier '--' zeigt, nutzt das Widget nicht."))
+        }
+    }
+}
+
+function Request-ProviderAnalysis {
+    # Finnhub data for the ticker analysis, cached per ticker and day
+    param([string]$Sym)
+    $key = Get-ProviderKey "Finnhub"
+    $ps = ConvertTo-ProviderSymbol -Symbol $Sym -Provider "Finnhub"
+    if (-not $key -or -not $ps) { return }
+    $day = (Get-Date).ToString("yyyy-MM-dd")
+    $from = (Get-Date).AddDays(-760).ToString("yyyy-MM-dd")
+    $reqs = @()
+    foreach ($k in @("Metric", "Earnings", "Calendar", "Recommendation", "PriceTarget")) {
+        if (-not (Test-ProviderCap "Finnhub" $k)) { continue }
+        if (Test-ProviderCacheFresh -Entry $script:ProvCache["$Sym|$k"] -Day $day) { continue }
+        $reqs += [PSCustomObject]@{ Provider = "Finnhub"; Kind = $k; Url = (Get-ProviderRequestUrl -Provider "Finnhub" -Kind $k -Symbol $ps -Key $key -From $from -To $day) }
+    }
+    $reqs = @(Select-ProviderUrls $reqs)
+    if ($reqs.Count -eq 0) { return }
+    Start-FetchJob -Urls @($reqs | ForEach-Object { $_.Url }) -MaxConcurrency 3 -Context @{ Reqs = $reqs; Sym = $Sym; Day = $day } -OnComplete {
+        param($Box, $Ctx)
+        foreach ($r in $Ctx.Reqs) {
+            $j = $Box.Results[$r.Url]
+            if ($null -eq $j -or (Get-ProviderError $j)) { continue }
+            $script:ProvCache[("{0}|{1}" -f $Ctx.Sym, $r.Kind)] = [PSCustomObject]@{ Day = $Ctx.Day; Data = $j }
+        }
+        # only tickers still in use stay in the cache
+        $keep = New-Object System.Collections.Generic.HashSet[string]
+        try { foreach ($t in @(Get-KnownTickers)) { [void]$keep.Add(([string]$t).ToUpper()) } } catch { }
+        [void]$keep.Add([string]$Ctx.Sym)
+        foreach ($k0 in @($script:ProvCache.Keys)) { if (-not $keep.Contains(([string]$k0 -split '\|')[0])) { [void]$script:ProvCache.Remove($k0) } }
+        try { Save-JsonState -Path $script:ProvCachePath -Data $script:ProvCache } catch { }
+        if ($null -ne $script:TaCtl -and $script:TaCtl.Sym -eq $Ctx.Sym) { Update-TickerAnalysis }
+    }
+}
+
+function Get-ProviderData {
+    param([string]$Sym, [string]$Kind)
+    $e = $script:ProvCache["$Sym|$Kind"]
+    if ($null -eq $e) { return $null }
+    return $e.Data
 }
 
 function Test-SignalAlertTicker {
@@ -1575,7 +1767,11 @@ function Start-FetchJob {
     if ($script:IsClosing) { return }
     # v5.5: polling load for HEALTH (requests in the last hour)
     $nowR = Get-Date
-    foreach ($u0 in @($Urls)) { $script:FetchLog.Enqueue([PSCustomObject]@{ T = $nowR; P = (Get-ProviderOfUrl $u0) }) }
+    foreach ($u0 in @($Urls)) {
+        $pv0 = Get-ProviderOfUrl $u0
+        $script:FetchLog.Enqueue([PSCustomObject]@{ T = $nowR; P = $pv0 })
+        if ($pv0 -in @("TwelveData", "Finnhub")) { Add-ProviderUsage $pv0 }
+    }
     while ($script:FetchLog.Count -gt 0 -and ($nowR - $script:FetchLog.Peek().T).TotalMinutes -gt 60) { [void]$script:FetchLog.Dequeue() }
     $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = $Context; OnComplete = $OnComplete }
@@ -4393,6 +4589,19 @@ foreach ($kv in @{
     "Kein klares Bild auf beiden Zeitebenen." = "No clear picture on either time frame."; "Zu wenig Wochendaten für die mittelfristige Sicht." = "Not enough weekly data for the medium-term view."
     "Signal-Wechsel (Ticker-Analyse)" = "Signal changes (ticker analysis)"; "Hinweis bei Signal-Wechsel" = "Notify on signal change"; "Depot + Watchlist" = "Depot + watchlist"; "Aus" = "Off"
     "Eigene RSS-Feeds (eine Adresse je Zeile)" = "Own RSS feeds (one address per line)"; "Ticker-Analyse: Rechtsklick > TA" = "Ticker analysis: right-click > TA"
+}.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
+# V6
+foreach ($kv in @{
+    "Weitere Datenquellen (eigene API-Schlüssel)" = "More data sources (own API keys)"; "Twelve Data API-Schlüssel" = "Twelve Data API key"; "Finnhub API-Schlüssel" = "Finnhub API key"
+    "Datenquellen testen (PROV)" = "Test data sources (PROV)"; "Datenquellen" = "Data sources"; "kein Schlüssel" = "no key"; "nutzbar" = "usable"; "nicht" = "not"; "Anfragen heute" = "requests today"
+    "noch nicht getestet (PROV)" = "not tested yet (PROV)"; "kein Zugriff (kostenpflichtig oder Schlüssel falsch)" = "no access (paid plan or wrong key)"; "leer" = "empty"
+    "Noch kein API-Schlüssel eingetragen (Einstellungen > Daten & Aktualisierung)." = "No API key yet (Settings > Data & refresh)."
+    "Kennzahlen über die Jahre" = "Figures over the years"; "Bewertung vs. Historie (Quartale)" = "Valuation vs. history (quarters)"; "Quartale" = "quarters"
+    "Quartalszahlen: Gewinn je Aktie" = "Earnings: EPS"; "Ist vs. Erwartung, Kursreaktion" = "actual vs. estimate, price reaction"; "Überraschung" = "Surprise"; "Kurs" = "Price"
+    "Analysten (Trend)" = "Analysts (trend)"; "Empfehlungen jetzt" = "Recommendations now"; "vor 3 Monaten" = "3 months ago"; "positiver" = "more positive"; "negativer" = "more negative"; "unverändert" = "unchanged"
+    "Kursziel (Mittel)" = "Price target (mean)"; "Mehr mit Finnhub" = "More with Finnhub"
+    "Kostenloser Schlüssel in Einstellungen > Daten: Kennzahlen über Jahre, Quartalszahlen, Analysten-Trend" = "Free key in Settings > Data: figures over the years, earnings, analyst trend"
+    "Gewinn je Aktie" = "EPS"; "Kauf" = "Buy"; "Halten" = "Hold"; "Verkauf" = "Sell"
 }.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
 
 function Tr {
@@ -12303,6 +12512,58 @@ function Update-TickerAnalysis {
         $bad = if ($pct) { $r.Rank -le 20 } else { $r.Rank -ge 80 }
         $f.Rows[$i].Cells[3].Style.ForeColor = if ($good) { $colGreen } elseif ($bad) { $colRed } else { $p.Muted }
     }
+    # V6: Finnhub - figures over the years, valuation vs. quarterly history, earnings, analysts
+    $addHead = { param([string]$T, [string]$Note) $hx = $f.Rows.Add((Tr $T), "", "", $Note); $f.Rows[$hx].DefaultCellStyle.Font = $fontUiBold; $f.Rows[$hx].DefaultCellStyle.ForeColor = $p.Accent }
+    $mj = Get-ProviderData $sym "Metric"
+    if ($null -ne $mj) {
+        $ms = ConvertFrom-FinnhubMetricSeries $mj
+        if (@($ms.Annual).Count -gt 0) {
+            & $addHead "Kennzahlen über die Jahre" "Finnhub"
+            foreach ($r in $ms.Annual) {
+                $last = [double]$r.Points[-1].Value
+                $i = $f.Rows.Add(("  " + (Tr $r.Label)), $(if ($r.Kind -eq "Pct") { "{0:N1}%" -f $last } else { "{0:N2}" -f $last }), "", (Format-SeriesTrend -Points $r.Points -Kind $r.Kind))
+                $f.Rows[$i].Cells[3].Style.ForeColor = $p.Muted
+            }
+        }
+        $vq = @(Get-ValuationVsHistory -History $ms.Quarterly -Fund $fund -MinDays 8)
+        if ($vq.Count -gt 0) {
+            & $addHead "Bewertung vs. Historie (Quartale)" ("{0} {1}, {2} {3}" -f (Tr "seit"), (Format-IsoDateDe ([string]$vq[0].Since)), $vq[0].Count, (Tr "Quartale"))
+            foreach ($r in $vq) {
+                $i = $f.Rows.Add(("  " + (Tr $r.Label)), ("{0:N1}" -f $r.Now), ("{0:N1}" -f $r.Median), ("{0} ({1} {2})" -f (Tr $r.Note), (Tr "Rang"), $r.Rank))
+                $f.Rows[$i].Cells[3].Style.ForeColor = if ($r.Rank -le 20) { $colGreen } elseif ($r.Rank -ge 80) { $colRed } else { $p.Muted }
+            }
+        }
+    }
+    $ej = Get-ProviderData $sym "Earnings"
+    if ($null -ne $ej) {
+        $bd = if ($null -ne $c.Bars) { [string[]]$c.Bars.Dates } else { @() }
+        $bc = if ($null -ne $c.Bars) { [double[]]$c.Bars.Close } else { @() }
+        $ers = @(ConvertFrom-FinnhubEarnings -Earnings $ej -Calendar (Get-ProviderData $sym "Calendar") -Dates $bd -Closes $bc)
+        if ($ers.Count -gt 0) {
+            & $addHead "Quartalszahlen: Gewinn je Aktie" (Tr "Ist vs. Erwartung, Kursreaktion")
+            foreach ($r in $ers) {
+                $rxT = if ([double]::IsNaN($r.ReactionPct)) { "" } else { "{0} {1:+0.0;-0.0}%" -f (Tr "Kurs"), $r.ReactionPct }
+                $i = $f.Rows.Add(("  " + (Format-IsoDateDe $r.Period)), $(if ([double]::IsNaN($r.Actual)) { "-" } else { "{0:N2}" -f $r.Actual }), $(if ([double]::IsNaN($r.Estimate)) { "-" } else { "{0:N2}" -f $r.Estimate }),
+                    ("{0}{1}" -f $(if ([double]::IsNaN($r.SurprisePct)) { "" } else { "{0} {1:+0.0;-0.0}%" -f (Tr "Überraschung"), $r.SurprisePct }), $(if ($rxT) { ", " + $rxT } else { "" })))
+                $f.Rows[$i].Cells[3].Style.ForeColor = if ($r.SurprisePct -gt 0) { $colGreen } elseif ($r.SurprisePct -lt 0) { $colRed } else { $p.Muted }
+            }
+        }
+    }
+    $rt = Get-RecommendationTrend (Get-ProviderData $sym "Recommendation")
+    if ($null -ne $rt) {
+        & $addHead "Analysten (Trend)" ("Finnhub, {0}" -f (Format-IsoDateDe $rt.Period))
+        $i = $f.Rows.Add(("  " + (Tr "Empfehlungen jetzt")), ("{0:N2}" -f $rt.Score), ("{0:N2}" -f $rt.ScoreBefore), ("{0} ({1} {2}: {3}) - {4}" -f $rt.Now, (Tr "vor 3 Monaten"), (Format-IsoDateDe $rt.PeriodBefore), $rt.Before, (Tr $rt.Trend)))
+        $f.Rows[$i].Cells[3].Style.ForeColor = if ($rt.Trend -eq "positiver") { $colGreen } elseif ($rt.Trend -eq "negativer") { $colRed } else { $p.Muted }
+        $f.Rows[$i].Cells[1].ToolTipText = Tr "1 = starker Kauf ... 5 = starker Verkauf (Durchschnitt); Spalte Vergleich = vor 3 Monaten"
+    }
+    $pt = Get-ProviderData $sym "PriceTarget"
+    if ($null -ne $pt -and $null -ne $pt.PSObject.Properties["targetMean"] -and [double]$pt.targetMean -gt 0) {
+        $i = $f.Rows.Add(("  " + (Tr "Kursziel (Mittel)")), ("{0:N2}" -f [double]$pt.targetMean), ("{0:N2} - {1:N2}" -f [double]$pt.targetLow, [double]$pt.targetHigh), ("Finnhub, {0}" -f [string]$pt.lastUpdated))
+    }
+    if (-not (Get-ProviderKey "Finnhub") -and (Test-UsSymbol $sym)) {
+        $i = $f.Rows.Add((Tr "Mehr mit Finnhub"), "", "", (Tr "Kostenloser Schlüssel in Einstellungen > Daten: Kennzahlen über Jahre, Quartalszahlen, Analysten-Trend"))
+        $f.Rows[$i].DefaultCellStyle.ForeColor = $p.Muted
+    }
     $c.FNote.Text = if ([bool]$pe.Own) {
         $miss = @(@($pe.Wanted) | Where-Object { @($pe.Syms) -notcontains $_ })
         "{0}: {1}{2}" -f (Tr "Vergleich = Median deiner Vergleichsgruppe (PEER)"), (@($pe.Syms) -join ", "), $(if ($miss.Count -gt 0) { " - " + (Tr "lädt noch") + ": " + ($miss -join ", ") } else { "" })
@@ -12466,8 +12727,11 @@ function Show-TickerAnalysis {
             if ($null -eq $c1 -or $c1.Sym -ne $Ctx.Sym) { return }
             $c1.Bars = ConvertFrom-YahooOhlc -Json $Box.Results[$Ctx.Url]
             $c1.Failed = ($null -eq $c1.Bars)
+            # V6: no Yahoo history -> Twelve Data / Finnhub (1 year)
+            if ($c1.Failed -and (Request-ProviderBars -Sym $c1.Sym -OnBars { param($b) $c2 = $script:TaCtl; if ($null -ne $c2) { $c2.Bars = $b; $c2.Failed = $false; Update-TickerAnalysis } })) { $c1.Failed = $false }
             Update-TickerAnalysis
         }
+        Request-ProviderAnalysis -Sym $c0.Sym
         $ev0 = $script:Events[$c0.Sym]
         if ($null -eq $ev0 -or $null -eq $ev0.Fund -or (Test-EventsStale -Entry $ev0)) {
             $c0.FundTried = $true
@@ -12757,6 +13021,7 @@ function Invoke-TerminalCommand {
                 Set-TransientStatus ("Design: {0}" -f $script:Config.UiStyle) 3
             }
             "HEALTH" { Show-HealthReport }
+            "PROV"   { Test-Providers }
             "IMG"    {
                 # IMG = chart to the clipboard, IMG SAVE, IMG WIN (whole window), IMG WIN SAVE
                 $aa = @($c.Args | ForEach-Object { ([string]$_).ToUpper() })
@@ -14845,7 +15110,13 @@ function Show-SettingsDialog {
     $nSlow    = & $addNum -Label "Nur-Watchlist-Ticker (Sekunden)" -Min 15 -Max 1800 -Value ([int]$cfg.SlowRefreshSeconds) -Tip "Ticker, die nur in der Watchlist stehen, und Wechselkurse" -TipKey "REFRESH" -Key "SlowRefreshSeconds" -Default ([int]$dc.SlowRefreshSeconds)
     $nHttp    = & $addNum -Label "HTTP-Timeout (Sekunden, ab Neustart)" -Min 3 -Max 60 -Value ([int]$cfg.HttpTimeoutSeconds) -Key "HttpTimeoutSeconds" -Default ([int]$dc.HttpTimeoutSeconds) -Words "Verbindung"
     $nClosed  = & $addNum -Label "Alle Börsen zu: nur alle X Minuten (0 = aus)" -Min 0 -Max 120 -Value ([int]$cfg.ClosedPollMinutes) -Tip "Spart Abfragen nachts und am Wochenende. F5 aktualisiert jederzeit." -TipKey "REFRESH" -Key "ClosedPollMinutes" -Default ([int]$dc.ClosedPollMinutes) -Words "nachts Wochenende"
-    & $addNote "Datenquelle: Yahoo Finance. Weitere Quellen (Twelve Data, Finnhub) folgen mit V6." 1 | Out-Null
+    & $addNote "Datenquelle: Yahoo Finance. Twelve Data und Finnhub springen ein bzw. ergänzen die Ticker-Analyse (kostenlose Schlüssel)." 1 | Out-Null
+    & $addSection "Weitere Datenquellen (eigene API-Schlüssel)"
+    $keyTip = "Wird verschlüsselt gespeichert (nur dein Windows-Konto). Leer = aus. Kostenlos: twelvedata.com / finnhub.io registrieren."
+    $tTdKey = & $addText -Label "Twelve Data API-Schlüssel" -Value $(if ([string]$cfg.TwelveDataKeyEnc) { "********" } else { "" }) -Tip ("Twelve Data (kostenlos): nur US-Börsen, 8 Anfragen pro Minute, 800 pro Tag - springt bei Tageskursen ein, wenn Yahoo nichts liefert. " + $keyTip) -Width (S 196) -Words "API Key Twelve Data Datenquelle Provider"
+    $tFhKey = & $addText -Label "Finnhub API-Schlüssel" -Value $(if ([string]$cfg.FinnhubKeyEnc) { "********" } else { "" }) -Tip ("Finnhub (kostenlos): 60 Anfragen pro Minute; Kennzahlen über Jahre, Quartalszahlen, Analysten-Trend in der Ticker-Analyse (US-Aktien). " + $keyTip) -Width (S 196) -Words "API Key Finnhub Datenquelle Provider"
+    foreach ($tk in @($tTdKey, $tFhKey)) { $tk.UseSystemPasswordChar = $true }
+    [void](& $addButton -Text "Datenquellen testen (PROV)" -Width (S 220) -Tip "Speichert die Einstellungen und prüft mit deinen Schlüsseln, welche Daten der kostenlose Zugang liefert" -Words "Test Provider Schlüssel prüfen" -Act { & $script:SettingsOpenAfter { Test-Providers } })
     & $addSection "Nachrichten (F4)"
     $nNewsMin  = & $addNum -Label "Neu laden alle (Minuten)" -Min 5 -Max 240 -Value ([int]$cfg.NewsRefreshMinutes) -Tip "Eine Abfrage je Ticker in Depot und Watchlist (max. 40). Sind alle Börsen zu, halb so oft." -Step 5 -Key "NewsRefreshMinutes" -Default ([int]$dc.NewsRefreshMinutes) -Words "News"
     $nNewsMove = & $addNum -Label "Ticker markieren ab Tagesbewegung (%)" -Min 0 -Max 50 -Value ([int]$cfg.NewsMoveThreshold) -Tip "Zeigt bei der neuesten Meldung, dass sich der Ticker heute stark bewegt (0 = aus)" -Key "NewsMoveThreshold" -Default ([int]$dc.NewsMoveThreshold) -Words "News"
@@ -15278,6 +15549,16 @@ function Show-SettingsDialog {
     $feedsNew = (@(ConvertTo-FeedList $tFeeds.Text) -join "`r`n")
     if ($feedsNew -ne [string]$cfg.NewsFeeds) { $script:NextNewsLoad = Get-Date }
     $cfg.NewsFeeds             = $feedsNew
+    # V6: keys - "********" = unchanged, empty = remove
+    foreach ($kp in @(@($tTdKey, "TwelveDataKeyEnc"), @($tFhKey, "FinnhubKeyEnc"))) {
+        $kt = ([string]$kp[0].Text).Trim()
+        if ($kt -eq "********") { continue }
+        if ($kt -ne [string](Unprotect-Secret ([string]$cfg.($kp[1])))) {
+            $cfg.($kp[1]) = if ($kt) { Protect-Secret $kt } else { "" }
+            # a new key: forget what the old one could do
+            if ($null -ne $cfg.ProviderCaps -and $cfg.ProviderCaps -isnot [string]) { $pfx = if ($kp[1] -like "Twelve*") { "TwelveData|" } else { "Finnhub|" }; foreach ($pp in @($cfg.ProviderCaps.PSObject.Properties | Where-Object { $_.Name -like "$pfx*" })) { $cfg.ProviderCaps.PSObject.Properties.Remove($pp.Name) } }
+        }
+    }
     $cfg.NewsMuted             = @($script:NewMuted)
     $hkNew = $tHk.Text.Trim()
     $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
@@ -15501,6 +15782,15 @@ function Get-HealthChecks {
     & $add "Symbol-Schrift" $(if ($script:IconFont) { "OK" } else { "WARN" }) $(if ($script:IconFont) { [string]$script:IconFont } else { "nicht gefunden - Knöpfe zeigen Text" })
     $monoOk = ([string]$script:Config.MonoFont -eq "Consolas" -or $script:InstalledFonts -contains [string]$script:Config.MonoFont)
     & $add "Zahlen-Schrift" $(if ($monoOk) { "OK" } else { "WARN" }) ([string]$script:Config.MonoFont)
+    # V6: data providers
+    foreach ($pv in @("TwelveData", "Finnhub")) {
+        if (-not (Get-ProviderKey $pv)) { & $add $pv "INFO" (Tr "kein Schlüssel"); continue }
+        $caps = @(); $no = @()
+        $pc = $script:Config.ProviderCaps
+        if ($null -ne $pc -and $pc -isnot [string]) { foreach ($pp in $pc.PSObject.Properties) { if ($pp.Name -like "$pv|*") { if ([bool]$pp.Value) { $caps += $pp.Name.Split("|")[1] } else { $no += $pp.Name.Split("|")[1] } } } }
+        $lim = (Get-ProviderLimits)[$pv]
+        & $add $pv $(if ($caps.Count -eq 0 -and $no.Count -gt 0) { "WARN" } else { "OK" }) ("{0}: {1}{2}; {3} {4}{5}" -f (Tr "nutzbar"), $(if ($caps.Count -gt 0) { $caps -join ", " } else { Tr "noch nicht getestet (PROV)" }), $(if ($no.Count -gt 0) { " (" + (Tr "nicht") + ": " + ($no -join ", ") + ")" } else { "" }), (Get-ProviderDayCount $pv), (Tr "Anfragen heute"), $(if ($lim.PerDay -gt 0) { " / " + $lim.PerDay } else { "" }))
+    }
     # v5.5: start time, memory, polling load
     if ($null -ne $script:StartupMs) { & $add "Startzeit" $(if ([int]$script:StartupMs -gt 15000) { "WARN" } else { "INFO" }) ("{0:N1} s bis zum Fenster" -f ([int]$script:StartupMs / 1000.0)) }
     try {
@@ -15751,6 +16041,14 @@ Signals         once a day: note when a depot ticker's signal turns, or the
 Chart           with support / resistance on: 50/200-day crossings (triangles)
 News            own RSS / Atom feeds (Settings > Data & refresh)
 THEME CONTRAST  high contrast; HEALTH shows requests per data source
+
+New in 6.0
+Settings        Data & refresh: own Twelve Data / Finnhub API keys (free)
+PROV            test which data your keys deliver (only that is used)
+Fallback        no Yahoo history -> Twelve Data -> Finnhub (US, free tiers)
+NVDA TA         with Finnhub: figures over the years, valuation vs. quarterly
+                history, earnings surprise + price reaction, analyst trend
+Limits          per-minute / per-day budgets kept, message when reached
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -15900,6 +16198,14 @@ Signale         einmal am Tag: Hinweis, wenn das Signal eines Depot-Tickers
 Chart           mit Unterstützung / Widerstand: 50/200-Tage-Kreuzungen (Dreiecke)
 Nachrichten     eigene RSS- / Atom-Feeds (Einstellungen > Daten)
 THEME CONTRAST  hoher Kontrast; HEALTH zeigt Anfragen je Datenquelle
+
+Neu in 6.0
+Einstellungen   Daten & Aktualisierung: eigene Twelve-Data- / Finnhub-Schlüssel
+PROV            prüft, was deine Schlüssel liefern (nur das wird genutzt)
+Ausweichen      kein Yahoo-Verlauf -> Twelve Data -> Finnhub (US, kostenlos)
+NVDA TA         mit Finnhub: Kennzahlen über Jahre, Bewertung vs. Quartals-
+                Historie, Quartalszahlen mit Kursreaktion, Analysten-Trend
+Limits          Minuten- / Tagesbudget wird eingehalten, Hinweis wenn erreicht
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
@@ -18480,6 +18786,35 @@ function Invoke-SmokeTest {
         $script:Config.Theme = "Dark"; Apply-ThemeToAllControls; & $pump
         if (@(Get-HealthChecks | Where-Object { $_.Name -eq "Abfragen" -and $_.Detail -match "Yahoo" }).Count -lt 1) { throw "health shows no requests per provider" }
     }
+    # V6: providers without keys, sample answers in the ticker analysis, budget, log redaction
+    Invoke-SmokeStep "V6 providers" {
+        Write-WidgetLog "smoke https://finnhub.io/api/v1/quote?symbol=AAPL&token=SECRET123"
+        if ((Get-Content -Path $script:LogPath -Tail 5) -join " " -match "SECRET123") { throw "API key written to the log" }
+        Test-Providers -Quiet
+        $script:Config.FinnhubKeyEnc = Protect-Secret "smoke-key"
+        if ((Get-ProviderKey "Finnhub") -ne "smoke-key") { throw "key round trip failed" }
+        $day = (Get-Date).ToString("yyyy-MM-dd")
+        $script:ProvCache["NVDA|Metric"] = [PSCustomObject]@{ Day = $day; Data = ('{"series":{"annual":{"pe":[{"period":"2024-12-31","v":50.1},{"period":"2025-12-31","v":45.2}],"netMargin":[{"period":"2025-12-31","v":48.8}]},"quarterly":{"pe":[' + ((1..10 | ForEach-Object { '{"period":"' + (Get-Date).AddMonths(-3 * $_).ToString("yyyy-MM-dd") + '","v":' + (30 + $_) + '}' }) -join ",") + ']}}}' | ConvertFrom-Json) }
+        $script:ProvCache["NVDA|Earnings"] = [PSCustomObject]@{ Day = $day; Data = ('[{"actual":0.89,"estimate":0.85,"period":"2026-07-31","surprisePercent":4.7}]' | ConvertFrom-Json) }
+        $script:ProvCache["NVDA|Recommendation"] = [PSCustomObject]@{ Day = $day; Data = ('[{"buy":40,"hold":5,"period":"2026-11-01","sell":1,"strongBuy":20,"strongSell":0},{"buy":38,"hold":6,"period":"2026-08-01","sell":1,"strongBuy":18,"strongSell":0}]' | ConvertFrom-Json) }
+        $script:Config.ProviderCaps = [PSCustomObject]@{ "Finnhub|Metric" = $false; "Finnhub|Earnings" = $false; "Finnhub|Calendar" = $false; "Finnhub|Recommendation" = $false; "Finnhub|PriceTarget" = $false; "Finnhub|Daily" = $false }
+        & $probeRun { Show-TickerAnalysis "NVDA" } {
+            $c = $script:TaCtl
+            if ($null -eq $c) { return "window not open" }
+            if ($null -ne $script:Events["NVDA"] -and $null -ne $script:Events["NVDA"].Fund) {
+                foreach ($h in @("Kennzahlen über die Jahre", "Quartalszahlen: Gewinn je Aktie", "Analysten (Trend)")) {
+                    if (@($c.FGrid.Rows | Where-Object { [string]$_.Cells[0].Value -eq $h }).Count -ne 1) { return "section '$h' missing" }
+                }
+                & $script:SmokeShot "21-ta-finnhub" $c.Dlg
+            }
+            return ""
+        } 8000
+        $script:Config.FinnhubKeyEnc = ""; $script:Config.ProviderCaps = [PSCustomObject]@{}
+        foreach ($k in @("Metric", "Earnings", "Recommendation")) { [void]$script:ProvCache.Remove("NVDA|$k") }
+        if (-not (Test-ProviderCap "Finnhub" "Metric")) { throw "untested capability should count as usable" }
+        [void](Select-ProviderUrls @(1..10 | ForEach-Object { [PSCustomObject]@{ Provider = "TwelveData"; Url = "https://api.twelvedata.com/x" } }))
+        if (@(Get-HealthChecks | Where-Object { $_.Name -eq "Finnhub" }).Count -ne 1) { throw "health has no provider line" }
+    } 10000
     Invoke-SmokeStep "Dialog places" {
         Show-CashDialog
         if ($null -eq $script:Config.DialogPlacement.PSObject.Properties["Cash"]) { throw "cash window place not saved" }
