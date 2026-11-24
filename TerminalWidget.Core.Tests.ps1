@@ -1687,6 +1687,9 @@ Describe "Polish (v4.9.5)" {
         @(Remove-MutedNews -Items $items -Muted @(" motley fool ")).Count | Should -Be 2
         @(Remove-MutedNews -Items $items -Muted @()).Count | Should -Be 3
         @(Remove-MutedNews -Items $items -Muted $null).Count | Should -Be 3
+        # an empty feed must not turn into one $null item (broke the News tab on 5.1)
+        @(Select-NewsItems -Items (Remove-MutedNews -Items @() -Muted @()) -Filter "All").Count | Should -Be 0
+        @(Select-NewsItems -Items $null -Filter "All").Count | Should -Be 0
     }
     It "reads keyword lists" {
         (ConvertTo-KeywordList "Downgrade, Übernahme;gewinnwarnung`n downgrade ,,") -join "|" | Should -Be "downgrade|übernahme|gewinnwarnung"

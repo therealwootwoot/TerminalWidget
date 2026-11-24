@@ -2902,7 +2902,8 @@ function Select-NewsItems {
     # Filter: "All", "Holdings", "Watchlist" or one ticker
     param($Items, [string]$Filter = "All", [string[]]$Holdings = @(), [string[]]$Watchlist = @())
     $f = ([string]$Filter).Trim()
-    if (-not $f -or $f -eq "All") { return @($Items) }
+    # an empty list coming out of another function arrives as $null: no $null items
+    if (-not $f -or $f -eq "All") { return @(@($Items) | Where-Object { $null -ne $_ }) }
     $set = New-Object System.Collections.Generic.HashSet[string]
     $src = switch ($f) {
         "Holdings"  { @($Holdings) }
@@ -2983,7 +2984,7 @@ function Remove-MutedNews {
     param($Items, [string[]]$Muted = @())
     $set = New-Object System.Collections.Generic.HashSet[string]
     foreach ($m in @($Muted)) { if ($m) { [void]$set.Add(([string]$m).Trim().ToLowerInvariant()) } }
-    if ($set.Count -eq 0) { return @($Items) }
+    if ($set.Count -eq 0) { return @(@($Items) | Where-Object { $null -ne $_ }) }
     return @(@($Items) | Where-Object { $null -ne $_ -and -not $set.Contains(([string]$_.Publisher).Trim().ToLowerInvariant()) })
 }
 

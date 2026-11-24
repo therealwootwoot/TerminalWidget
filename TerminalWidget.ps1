@@ -13386,6 +13386,7 @@ function Invoke-SmokeTest {
         Set-ActiveTab -TabName "Chart"
     }
     Invoke-SmokeStep "Undo + redo" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump   # PerformClick needs a visible button
         $script:Alerts.Add([PSCustomObject]@{ Id = "r"; Ticker = "MSFT"; Condition = ">="; TargetPrice = 99999.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
         Refresh-WatchlistAndAlerts
         $n0 = $script:Alerts.Count
@@ -13394,6 +13395,7 @@ function Invoke-SmokeTest {
         if (-not (Invoke-Undo)) { throw "undo failed" }
         if (-not (Invoke-Redo)) { throw "redo failed" }
         if ($script:Alerts.Count -ne ($n0 - 1)) { throw "redo did not delete again ($($script:Alerts.Count))" }
+        Set-ActiveTab -TabName "Chart"
     }
     Invoke-SmokeStep "Alert snooze" {
         Set-ActiveTab -TabName "Watchlist"; & $pump
