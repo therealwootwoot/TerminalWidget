@@ -2409,6 +2409,7 @@ function Get-AlertKind {
     if ($Condition -eq "52W Hoch")      { return "HIGH52" }
     if ($Condition -eq "52W Tief")      { return "LOW52" }
     if ($Condition -like "Volumen*")    { return "VOL" }
+    if ($Condition -like "Trend*")      { return "TREND" }   # v5.0: trend line from the chart
     return "PRICE"
 }
 
@@ -2458,6 +2459,17 @@ function Get-AlertEvaluation {
     }
     $cur = [string]$Alert.Currency
     switch (Get-AlertKind $cond) {
+        "TREND" {
+            # v5.0: the target moves along a trend line (T1/P1, T2/P2 in ms / alert currency)
+            $v = & $get "Price"; if ([double]::IsNaN($v)) { return $res }
+            $nowMs = & $get "NowMs"
+            if ([double]::IsNaN($nowMs)) { $nowMs = [double][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+            $line = Get-TrendPriceAt -T1 ([long]$Alert.T1) -P1 ([double]$Alert.P1) -T2 ([long]$Alert.T2) -P2 ([double]$Alert.P2) -T ([long]$nowMs)
+            if ([double]::IsNaN($line)) { return $res }
+            $t = $line
+            $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
+            $res.Text = "Kurs {0:N2} {1} vs. Trendlinie {2:N2} ({3})" -f $v, $cur, $line, $cond
+        }
         "PCT" {
             $v = & $get "ChangePct"; if ([double]::IsNaN($v)) { return $res }
             $res.Ok = $true; $res.Value = $v; $res.Met = & $cmp $v $cond
@@ -2687,6 +2699,7 @@ function Get-TerminalFunctions {
         "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
         "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
         "PRIV"   = @{ Scope = "G";  Desc = "Privat-Modus: Beträge ausblenden (PRIV ON / OFF, Taste F9)" }
+        "DRAW"   = @{ Scope = "G";  Desc = "Im Chart zeichnen: DRAW H (Linie) / T (Trendlinie) / F (Fibonacci) / CLEAR" }
         "CASH"   = @{ Scope = "G";  Desc = "Cash-Konto des Depots (Einzahlung, Auszahlung, Kontostand)" }
         "SPAR"   = @{ Scope = "G";  Desc = "Sparpläne (monatliche Käufe automatisch buchen)" }
         "REBAL"  = @{ Scope = "G";  Desc = "Zielgewichte und Rebalancing-Vorschlag" }
@@ -3865,4 +3878,105 @@ function Get-TreemapRects {
         }
     }
     return ,$rects
+}
+
+# ==============================================================================
+# v5.0 Stage B: chart drawings, Heikin-Ashi, trend line alerts
+# ==============================================================================
+function Get-FracIndexAtTs {
+    # Bars are drawn evenly spaced: a time -> fractional bar index (linear
+    # between two bars, extrapolated with the average spacing beyond the ends)
+    param([long[]]$BarTs, [long]$Ts)
+    $n = @($BarTs).Count
+    if ($n -eq 0) { return [double]::NaN }
+    if ($n -eq 1) { return 0.0 }
+    $avg = [double]($BarTs[$n - 1] - $BarTs[0]) / ($n - 1)
+    if ($avg -le 0) { return 0.0 }
+    if ($Ts -le $BarTs[0]) { return [double]($Ts - $BarTs[0]) / $avg }
+    if ($Ts -ge $BarTs[$n - 1]) { return ($n - 1) + [double]($Ts - $BarTs[$n - 1]) / $avg }
+    $lo = 0; $hi = $n - 1
+    while ($hi - $lo -gt 1) { $mid = [int](($lo + $hi) / 2); if ($BarTs[$mid] -le $Ts) { $lo = $mid } else { $hi = $mid } }
+    $span = [double]($BarTs[$hi] - $BarTs[$lo])
+    if ($span -le 0) { return [double]$lo }
+    return $lo + [double]($Ts - $BarTs[$lo]) / $span
+}
+
+function Get-TsAtFracIndex {
+    # Inverse of Get-FracIndexAtTs
+    param([long[]]$BarTs, [double]$Idx)
+    $n = @($BarTs).Count
+    if ($n -eq 0) { return 0L }
+    if ($n -eq 1) { return [long]$BarTs[0] }
+    $avg = [double]($BarTs[$n - 1] - $BarTs[0]) / ($n - 1)
+    if ($Idx -le 0) { return [long]([double]$BarTs[0] + $Idx * $avg) }
+    if ($Idx -ge ($n - 1)) { return [long]([double]$BarTs[$n - 1] + ($Idx - ($n - 1)) * $avg) }
+    $i = [int][math]::Floor($Idx)
+    $f = $Idx - $i
+    return [long]([double]$BarTs[$i] + $f * [double]($BarTs[$i + 1] - $BarTs[$i]))
+}
+
+function Get-FibLevels {
+    # Retracement from P1 (start of the move) to P2 (end): 0 % = P2, 100 % = P1
+    param([double]$P1, [double]$P2)
+    $out = @()
+    foreach ($pc in @(0.0, 23.6, 38.2, 50.0, 61.8, 78.6, 100.0)) { $out += [PSCustomObject]@{ Pct = $pc; Price = $P2 - ($P2 - $P1) * $pc / 100.0 } }
+    return $out
+}
+
+function Get-PointLineDistance {
+    # Pixel distance of (X, Y) to the segment (X1,Y1)-(X2,Y2); Ray = extends past (X2,Y2)
+    param([double]$X, [double]$Y, [double]$X1, [double]$Y1, [double]$X2, [double]$Y2, [bool]$Ray = $false)
+    $dx = $X2 - $X1; $dy = $Y2 - $Y1
+    $len2 = $dx * $dx + $dy * $dy
+    if ($len2 -le 0) { return [math]::Sqrt(($X - $X1) * ($X - $X1) + ($Y - $Y1) * ($Y - $Y1)) }
+    $t = (($X - $X1) * $dx + ($Y - $Y1) * $dy) / $len2
+    if ($t -lt 0) { $t = 0.0 }
+    if (-not $Ray -and $t -gt 1) { $t = 1.0 }
+    $px = $X1 + $t * $dx; $py = $Y1 + $t * $dy
+    return [math]::Sqrt(($X - $px) * ($X - $px) + ($Y - $py) * ($Y - $py))
+}
+
+function Get-TrendPriceAt {
+    # Price of a trend line (two points in time) at time T, linear in time
+    param([long]$T1, [double]$P1, [long]$T2, [double]$P2, [long]$T)
+    if ($T2 -eq $T1) { return [double]::NaN }
+    return $P1 + ($P2 - $P1) * ([double]($T - $T1) / [double]($T2 - $T1))
+}
+
+function ConvertTo-HeikinAshi {
+    # Bars (Ts, Open, High, Low, Close, Volume) -> Heikin-Ashi bars:
+    # close = (O+H+L+C)/4, open = (previous HA open + previous HA close)/2
+    param($Bars)
+    $out = New-Object System.Collections.Generic.List[object]
+    $po = [double]::NaN; $pc = [double]::NaN
+    foreach ($b in @($Bars)) {
+        if ($null -eq $b) { continue }
+        $o = [double]$b.Open; $h = [double]$b.High; $l = [double]$b.Low; $c = [double]$b.Close
+        if ($o -le 0) { $o = $c }
+        $hc = ($o + $h + $l + $c) / 4.0
+        $ho = if ([double]::IsNaN($po)) { ($o + $c) / 2.0 } else { ($po + $pc) / 2.0 }
+        $out.Add([PSCustomObject]@{ Ts = $b.Ts; Open = $ho; High = [math]::Max($h, [math]::Max($ho, $hc)); Low = [math]::Min($l, [math]::Min($ho, $hc)); Close = $hc; Volume = $b.Volume })
+        $po = $ho; $pc = $hc
+    }
+    return $out.ToArray()
+}
+
+function Get-NextChartType {
+    # K key / button: Linie -> Kerzen -> Heikin-Ashi -> Linie
+    param([string]$Current)
+    switch ($Current) { "Line" { return "Candle" } "Candle" { return "HA" } default { return "Line" } }
+}
+
+function Set-CompareList {
+    # v5.0: up to 3 comparison tickers. Adding a ticker that is already in
+    # the list removes it. -> @{ List; Msg }
+    param([string[]]$Current, [string]$Symbol, [int]$Max = 3)
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($c in @($Current)) { if ($c) { $u = ([string]$c).ToUpperInvariant(); if (-not $list.Contains($u)) { $list.Add($u) } } }
+    $s = ([string]$Symbol).Trim().ToUpperInvariant()
+    if (-not $s) { return [PSCustomObject]@{ List = @(); Msg = "removed all" } }
+    if ($list.Contains($s)) { [void]$list.Remove($s); return [PSCustomObject]@{ List = @($list); Msg = "removed" } }
+    if ($list.Count -ge $Max) { return [PSCustomObject]@{ List = @($list); Msg = "full" } }
+    $list.Add($s)
+    return [PSCustomObject]@{ List = @($list); Msg = "added" }
 }

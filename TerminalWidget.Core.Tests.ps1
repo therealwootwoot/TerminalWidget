@@ -1881,6 +1881,71 @@ Describe "Depot tools (v5.0)" {
     }
 }
 
+Describe "Chart tools (v5.0)" {
+    It "maps time to the evenly spaced bars and back" {
+        $ts = [long[]]@(0, 10, 20, 40)
+        Get-FracIndexAtTs -BarTs $ts -Ts 30 | Should -Be 2.5
+        Get-FracIndexAtTs -BarTs $ts -Ts 60 | Should -Be 4.5
+        Get-FracIndexAtTs -BarTs $ts -Ts -20 | Should -Be ([double](-20) / (40 / 3))
+        Get-TsAtFracIndex -BarTs $ts -Idx 2.5 | Should -Be 30
+        Get-TsAtFracIndex -BarTs $ts -Idx (Get-FracIndexAtTs -BarTs $ts -Ts 55) | Should -Be 55
+        [double]::IsNaN((Get-FracIndexAtTs -BarTs ([long[]]@()) -Ts 5)) | Should -BeTrue
+    }
+    It "computes Fibonacci levels from the start to the end of a move" {
+        $f = @(Get-FibLevels -P1 100 -P2 200)
+        $f.Count | Should -Be 7
+        ($f | Where-Object Pct -eq 0).Price | Should -Be 200
+        ($f | Where-Object Pct -eq 100).Price | Should -Be 100
+        [math]::Round(($f | Where-Object Pct -eq 61.8).Price, 2) | Should -Be 138.2
+    }
+    It "measures the distance of the mouse to a line" {
+        Get-PointLineDistance -X 5 -Y 3 -X1 0 -Y1 0 -X2 10 -Y2 0 | Should -Be 3
+        Get-PointLineDistance -X 20 -Y 0 -X1 0 -Y1 0 -X2 10 -Y2 0 | Should -Be 10
+        Get-PointLineDistance -X 20 -Y 0 -X1 0 -Y1 0 -X2 10 -Y2 0 -Ray $true | Should -Be 0
+    }
+    It "follows a trend line in time and alerts when the price crosses it" {
+        Get-TrendPriceAt -T1 0 -P1 100 -T2 1000 -P2 110 -T 1500 | Should -Be 115
+        [double]::IsNaN((Get-TrendPriceAt -T1 5 -P1 1 -T2 5 -P2 2 -T 9)) | Should -BeTrue
+        Get-AlertKind "Trend >=" | Should -Be "TREND"
+        $a = [PSCustomObject]@{ Condition = "Trend <="; TargetPrice = 0; Currency = "EUR"; T1 = 0; P1 = 100; T2 = 1000; P2 = 110 }
+        (Get-AlertEvaluation -Alert $a -Ctx @{ Price = 104; NowMs = 500 }).Met | Should -BeTrue
+        (Get-AlertEvaluation -Alert $a -Ctx @{ Price = 106; NowMs = 500 }).Met | Should -BeFalse
+        (Get-AlertEvaluation -Alert $a -Ctx @{ NowMs = 500 }).Ok | Should -BeFalse
+    }
+    It "builds Heikin-Ashi bars" {
+        $bars = @(
+            [PSCustomObject]@{ Ts = 1; Open = 10; High = 12; Low = 9; Close = 11; Volume = 5 },
+            [PSCustomObject]@{ Ts = 2; Open = 11; High = 13; Low = 10; Close = 12; Volume = 6 }
+        )
+        $h = @(ConvertTo-HeikinAshi $bars)
+        $h.Count | Should -Be 2
+        $h[0].Close | Should -Be 10.5
+        $h[0].Open | Should -Be 10.5
+        $h[1].Open | Should -Be 10.5
+        $h[1].Close | Should -Be 11.5
+        $h[1].High | Should -Be 13
+        $h[1].Low | Should -Be 10
+        $h[1].Volume | Should -Be 6
+    }
+    It "cycles the chart type" {
+        Get-NextChartType "Line" | Should -Be "Candle"
+        Get-NextChartType "Candle" | Should -Be "HA"
+        Get-NextChartType "HA" | Should -Be "Line"
+        Get-NextChartType "x" | Should -Be "Line"
+    }
+    It "keeps up to three comparisons" {
+        $r = Set-CompareList -Current @("QQQ") -Symbol "spy"
+        ($r.List -join ",") | Should -Be "QQQ,SPY"
+        $r.Msg | Should -Be "added"
+        (Set-CompareList -Current @("QQQ", "SPY") -Symbol "QQQ").List -join "," | Should -Be "SPY"
+        (Set-CompareList -Current @("A", "B", "C") -Symbol "D").Msg | Should -Be "full"
+        @((Set-CompareList -Current @("A") -Symbol "").List).Count | Should -Be 0
+    }
+    It "knows the drawing command" {
+        (ConvertFrom-TerminalCommand "DRAW T").Kind | Should -Be "Global"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

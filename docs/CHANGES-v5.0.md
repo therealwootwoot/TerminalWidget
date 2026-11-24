@@ -34,3 +34,27 @@ Data format version 5: on the first start the widget makes a backup of all data 
 - The Analyse window is wider (seven pages).
 - Glossary entries: Sharpe, Max. Drawdown, Volatilität, Beta, Rebalancing, Cash-Konto.
 - Tests: 9 new Pester tests (cash movements and balance, flow-adjusted returns, risk statistics, beta / correlation, rebalancing, savings plan dates, treemap); the UI smoke test switches the cash account on, books a real savings plan and opens the new pages with loaded data.
+
+## Stage B – Chart
+
+### Drawing tools (chart right-click → Zeichnen, key `D`, or `DRAW H` / `DRAW T` / `DRAW F`)
+- **Horizontal line**: one click. **Trend line**: click start and end; it continues to the right edge. **Fibonacci**: click the start and the end of a move; levels 0 / 23.6 / 38.2 / 50 / 61.8 / 78.6 / 100 % with prices.
+- While drawing a trend line or Fibonacci, a dashed line follows the mouse. Esc or a right-click cancels.
+- Drawings are saved per ticker (`drawings.json`) as time + price in the ticker's own currency, so they stay in place when you zoom, change the timeframe or the display currency.
+- Right-click a drawing: **Alarm auf diese Linie** (horizontal line → price alert above / below; trend line → an alert that moves along the line and fires when the price crosses it), delete it, or delete all drawings of the ticker. `DRAW CLEAR` does the same.
+
+### Own trades in the chart
+- Your buys (green ▲ below the price) and sales (red ▼ above) of the active ticker at the booked price and day. Hover shows date, shares, price and note. Switch off in the chart menu ("Eigene Käufe / Verkäufe anzeigen").
+- Ex-dividend markers now show the amount on hover too.
+
+### Compare up to 3 tickers
+- `MSFT CMP` adds MSFT to the comparison, the same command again removes it; up to 3 at once (pink, cyan, violet lines with their own % labels). `CMP` alone or "Vergleich entfernen" clears all. The watchlist / portfolio right-click "Im Chart vergleichen" adds too.
+
+### Heikin-Ashi candles
+- `K` or the chart-type button now cycles Linie → Kerzen → Heikin-Ashi. The candles are smoothed; price tags, the crosshair and the period return keep using the real prices.
+
+### Fixes
+- An alert pause (v4.9.5) is no longer lost when the widget restarts.
+
+### Tests
+- 8 new Pester tests (time ↔ bar mapping, Fibonacci, line hit test, trend line alerts, Heikin-Ashi, chart type cycle, comparison list); the UI smoke test draws all three kinds with real mouse clicks, finds them with a right-click hit test, creates line alerts, books a trade and renders it, cycles the chart types with K and loads three comparisons.

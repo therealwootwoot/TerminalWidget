@@ -555,6 +555,8 @@ $defaultConfig = [PSCustomObject]@{
     CompactTape           = $true
     ShowLevels            = $true
     CompareTicker         = ""
+    CompareMore           = @()               # v5.0: up to 2 more comparison tickers
+    ShowTrades            = $true             # v5.0: own buys / sells in the chart
     Autostart             = $false
     # v4.0
     Layout                = "Standard"        # Ticker / Compact / Standard / Terminal
@@ -615,7 +617,7 @@ if ($null -eq $script:Config.Watchlist -or @($script:Config.Watchlist).Count -eq
 
 if ([string]::IsNullOrWhiteSpace($script:Config.ActiveTicker)) { $script:Config.ActiveTicker = $script:Config.Watchlist[0] }
 if ([string]$script:Config.Currency -notin @(Get-DisplayCurrencies)) { $script:Config.Currency = "EUR" }
-if ($script:Config.ChartType -notin @("Line", "Candle")) { $script:Config.ChartType = "Line" }
+if ($script:Config.ChartType -notin @("Line", "Candle", "HA")) { $script:Config.ChartType = "Line" }
 if ($script:Config.ActiveTab -notin @("Chart", "Portfolio", "Watchlist", "News")) { $script:Config.ActiveTab = "Chart" }
 if ($script:Config.Theme -notin @(Get-ThemeNames)) { $script:Config.Theme = "Dark" }
 # v4.0 layouts: a v3 config only knows CompactMode
@@ -729,6 +731,13 @@ foreach ($a in $rawAlerts) {
             Peak        = $(if ($null -ne $a.Peak) { [double]$a.Peak } else { 0.0 })
             Push        = if ($null -ne $a.Push) { [bool]$a.Push } else { $true }
         })
+        # v4.9.5 pause and v5.0 trend line points survive a restart
+        $na = $script:Alerts[$script:Alerts.Count - 1]
+        if ($a.SnoozeUntil) { $na | Add-Member -NotePropertyName SnoozeUntil -NotePropertyValue ([string]$a.SnoozeUntil) -Force }
+        if ([string]$a.Condition -like "Trend*") {
+            foreach ($f in @("T1", "T2")) { $na | Add-Member -NotePropertyName $f -NotePropertyValue ([long]$a.$f) -Force }
+            foreach ($f in @("P1", "P2")) { $na | Add-Member -NotePropertyName $f -NotePropertyValue ([double]$a.$f) -Force }
+        }
     }
 }
 
@@ -1894,6 +1903,17 @@ function New-RefreshPlan {
     } else {
         $compare = ""
     }
+    # v5.0: further comparison tickers (up to 2)
+    $moreUrls = [ordered]@{}
+    if ($compare) {
+        foreach ($cm in @($script:Config.CompareMore)) {
+            $cu = ([string]$cm).ToUpper()
+            if (-not $cu -or $cu -eq $active -or $cu -eq $compare -or $moreUrls.Contains($cu) -or $moreUrls.Count -ge 2) { continue }
+            $mu = Get-ChartUrl -Symbol $cu -Interval $tfParams.Interval -Range $tfParams.Range -PrePost:$useExt
+            $moreUrls[$cu] = $mu
+            $urlList.Add($mu)
+        }
+    }
 
     $quoteUrlMap = @{}
     foreach ($sym in $allTickers) {
@@ -1925,6 +1945,7 @@ function New-RefreshPlan {
         Fallbacks      = $fallbacks
         Compare        = $compare
         CompareUrl     = $compareUrl
+        CompareMore    = $moreUrls
         Urls           = $urlList.ToArray()
         KnownFx        = $knownFx.ToArray()
     }
@@ -2110,6 +2131,16 @@ function Apply-RefreshResults {
         Build-ActiveChartSeries -Res0 $res0 -Plan $Plan
         $cmpRes = if ($Plan.CompareUrl) { Get-ChartResult $fetched[$Plan.CompareUrl] } else { $null }
         Build-CompareSeries -R $cmpRes -Plan $Plan
+        # v5.0: the further comparison tickers
+        $keepMore = @{}
+        if ($null -ne $Plan.CompareMore) {
+            foreach ($cm in @($Plan.CompareMore.Keys)) {
+                $al = Get-CompareAligned -R (Get-ChartResult $fetched[$Plan.CompareMore[$cm]]) -Plan $Plan
+                if ($null -ne $al) { $keepMore[$cm] = $al } elseif ($script:ActiveCompareMore.ContainsKey($cm)) { $keepMore[$cm] = $script:ActiveCompareMore[$cm] }
+            }
+        }
+        $script:ActiveCompareMore = $keepMore
+        $script:CompareMoreSig = (@($keepMore.Keys | Sort-Object | ForEach-Object { "{0}:{1}" -f $_, @($keepMore[$_]).Count }) -join ",")
     } elseif ($script:ActiveSeriesKey -eq $Plan.SeriesKey -and @($script:ActiveSeries).Count -ge 2) {
         # Transient fetch failure: keep showing the last good chart (status bar warns)
     } else {
@@ -2127,6 +2158,19 @@ function Apply-RefreshResults {
 
 $script:ActiveCompare = @()
 $script:CompareSig    = ""
+$script:ActiveCompareMore = @{}
+$script:CompareMoreSig = ""
+
+function Get-CompareAligned {
+    # v5.0: closes of a comparison chart aligned to the active bars, or $null
+    param($R, $Plan)
+    if ($null -eq $R -or $null -eq $R.timestamp -or $null -eq $R.indicators) { return $null }
+    $saveC = $script:ActiveCompare; $saveS = $script:CompareSig
+    Build-CompareSeries -R $R -Plan ([PSCustomObject]@{ Compare = "x"; Tf = $Plan.Tf })
+    $out = $script:ActiveCompare
+    $script:ActiveCompare = $saveC; $script:CompareSig = $saveS
+    return ,$out
+}
 
 function Build-CompareSeries {
     # Aligns the comparison ticker's closes to the active series (last known
@@ -2176,10 +2220,30 @@ function Set-CompareTicker {
     $sym = $Symbol.Trim().ToUpper()
     if ($sym) { $sym = Resolve-BestSymbol -RawInput $sym }
     $script:Config.CompareTicker = $sym
+    if (-not $sym) { $script:Config.CompareMore = @(); $script:ActiveCompareMore = @{} }
     $script:ActiveCompare = @()
     $script:CompareSig = ""
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     if ($sym) { Set-TransientStatus "Vergleich mit $sym wird geladen..." 3 } else { Set-TransientStatus "Vergleich entfernt" 2 }
+    Refresh-AllMarketData
+    Update-AllUiViews
+}
+
+function Switch-CompareTicker {
+    # v5.0: "NVDA CMP" / row menu: add a comparison (up to 3) or remove it again
+    param([string]$Symbol)
+    $sym = ([string]$Symbol).Trim().ToUpper()
+    if ($sym) { $sym = Resolve-BestSymbol -RawInput $sym }
+    if (-not $sym) { return }
+    $cur = @(@([string]$script:Config.CompareTicker) + @($script:Config.CompareMore) | Where-Object { $_ })
+    $r = Set-CompareList -Current $cur -Symbol $sym -Max 3
+    if ($r.Msg -eq "full") { Set-TransientStatus ("Höchstens 3 Vergleiche - erst einen entfernen ({0} CMP)" -f $cur[0]) 5; return }
+    $lst = @($r.List)
+    $script:Config.CompareTicker = if ($lst.Count -gt 0) { [string]$lst[0] } else { "" }
+    $script:Config.CompareMore = if ($lst.Count -gt 1) { @($lst[1..($lst.Count - 1)]) } else { @() }
+    $script:ActiveCompare = @(); $script:CompareSig = ""; $script:ActiveCompareMore = @{}
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-TransientStatus $(if ($r.Msg -eq "added") { "Vergleich: " + ($lst -join ", ") } elseif ($lst.Count -gt 0) { "$sym entfernt - Vergleich: " + ($lst -join ", ") } else { "Vergleich entfernt" }) 4
     Refresh-AllMarketData
     Update-AllUiViews
 }
@@ -2735,9 +2799,10 @@ function Render-ChartAndRsi {
     # v4.0: hit areas of legend texts for the hover explanations
     $legends = New-Object System.Collections.Generic.List[PSObject]
     $addLeg = {
-        param([string]$Txt, [double]$Lx, [double]$Ly, [string]$Key, $Font = $fontAxis)
+        param([string]$Txt, [double]$Lx, [double]$Ly, [string]$Key, $Font = $fontAxis, [string]$Tip = "")
         $lsz = $g.MeasureString($Txt, $Font)
-        $legends.Add([PSCustomObject]@{ R = (New-Object System.Drawing.RectangleF([float]$Lx, [float]$Ly, [float]$lsz.Width, [float]$lsz.Height)); Key = $Key })
+        # v5.0: Tip = own hover text (markers), else the glossary term of Key
+        $legends.Add([PSCustomObject]@{ R = (New-Object System.Drawing.RectangleF([float]$Lx, [float]$Ly, [float]$lsz.Width, [float]$lsz.Height)); Key = $Key; Tip = $Tip })
     }
 
     $rightAxisWidth = S 68
@@ -2807,7 +2872,42 @@ function Render-ChartAndRsi {
             }
         }
     }
-    $isCandle = ($script:Config.ChartType -eq "Candle")
+    # v5.0: further comparison lines, rebased like the first one
+    $moreLines = @()
+    if ($cmpSym -and $null -ne $script:ActiveCompareMore -and $script:ActiveCompareMore.Count -gt 0) {
+        $mColors = @([System.Drawing.Color]::FromArgb(6, 182, 212), [System.Drawing.Color]::FromArgb(168, 85, 247))
+        $mi = 0
+        foreach ($ms in @($script:Config.CompareMore)) {
+            $msu = ([string]$ms).ToUpper()
+            $raw = $script:ActiveCompareMore[$msu]
+            if ($null -eq $raw) { continue }
+            $vr = Get-ArraySlice $raw $s0 $s1
+            if (@($vr).Count -ne $n) { continue }
+            $bI = -1
+            for ($i = 0; $i -lt $n; $i++) { if (-not [double]::IsNaN([double]$vr[$i]) -and [double]$vr[$i] -gt 0 -and [double]$series[$i].Close -gt 0) { $bI = $i; break } }
+            if ($bI -lt 0) { continue }
+            $vals = New-Object double[] $n
+            $pcts = New-Object double[] $n
+            $bc = [double]$vr[$bI]; $bp = [double]$series[$bI].Close
+            for ($i = 0; $i -lt $n; $i++) {
+                $cv = [double]$vr[$i]
+                if ($i -lt $bI -or [double]::IsNaN($cv) -or $cv -le 0) { $vals[$i] = [double]::NaN; $pcts[$i] = [double]::NaN; continue }
+                $vals[$i] = $bp * ($cv / $bc)
+                $pcts[$i] = (($cv / $bc) - 1.0) * 100.0
+            }
+            $moreLines += [PSCustomObject]@{ Sym = $msu; Vals = $vals; Pct = $pcts; Color = $mColors[$mi % 2] }
+            $mi++
+        }
+    }
+    $isCandle = ($script:Config.ChartType -in @("Candle", "HA"))
+    # v5.0: Heikin-Ashi candles (from the full series, then the visible window); lines,
+    # HUD and price tags keep using the real prices
+    $cBars = $series
+    if ($script:Config.ChartType -eq "HA") {
+        $haAll = ConvertTo-HeikinAshi @($script:ActiveSeries)
+        $cBars = if ($s0 -gt 0 -or $s1 -lt ($totalN - 1)) { @($haAll[$s0..$s1]) } else { $haAll }
+        if (@($cBars).Count -ne $n) { $cBars = $series }
+    }
     $minP = [double]::MaxValue
     $maxP = [double]::MinValue
     $rawLow = [double]::MaxValue
@@ -2815,8 +2915,8 @@ function Render-ChartAndRsi {
     $maxVol = 0L
 
     for ($i = 0; $i -lt $n; $i++) {
-        $lo = if ($isCandle) { $series[$i].Low } else { $series[$i].Close }
-        $hi = if ($isCandle) { $series[$i].High } else { $series[$i].Close }
+        $lo = if ($isCandle) { [math]::Min($series[$i].Low, $cBars[$i].Low) } else { $series[$i].Close }
+        $hi = if ($isCandle) { [math]::Max($series[$i].High, $cBars[$i].High) } else { $series[$i].Close }
         if ($lo -lt $minP) { $minP = $lo }
         if ($hi -gt $maxP) { $maxP = $hi }
         if ($series[$i].Low  -lt $rawLow)  { $rawLow  = $series[$i].Low }
@@ -2850,6 +2950,7 @@ function Render-ChartAndRsi {
             }
         }
     }
+    foreach ($ml in $moreLines) { foreach ($mv in $ml.Vals) { if (-not [double]::IsNaN($mv)) { if ($mv -lt $minP) { $minP = $mv }; if ($mv -gt $maxP) { $maxP = $mv } } } }
     if ($script:ActivePrevClose -gt 0 -and $script:Config.Timeframe -eq "1d") {
         if ($script:ActivePrevClose -lt $minP) { $minP = $script:ActivePrevClose }
         if ($script:ActivePrevClose -gt $maxP) { $maxP = $script:ActivePrevClose }
@@ -2955,12 +3056,13 @@ function Render-ChartAndRsi {
 
         for ($i = 0; $i -lt $n; $i++) {
             $cx = [int]$pts[$i].X
-            $yOpen  = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].Open) $minP $spanP $isLog) * $priceRect.Height))
-            $yClose = [int]$pts[$i].Y
-            $yHigh  = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].High) $minP $spanP $isLog) * $priceRect.Height))
-            $yLow   = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].Low) $minP $spanP $isLog) * $priceRect.Height))
+            $cb = $cBars[$i]
+            $yOpen  = [int]($priceRect.Bottom - ((Get-PriceFrac ($cb.Open) $minP $spanP $isLog) * $priceRect.Height))
+            $yClose = if ([object]::ReferenceEquals($cBars, $series)) { [int]$pts[$i].Y } else { [int]($priceRect.Bottom - ((Get-PriceFrac ($cb.Close) $minP $spanP $isLog) * $priceRect.Height)) }
+            $yHigh  = [int]($priceRect.Bottom - ((Get-PriceFrac ($cb.High) $minP $spanP $isLog) * $priceRect.Height))
+            $yLow   = [int]($priceRect.Bottom - ((Get-PriceFrac ($cb.Low) $minP $spanP $isLog) * $priceRect.Height))
 
-            $bull = ($series[$i].Close -ge $series[$i].Open)
+            $bull = ($cb.Close -ge $cb.Open)
             $wPen = if ($bull) { $c["penUp"] } else { $c["penDown"] }
             $bBr  = if ($bull) { $c["brUp"] }  else { $c["brDown"] }
 
@@ -3078,6 +3180,29 @@ function Render-ChartAndRsi {
         }
     }
 
+    # v5.0: further comparison lines
+    foreach ($ml in $moreLines) {
+        $mPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
+        $lp = [double]::NaN
+        for ($i = 0; $i -lt $n; $i++) {
+            if ([double]::IsNaN($ml.Vals[$i])) { continue }
+            $ym = $priceRect.Bottom - ((Get-PriceFrac ($ml.Vals[$i]) $minP $spanP $isLog) * $priceRect.Height)
+            $mPts.Add((New-Object System.Drawing.PointF([float]$pts[$i].X, [float]$ym)))
+            $lp = $ml.Pct[$i]
+        }
+        $mPen = New-Object System.Drawing.Pen($ml.Color, [float]1.5)
+        $mBr = New-Object System.Drawing.SolidBrush($ml.Color)
+        try {
+            if ($mPts.Count -ge 2) { $g.DrawLines($mPen, $mPts.ToArray()) }
+            if (-not [double]::IsNaN($lp)) {
+                $mLbl = "vs {0} {1:+0.00;-0.00}%" -f $ml.Sym, $lp
+                $g.DrawString($mLbl, $fontAxis, $mBr, ($priceRect.Left + $leftLegendOffset), ($priceRect.Top + (S 4)))
+                & $addLeg $mLbl ($priceRect.Left + $leftLegendOffset) ($priceRect.Top + (S 4)) "COMPARE"
+                $leftLegendOffset += [int][math]::Ceiling($g.MeasureString($mLbl, $fontAxis).Width) + (S 8)
+            }
+        } finally { $mPen.Dispose(); $mBr.Dispose() }
+    }
+
     # Period Range & Return Info Badge (always: the hover HUD now sits below it)
     if ($basePrice -gt 0) {
         $periodPct = (($series[$n - 1].Close - $basePrice) / $basePrice) * 100.0
@@ -3091,6 +3216,8 @@ function Render-ChartAndRsi {
     }
 
     # Position cost basis (EK) and price alerts of this ticker as levels
+    # v5.0: own drawings (geometry like the overlay layout)
+    if ($script:DrawingsReady) { Draw-ChartDrawings -g $g -L @{ PriceRect = $priceRect; MinP = $minP; SpanP = $spanP; LogScale = $isLog; Series = $series; N = $n; OffsetY = 0 } }
     if ([bool]$script:Config.ShowLevels) {
         Draw-ChartLevels -g $g -PriceRect $priceRect -MinP $minP -SpanP $spanP -Legends $legends -IsLog $isLog
     }
@@ -3120,9 +3247,47 @@ function Render-ChartAndRsi {
                     (New-Object System.Drawing.PointF([float]$mx, [float]($my + (S 5)))), (New-Object System.Drawing.PointF([float]($mx - (S 5)), [float]$my)))
                 $g.FillPolygon($mBr, $pts)
                 $dTxt = "Ex-Dividende {0:N2} {1}" -f ([double]$dv.Amount), $script:ActiveNativeCurr
-                & $addLeg $dTxt ($mx - (S 6)) ($my - (S 6)) "EXDATE"
+                & $addLeg "xx" ($mx - (S 6)) ($my - (S 6)) "EXDATE" $fontAxis $dTxt
             }
         } finally { $mBr.Dispose() }
+    }
+    # v5.0: own buys / sells of this ticker as triangles at the booked price
+    $actU = ([string]$script:Config.ActiveTicker).ToUpper()
+    if ([bool]$script:Config.ShowTrades -and $n -ge 2) {
+        $txA = @($script:Transactions | Where-Object { ([string]$_.Ticker).ToUpper() -eq $actU -and [string]$_.Type -in @("Kauf", "Verkauf") })
+        if ($txA.Count -gt 0) {
+            $dayIdx = @{}
+            for ($i = 0; $i -lt $n; $i++) {
+                $dk = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$series[$i].Ts).LocalDateTime.ToString("yyyy-MM-dd")
+                if (-not $dayIdx.ContainsKey($dk)) { $dayIdx[$dk] = $i }
+            }
+            $buyBr = New-Object System.Drawing.SolidBrush($colGreen)
+            $sellBr = New-Object System.Drawing.SolidBrush($colRed)
+            $outPen = New-Object System.Drawing.Pen($script:Pal.PanelBg, [float]1)
+            try {
+                foreach ($tx in $txA) {
+                    $ti = $dayIdx[[string]$tx.Date]
+                    if ($null -eq $ti) { continue }
+                    $tpx = Convert-CurrencyValue -Amount ([double]$tx.Price) -FromCurrency ([string]$tx.Currency) -ToCurrency ([string]$script:Config.Currency)
+                    if ($tpx -le 0) { continue }
+                    $tx0 = $priceRect.Left + (([int]$ti / [double]($n - 1)) * $priceRect.Width)
+                    $ty0 = $priceRect.Bottom - ((Get-PriceFrac $tpx $minP $spanP $isLog) * $priceRect.Height)
+                    $ty0 = [math]::Max($priceRect.Top + (S 8), [math]::Min($priceRect.Bottom - (S 8), $ty0))
+                    $isBuy = ([string]$tx.Type -eq "Kauf")
+                    $sz = S 6
+                    $tri = if ($isBuy) {
+                        [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF([float]$tx0, [float]($ty0 + 2))), (New-Object System.Drawing.PointF([float]($tx0 + $sz), [float]($ty0 + 2 + $sz * 1.4))), (New-Object System.Drawing.PointF([float]($tx0 - $sz), [float]($ty0 + 2 + $sz * 1.4))))
+                    } else {
+                        [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF([float]$tx0, [float]($ty0 - 2))), (New-Object System.Drawing.PointF([float]($tx0 + $sz), [float]($ty0 - 2 - $sz * 1.4))), (New-Object System.Drawing.PointF([float]($tx0 - $sz), [float]($ty0 - 2 - $sz * 1.4))))
+                    }
+                    $g.FillPolygon($(if ($isBuy) { $buyBr } else { $sellBr }), $tri)
+                    $g.DrawPolygon($outPen, $tri)
+                    $tTip = "{0} {1}: {2:N4} Stk @ {3:N2} {4}{5}" -f $(if ($isBuy) { "Kauf" } else { "Verkauf" }), (Format-IsoDateDe ([string]$tx.Date)), [double]$tx.Shares, [double]$tx.Price, [string]$tx.Currency, $(if ($tx.Note) { " - " + [string]$tx.Note } else { "" })
+                    $ly = if ($isBuy) { $ty0 + 2 } else { $ty0 - 2 - $sz * 1.4 }
+                    & $addLeg "xx" ($tx0 - $sz) $ly "" $fontAxis $tTip
+                }
+            } finally { $buyBr.Dispose(); $sellBr.Dispose(); $outPen.Dispose() }
+        }
     }
     $evA = $script:Events[([string]$script:Config.ActiveTicker).ToUpper()]
     if ($null -ne $evA -and $evA.EarningsDate) {
@@ -3463,6 +3628,16 @@ function Render-ChartOverlay {
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
 
+    # v5.0: line being drawn (first point fixed, second at the mouse)
+    if ($null -ne $script:DrawPending -and $null -ne $script:DrawMouse -and $n -ge 2) {
+        $tmp = [PSCustomObject]@{ Kind = "T"; T1 = [long]$script:DrawPending.T; P1 = [double]$script:DrawPending.P; T2 = [long]$script:DrawMouse.T; P2 = [double]$script:DrawMouse.P; Cur = [string]$script:Config.Currency }
+        $pxT = Get-DrawingPixels -L $L -D $tmp
+        $rb = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(250, 204, 21), [float]1.5)
+        $rb.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+        $g.DrawLine($rb, [float]$pxT.X1, [float]($pxT.Y1 + [int]$L.OffsetY), [float]$pxT.X2, [float]($pxT.Y2 + [int]$L.OffsetY))
+        $rb.Dispose()
+    }
+
     # Measure tool (left mouse drag): change between two bars
     $m = $script:Measure
     if ($m.Active -and $m.Key -eq $script:ActiveSeriesKey) {
@@ -3605,6 +3780,7 @@ function Update-ChartCacheSignature {
     # Bumps the version only when something the static chart shows changed
     # (alerts / status / tray updates no longer force a full re-render)
     $cfg = $script:Config
+    if ($script:DrawingsReady) { Update-DrawingsSig }
     $ser = $script:ActiveSeries
     $serId = 0
     $lastTs = 0L
@@ -3621,8 +3797,9 @@ function Update-ChartCacheSignature {
         $cfg.SmaFastPeriod, $cfg.SmaSlowPeriod, $cfg.RsiPeriod, $cfg.RsiOverbought, $cfg.RsiOversold,
         $lblLivePrice.Text, $lblDayChange.Text, $lblDayAbs.Text, $lblExtQuote.Text, $lblHeaderName.Text,
         $cfg.ShowLevels, (@(Get-ChartLevels | ForEach-Object { "{0:N4}{1}{2}" -f $_.Price, $_.Kind, $_.Hit }) -join ","),
-        $cfg.CompareTicker, $script:CompareSig, $script:ViewCount, $script:ViewOffset,
-        $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType, [bool]$cfg.ShowPrevClose
+        $cfg.CompareTicker, $script:CompareSig, $script:CompareMoreSig, $script:ViewCount, $script:ViewOffset,
+        $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType, [bool]$cfg.ShowPrevClose,
+        [bool]$cfg.ShowTrades, $script:Transactions.Count, [string]$cfg.ChartType, $script:DrawingsSig
     ) -join "|"
     if ($sig -ne $script:ChartSignature) {
         $script:ChartSignature = $sig
@@ -3758,6 +3935,7 @@ $script:EnText = @{
     "Ganze Seite" = "Full page"; "Tab nochmal klicken, F1 oder Esc = zurück" = "click the tab again, F1 or Esc = back"; "Privat-Modus: Beträge ausblenden (F9)" = "Privacy mode: hide amounts (F9)"
     # v5.0
     "Cash-Konto für dieses Depot führen" = "Keep a cash account for this depot"; "Währung:" = "Currency:"; "Einzahlung" = "Deposit"; "Auszahlung" = "Withdrawal"; "Zinsen" = "Interest"; "Stand setzen" = "Set balance"; "Kontostand" = "Balance"; "Aus - Haken setzen, um den Kontostand mitzuführen" = "Off - tick the box to track the balance"; "Kontostand beim Einschalten" = "Balance when switched on"; "gesetzt auf" = "set to"; "+ Sparplan" = "+ Savings plan"; "Jetzt prüfen" = "Check now"; "Speichern" = "Save"; "Transaktion" = "Transaction"; "Cash-Konto ... (CASH)" = "Cash account ... (CASH)"; "Sparpläne ... (SPAR)" = "Savings plans ... (SPAR)"; "Zielgewichte / Rebalancing (REBAL)" = "Target weights / rebalancing (REBAL)"; "Risiko (RISK)" = "Risk (RISK)"; "Heatmap (HEAT)" = "Heatmap (HEAT)"; "Risiko" = "Risk"; "Zielgewichte" = "Targets"; "Risikoloser Zins für Sharpe (% p.a.):" = "Risk-free rate for Sharpe (% p.a.):"; "Kennzahl" = "Measure"; "Depot" = "Depot"; "Zu wenig Verlauf - erst ein paar Wochen Buchungen / Kurse" = "Not enough history yet - a few weeks of bookings / prices needed"; "Zeitraum" = "Period"; "Werte" = "values"; "Rendite p.a. (zeitgewichtet)" = "Return p.a. (time-weighted)"; "Rendite im Zeitraum" = "Return in period"; "Volatilität p.a." = "Volatility p.a."; "Max. Drawdown" = "Max. drawdown"; "Beta zur Benchmark" = "Beta vs. benchmark"; "Korrelation zur Benchmark" = "Correlation with benchmark"; "Bester Tag" = "Best day"; "Schlechtester Tag" = "Worst day"; "gemeinsame Tage" = "common days"; "Neues Geld:" = "New money:"; "Cash-Konto einbeziehen" = "Include cash account"; "Nur kaufen (nichts verkaufen)" = "Buy only (no sales)"; "Gleich verteilen" = "Equal weights"; "Ziele löschen" = "Clear targets"; "Noch keine Ziele: in der Spalte 'Ziel %' Anteile eintragen (Enter) oder 'Gleich verteilen'. Positionen ohne Ziel bleiben unverändert." = "No targets yet: enter shares in the 'Ziel %' column (Enter) or use 'Equal weights'. Positions without a target stay as they are."; "Basis (Positionen mit Ziel + Geld)" = "Base (positions with target + money)"; "übrig" = "left"; "Vorschlag ohne Gebühren und Steuern, Stückzahlen gerundet auf 2 Stellen. Keine Anlageberatung." = "Suggestion without fees and taxes, shares rounded to 2 decimals. Not investment advice."; "Privat-Modus: Beträge ausgeblendet (F9)." = "Privacy mode: amounts hidden (F9)."; "Depot (Größe = Anteil)" = "Depot (size = weight)"; "Watchlist (gleich groß)" = "Watchlist (equal size)"; "Keine Positionen mit aktuellem Kurs." = "No positions with a current price."
+    "Zeichnen" = "Draw"; "Horizontale Linie" = "Horizontal line"; "Trendlinie (D)" = "Trend line (D)"; "Fibonacci" = "Fibonacci"; "Alle Zeichnungen dieses Tickers löschen" = "Delete all drawings of this ticker"; "Alarm auf diese Linie" = "Alert on this line"; "Zeichnung löschen" = "Delete drawing"; "Eigene Käufe / Verkäufe anzeigen" = "Show own buys / sells"
 }
 
 function Tr {
@@ -4480,6 +4658,30 @@ $cmiPrevClose.Add_Click({
     Update-AllUiViews
 })
 [void]$chartContextMenu.Items.Add($cmiPrevClose)
+# v5.0: own trades as markers
+$cmiTrades = New-Object System.Windows.Forms.ToolStripMenuItem("Eigene Käufe / Verkäufe anzeigen")
+$cmiTrades.CheckOnClick = $true
+$cmiTrades.Checked = [bool]$script:Config.ShowTrades
+$cmiTrades.Add_Click({
+    $script:Config.ShowTrades = $cmiTrades.Checked
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    $script:ChartSignature = ""
+    Update-AllUiViews
+})
+[void]$chartContextMenu.Items.Add($cmiTrades)
+# v5.0: drawing tools
+$cmiDraw = New-Object System.Windows.Forms.ToolStripMenuItem("Zeichnen")
+foreach ($dk in @(@("H", "Horizontale Linie"), @("T", "Trendlinie (D)"), @("F", "Fibonacci"))) {
+    $dmi = New-Object System.Windows.Forms.ToolStripMenuItem($dk[1])
+    $dmi.Tag = $dk[0]
+    $dmi.Add_Click({ param($sender, $e) Set-DrawMode ([string]$sender.Tag) })
+    [void]$cmiDraw.DropDownItems.Add($dmi)
+}
+[void]$cmiDraw.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$cmiDrawClear = New-Object System.Windows.Forms.ToolStripMenuItem("Alle Zeichnungen dieses Tickers löschen")
+$cmiDrawClear.Add_Click({ Remove-Drawing -All })
+[void]$cmiDraw.DropDownItems.Add($cmiDrawClear)
+[void]$chartContextMenu.Items.Add($cmiDraw)
 # "Alarm here" goes on top; its text is set when the menu opens
 $cmiAlertHere = New-Object System.Windows.Forms.ToolStripMenuItem("Alarm hier setzen")
 $chartContextMenu.Items.Insert(0, $cmiAlertHere)
@@ -4627,7 +4829,7 @@ function Update-ChartLegendTip {
     if ($id -eq $script:LegendTipKey) { return }
     $script:LegendTipKey = $id
     if ($null -eq $hit) { $toolTip.Hide($Canvas); return }
-    $txt = Get-TooltipText -Text "" -Key $hit.Key -Mode $mode
+    $txt = Get-TooltipText -Text ([string]$hit.Tip) -Key $hit.Key -Mode $mode
     if (-not $txt) { return }
     $dur = if ($mode -eq "Long") { 30000 } else { 10000 }
     $toolTip.Show($txt, $Canvas, [int]($X + (S 14)), [int]($Y + (S 18)), [int]$dur)
@@ -4638,6 +4840,7 @@ $script:ChartMouseMoveHandler = {
     # Hit-testing uses the geometry of the bitmap that is actually on screen
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
+    if ($null -ne $script:DrawPending) { $script:DrawMouse = Get-ChartPointAt -L $L -X $e.X -Y $e.Y; $sender.Invalidate() }
     Update-ChartLegendTip -Canvas $sender -L $L -X $e.X -Y $e.Y
     $idx = Get-HoverIndexAt -L $L -X $e.X
     $m = $script:Measure
@@ -4658,12 +4861,24 @@ $script:ChartMouseDownHandler = {
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+        if ($script:DrawMode) { Set-DrawMode ""; $script:CtxDrawing = $null; return }
+        $script:CtxDrawing = Find-DrawingAt -L $L -X $e.X -Y $e.Y
         # price under the mouse for "Alarm hier setzen"
         $my = $e.Y - [int]$L.OffsetY
         $pr = $L.PriceRect
         $script:CtxPrice = if ($my -ge $pr.Top -and $my -le $pr.Bottom -and $pr.Height -gt 0) {
             Get-PriceFromFrac (($pr.Bottom - $my) / [double]$pr.Height) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)
         } else { [double]::NaN }
+        return
+    }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:DrawMode) {
+        # v5.0: drawing tools
+        $pt = Get-ChartPointAt -L $L -X $e.X -Y $e.Y
+        if ($null -eq $pt) { return }
+        if ($script:DrawMode -eq "H") { Add-Drawing -Kind "H" -A $pt; Set-DrawMode ""; return }
+        if ($null -eq $script:DrawPending) { $script:DrawPending = $pt; Set-TransientStatus "Jetzt den zweiten Punkt klicken (Esc = abbrechen)" 8; return }
+        Add-Drawing -Kind $script:DrawMode -A $script:DrawPending -B $pt
+        Set-DrawMode ""
         return
     }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
@@ -7597,7 +7812,7 @@ function Update-AllUiViews {
     }
 
     $togglePairs = @(
-        @{ Btn = $btnChartType;  Active = ($script:Config.ChartType -eq "Candle") },
+        @{ Btn = $btnChartType;  Active = ($script:Config.ChartType -in @("Candle", "HA")) },
         @{ Btn = $btnToggleVol;  Active = [bool]$script:Config.ShowVolume },
         @{ Btn = $btnToggleSma;  Active = [bool]$script:Config.ShowSma },
         @{ Btn = $btnToggleVwap; Active = [bool]$script:Config.ShowVwap },
@@ -7612,6 +7827,9 @@ function Update-AllUiViews {
             Style-FlatButton -Btn $tp.Btn -BgColor $p.Card -FgColor $p.Text -BorderColor $p.Border
         }
     }
+    # v5.0: Linie / Kerzen / Heikin-Ashi (K cycles)
+    $ctTxt = if ([string]$script:Config.ChartType -eq "HA") { "Heikin-A." } else { Tr "Kerzen" }
+    if ($btnChartType.Text -ne $ctTxt) { $btnChartType.Text = $ctTxt }
 
     if ($script:QuoteStore.ContainsKey($sym)) {
         $q = $script:QuoteStore[$sym]
@@ -7778,7 +7996,7 @@ foreach ($k in $tfButtons.Keys) {
 }
 
 $btnChartType.Add_Click({
-    $script:Config.ChartType = if ($script:Config.ChartType -eq "Candle") { "Line" } else { "Candle" }
+    $script:Config.ChartType = Get-NextChartType ([string]$script:Config.ChartType)
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     Update-AllUiViews
 })
@@ -10563,6 +10781,14 @@ function Invoke-TerminalCommand {
                 Update-AllUiViews
             }
             "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "DRAW"   {
+                switch ($arg0) {
+                    "H" { Set-DrawMode "H" } "T" { Set-DrawMode "T" } "F" { Set-DrawMode "F" } "FIB" { Set-DrawMode "F" }
+                    "CLEAR" { Remove-Drawing -All }
+                    default { return "DRAW H (Linie) / T (Trendlinie) / F (Fibonacci) / CLEAR" }
+                }
+                if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" }
+            }
             "CASH"   { Show-CashDialog }
             "SPAR"   { Show-SavingsPlansDialog }
             "REBAL"  { Show-AnalysisDialog -Page "Target" }
@@ -10645,7 +10871,7 @@ function Invoke-TerminalCommand {
             Set-TransientStatus ("Alarm angelegt: {0}" -f (Format-AlertLine -Alert $script:Alerts[$script:Alerts.Count - 1])) 5
         }
         "WL"   { [void](Add-SymbolToWatchlist -RawSymbol $sym) }
-        "CMP"  { Set-CompareTicker -Symbol $sym; if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" } }
+        "CMP"  { Switch-CompareTicker -Symbol $sym; if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" } }
         "TX"   { Show-TransactionDialog -Ticker $sym }
     }
     return ""
@@ -12985,7 +13211,240 @@ $cmiAddWatch.Add_Click({
 $cmiExportCsv.Add_Click({ $btnExportCsv.PerformClick() })
 $cmiFullscreen.Add_Click({ Toggle-ChartFullscreen })
 
+# ==============================================================================
+# v5.0 Stage B: drawings in the chart (horizontal line, trend line, Fibonacci)
+# saved per ticker in drawings.json as (time, price in the ticker's currency),
+# so they survive zoom, timeframe and display currency changes.
+# ==============================================================================
+$script:DrawingsPath = Join-Path $script:DataDir "drawings.json"
+$script:Drawings = @{}
+$script:DrawMode = ""
+$script:DrawPending = $null
+$script:DrawMouse = $null
+$script:CtxDrawing = $null
+$script:DrawingsSig = ""
+function Read-Drawings {
+    $script:Drawings = @{}
+    $raw = Load-JsonState -Path $script:DrawingsPath -DefaultValue $null
+    if ($null -eq $raw) { return }
+    foreach ($pp in $raw.PSObject.Properties) {
+        $l = New-Object System.Collections.Generic.List[object]
+        foreach ($d in @($pp.Value)) {
+            if ($null -eq $d -or -not $d.Kind) { continue }
+            $l.Add([PSCustomObject]@{ Id = [string]$d.Id; Kind = [string]$d.Kind; T1 = [long]$d.T1; P1 = [double]$d.P1; T2 = [long]$d.T2; P2 = [double]$d.P2; Cur = [string]$d.Cur })
+        }
+        if ($l.Count -gt 0) { $script:Drawings[([string]$pp.Name).ToUpper()] = $l }
+    }
+    Update-DrawingsSig
+}
+function Save-Drawings {
+    $o = [ordered]@{}
+    foreach ($k in @($script:Drawings.Keys | Sort-Object)) { if ($script:Drawings[$k].Count -gt 0) { $o[$k] = $script:Drawings[$k].ToArray() } }
+    Save-JsonState -Path $script:DrawingsPath -Data ([PSCustomObject]$o)
+    Update-DrawingsSig
+}
+function Update-DrawingsSig {
+    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    $script:DrawingsSig = if ($null -eq $l) { "0" } else { "{0}|{1}" -f $l.Count, (@($l | ForEach-Object { $_.Id }) -join ",") }
+}
+
+function Set-DrawMode {
+    param([string]$Mode)
+    $script:DrawMode = $Mode
+    $script:DrawPending = $null
+    $script:DrawMouse = $null
+    $cur = if ($Mode) { [System.Windows.Forms.Cursors]::Cross } else { [System.Windows.Forms.Cursors]::Default }
+    $pnlChartCanvas.Cursor = $cur
+    if ($null -ne $script:FsCanvas -and -not $script:FsCanvas.IsDisposed) { $script:FsCanvas.Cursor = $cur }
+    switch ($Mode) {
+        "H" { Set-TransientStatus "Horizontale Linie: in den Chart klicken (Esc = abbrechen)" 8 }
+        "T" { Set-TransientStatus "Trendlinie: Startpunkt klicken, dann Endpunkt (Esc = abbrechen)" 8 }
+        "F" { Set-TransientStatus "Fibonacci: Anfang der Bewegung klicken, dann das Ende (Esc = abbrechen)" 8 }
+    }
+    $pnlChartCanvas.Invalidate()
+}
+
+function Get-ChartPointAt {
+    # Mouse position -> @{ T (ms); P (display currency) } on the visible chart, or $null
+    param($L, [int]$X, [int]$Y)
+    $pr = $L.PriceRect
+    $my = $Y - [int]$L.OffsetY
+    if ($L.N -lt 2 -or $X -lt $pr.Left -or $X -gt $pr.Right -or $my -lt $pr.Top -or $my -gt $pr.Bottom) { return $null }
+    $ts = [long[]]@($L.Series | ForEach-Object { [long]$_.Ts })
+    $fi = ($X - $pr.Left) / [double]$pr.Width * ($L.N - 1)
+    $p = Get-PriceFromFrac (($pr.Bottom - $my) / [double]$pr.Height) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)
+    return [PSCustomObject]@{ T = (Get-TsAtFracIndex -BarTs $ts -Idx $fi); P = $p }
+}
+
+function Get-DrawingPixels {
+    # Drawing -> pixel coordinates on a chart layout (display currency)
+    param($L, $D)
+    $pr = $L.PriceRect
+    $ts = [long[]]@($L.Series | ForEach-Object { [long]$_.Ts })
+    $fx = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$D.Cur) -ToCurrency ([string]$script:Config.Currency)
+    $toY = { param([double]$P) $pr.Bottom - ((Get-PriceFrac ($P * $fx) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)) * $pr.Height) }
+    $toX = { param([long]$T) $pr.Left + ((Get-FracIndexAtTs -BarTs $ts -Ts $T) / [double]([math]::Max(1, $L.N - 1))) * $pr.Width }
+    return [PSCustomObject]@{ X1 = (& $toX $D.T1); Y1 = (& $toY $D.P1); X2 = $(if ($D.Kind -eq "H") { $pr.Right } else { & $toX $D.T2 }); Y2 = $(if ($D.Kind -eq "H") { & $toY $D.P1 } else { & $toY $D.P2 }); Fx = $fx }
+}
+
+function Find-DrawingAt {
+    param($L, [int]$X, [int]$Y, [int]$Tol = 6)
+    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    if ($null -eq $l -or $L.N -lt 2) { return $null }
+    $my = $Y - [int]$L.OffsetY
+    $best = $null; $bd = [double](S $Tol)
+    foreach ($d in $l) {
+        $px = Get-DrawingPixels -L $L -D $d
+        $dist = switch ($d.Kind) {
+            "H" { [math]::Abs($my - $px.Y1) }
+            "T" { Get-PointLineDistance -X $X -Y $my -X1 $px.X1 -Y1 $px.Y1 -X2 $px.X2 -Y2 $px.Y2 -Ray $true }
+            default {
+                $m = [double]::MaxValue
+                foreach ($lv in (Get-FibLevels -P1 $d.P1 -P2 $d.P2)) {
+                    $yy = $L.PriceRect.Bottom - ((Get-PriceFrac ($lv.Price * $px.Fx) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)) * $L.PriceRect.Height)
+                    if ($X -ge [math]::Min($px.X1, $px.X2) - 4) { $m = [math]::Min($m, [math]::Abs($my - $yy)) }
+                }
+                $m
+            }
+        }
+        if ($dist -le $bd) { $bd = $dist; $best = $d }
+    }
+    return $best
+}
+
+function Add-Drawing {
+    param([string]$Kind, $A, $B = $null)
+    $u = ([string]$script:Config.ActiveTicker).ToUpper()
+    $nat = if ($script:ActiveNativeCurr) { [string]$script:ActiveNativeCurr } else { [string]$script:Config.Currency }
+    $back = Convert-CurrencyValue -Amount 1.0 -FromCurrency ([string]$script:Config.Currency) -ToCurrency $nat
+    $d = [PSCustomObject]@{ Id = [Guid]::NewGuid().ToString("N").Substring(0, 12); Kind = $Kind; T1 = [long]$A.T; P1 = [double]$A.P * $back; T2 = 0L; P2 = 0.0; Cur = $nat }
+    if ($null -ne $B) { $d.T2 = [long]$B.T; $d.P2 = [double]$B.P * $back }
+    if (-not $script:Drawings.ContainsKey($u)) { $script:Drawings[$u] = New-Object System.Collections.Generic.List[object] }
+    $script:Drawings[$u].Add($d)
+    Save-Drawings
+    $script:ChartSignature = ""
+    Update-ChartCacheSignature
+    $pnlChartCanvas.Invalidate()
+    if ($null -ne $script:FsCanvas -and -not $script:FsCanvas.IsDisposed) { $script:FsCanvas.Invalidate() }
+}
+
+function Remove-Drawing {
+    param($D, [switch]$All)
+    $u = ([string]$script:Config.ActiveTicker).ToUpper()
+    if ($All) { [void]$script:Drawings.Remove($u) }
+    elseif ($null -ne $D -and $script:Drawings.ContainsKey($u)) {
+        for ($i = 0; $i -lt $script:Drawings[$u].Count; $i++) { if ($script:Drawings[$u][$i].Id -eq $D.Id) { $script:Drawings[$u].RemoveAt($i); break } }
+    }
+    Save-Drawings
+    $script:ChartSignature = ""
+    Update-ChartCacheSignature
+    $pnlChartCanvas.Invalidate()
+}
+
+function Draw-ChartDrawings {
+    # Static layer: all drawings of the active ticker
+    param([System.Drawing.Graphics]$g, $L)
+    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    if ($null -eq $l -or $l.Count -eq 0 -or $L.N -lt 2) { return }
+    $pr = $L.PriceRect
+    $col = [System.Drawing.Color]::FromArgb(250, 204, 21)
+    $pen = New-Object System.Drawing.Pen($col, [float]1.5)
+    $fibPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(160, $col.R, $col.G, $col.B), [float]1)
+    $fibPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+    $br = New-Object System.Drawing.SolidBrush($col)
+    $oldClip = $g.Clip
+    $g.SetClip($pr)
+    try {
+        foreach ($d in $l) {
+            $px = Get-DrawingPixels -L $L -D $d
+            switch ($d.Kind) {
+                "H" {
+                    $g.DrawLine($pen, [float]$pr.Left, [float]$px.Y1, [float]$pr.Right, [float]$px.Y1)
+                    $g.DrawString(("{0:N2}" -f ($d.P1 * $px.Fx)), $fontAxis, $br, [float]($pr.Left + (S 4)), [float]($px.Y1 - (S 14)))
+                }
+                "T" {
+                    # ray: from point 1 through point 2 to the right edge
+                    $x2 = $px.X2; $y2 = $px.Y2
+                    if ([math]::Abs($px.X2 - $px.X1) -gt 0.5) {
+                        $slope = ($px.Y2 - $px.Y1) / ($px.X2 - $px.X1)
+                        $xe = if ($px.X2 -ge $px.X1) { $pr.Right } else { $pr.Left }
+                        $x2 = $xe; $y2 = $px.Y1 + $slope * ($xe - $px.X1)
+                    }
+                    $g.DrawLine($pen, [float]$px.X1, [float]$px.Y1, [float]$x2, [float]$y2)
+                    $g.FillEllipse($br, [float]($px.X1 - 3), [float]($px.Y1 - 3), [float]6, [float]6)
+                    $g.FillEllipse($br, [float]($px.X2 - 3), [float]($px.Y2 - 3), [float]6, [float]6)
+                }
+                "F" {
+                    $xs = [math]::Max([double]$pr.Left, [math]::Min($px.X1, $px.X2))
+                    foreach ($lv in (Get-FibLevels -P1 $d.P1 -P2 $d.P2)) {
+                        $yy = $pr.Bottom - ((Get-PriceFrac ($lv.Price * $px.Fx) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)) * $pr.Height)
+                        $g.DrawLine($(if ($lv.Pct -in @(0.0, 100.0)) { $pen } else { $fibPen }), [float]$xs, [float]$yy, [float]$pr.Right, [float]$yy)
+                        $g.DrawString(("{0:0.#}%  {1:N2}" -f $lv.Pct, ($lv.Price * $px.Fx)), $fontAxis, $br, [float]($xs + (S 4)), [float]($yy - (S 13)))
+                    }
+                }
+            }
+        }
+    } finally {
+        $g.Clip = $oldClip
+        $pen.Dispose(); $fibPen.Dispose(); $br.Dispose()
+    }
+}
+
+function New-DrawingAlert {
+    # horizontal line -> price alert, trend line -> alert that follows the line
+    param($D)
+    if ($null -eq $D) { return }
+    $sym = ([string]$script:Config.ActiveTicker).ToUpper()
+    $q = $script:QuoteStore[$sym]
+    if ($null -eq $q -or [double]$q.Price -le 0) { Set-TransientStatus "Noch kein Kurs - später nochmal versuchen" 4; return }
+    $cur = [string]$D.Cur
+    $now = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $cur
+    if ($D.Kind -eq "H") {
+        $op = if ($D.P1 -ge $now) { ">=" } else { "<=" }
+        if (Add-WidgetAlert -Ticker $sym -Condition $op -Target ([math]::Round($D.P1, 4)) -Currency $cur -Note "Linie im Chart" -NoConfirm) {
+            Set-TransientStatus ("Alarm: {0} {1} {2:N2} {3}" -f $sym, $op, $D.P1, $cur) 5
+        }
+        return
+    }
+    if ($D.Kind -eq "T") {
+        $lineNow = Get-TrendPriceAt -T1 $D.T1 -P1 $D.P1 -T2 $D.T2 -P2 $D.P2 -T ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+        $op = if ($lineNow -ge $now) { "Trend >=" } else { "Trend <=" }
+        $a = [PSCustomObject]@{
+            Id = [Guid]::NewGuid().ToString("N"); Ticker = $sym; Condition = $op; TargetPrice = [math]::Round($lineNow, 4); Currency = $cur
+            Triggered = $false; Note = "Trendlinie im Chart"; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true
+            T1 = $D.T1; P1 = $D.P1; T2 = $D.T2; P2 = $D.P2
+        }
+        $script:Alerts.Add($a)
+        Save-Alerts
+        Refresh-WatchlistAndAlerts
+        Set-TransientStatus ("Alarm: {0} kreuzt die Trendlinie (jetzt {1:N2} {2})" -f $sym, $lineNow, $cur) 6
+    }
+}
+
+# right-click menu on a drawing
+$drawMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miDrAlert = $drawMenu.Items.Add("Alarm auf diese Linie")
+$miDrDel = $drawMenu.Items.Add("Zeichnung löschen")
+$miDrDelAll = $drawMenu.Items.Add("Alle Zeichnungen dieses Tickers löschen")
+$script:MenuDrawing = $null
+$miDrAlert.Add_Click({ New-DrawingAlert $script:MenuDrawing })
+$miDrDel.Add_Click({ Remove-Drawing $script:MenuDrawing })
+$miDrDelAll.Add_Click({ Remove-Drawing -All })
+
+Read-Drawings
+$script:DrawingsReady = $true
+
 $chartContextMenu.Add_Opening({
+    param($sender, $e)
+    # v5.0: right-click on a drawing opens its own menu
+    if ($null -ne $script:CtxDrawing) {
+        $e.Cancel = $true
+        $script:MenuDrawing = $script:CtxDrawing
+        $script:CtxDrawing = $null
+        $miDrAlert.Enabled = ($script:MenuDrawing.Kind -in @("H", "T"))
+        $drawMenu.Show([System.Windows.Forms.Cursor]::Position)
+        return
+    }
     $px = $script:CtxPrice
     $sym = $script:Config.ActiveTicker.ToUpper()
     $cmiAlertHere.Enabled = -not [double]::IsNaN($px) -and $script:QuoteStore.ContainsKey($sym)
@@ -13428,7 +13887,7 @@ $miRowNews.Add_Click({ Set-NewsFilter $script:RowMenuSym; Set-ActiveTab -TabName
 $miRowCmp.Add_Click({
     $s0 = $script:RowMenuSym
     if ($s0 -eq ([string]$script:Config.ActiveTicker).ToUpper()) { Set-TransientStatus "Das ist der aktive Ticker - erst einen anderen öffnen" 4; return }
-    Set-CompareTicker -Symbol $s0
+    Switch-CompareTicker -Symbol $s0
     if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" }
 })
 $miRowDes.Add_Click({ Show-DescriptionDialog $script:RowMenuSym })
@@ -13802,6 +14261,13 @@ $script:GlobalKeyHandler = {
         Toggle-ChartFullscreen
         return
     }
+    # v5.0: Esc first leaves the drawing mode
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:DrawMode) {
+        $e.Handled = $true
+        Set-DrawMode ""
+        Set-TransientStatus "Zeichnen abgebrochen" 2
+        return
+    }
     # Esc: first clears a measurement, then closes the fullscreen chart
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:Measure.Active) {
         $e.Handled = $true
@@ -13919,8 +14385,9 @@ $script:GlobalKeyHandler = {
         ([System.Windows.Forms.Keys]::T) {
             $btnThemeCycle.PerformClick(); $e.Handled = $true
         }
+        ([System.Windows.Forms.Keys]::D) { if ($script:DrawMode) { Set-DrawMode "" } else { Set-DrawMode "T" }; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::K) {
-            $script:Config.ChartType = if ($script:Config.ChartType -eq "Candle") { "Line" } else { "Candle" }
+            $script:Config.ChartType = Get-NextChartType ([string]$script:Config.ChartType)
             Save-JsonState -Path $script:ConfigPath -Data $script:Config
             Update-AllUiViews; $e.Handled = $true
         }
@@ -14352,6 +14819,54 @@ function Invoke-SmokeTest {
         [void]$script:SavingsPlans.Remove($pl)
         Save-SavingsPlans
     }
+    # v5.0 Stage B
+    Invoke-SmokeStep "Chart types + trades" {
+        Set-ActiveTab -TabName "Chart"; Set-Timeframe -Tf "1d"; & $pump
+        [void](Invoke-Transaction -Type "Kauf" -Ticker "NVDA" -Shares 1 -Price 100 -Fee 0 -Currency "USD" -Date (Get-Date).ToString("yyyy-MM-dd") -Note "smoke")
+        foreach ($ct in @("HA", "Candle", "Line")) { $script:Config.ChartType = $ct; Update-AllUiViews; $pnlChartCanvas.Refresh(); & $pump }
+        & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::K)); & $pump
+        if ([string]$script:Config.ChartType -ne "Candle") { throw "K did not cycle the chart type ($($script:Config.ChartType))" }
+        $script:Config.ChartType = "Line"; Update-AllUiViews
+    }
+    Invoke-SmokeStep "Compare three" {
+        Switch-CompareTicker -Symbol "MSFT"; Switch-CompareTicker -Symbol "SAP.DE"; Switch-CompareTicker -Symbol "AAPL"
+        if (@($script:Config.CompareMore).Count -ne 2) { throw "expected 2 extra comparisons, got $(@($script:Config.CompareMore).Count)" }
+        Switch-CompareTicker -Symbol "AMD"
+        if (@($script:Config.CompareMore).Count -ne 2) { throw "a fourth comparison was accepted" }
+        Refresh-AllMarketData -Force
+        for ($i = 0; $i -lt 60 -and $script:IsRefreshing; $i++) { Start-Sleep -Milliseconds 250; & $pump }
+        Update-AllUiViews; $pnlChartCanvas.Refresh(); & $pump
+        if ($script:ActiveCompareMore.Count -lt 1) { $script:SmokeNotes.Add("compare: extra lines not loaded (offline?)") }
+        Set-CompareTicker -Symbol ""
+        if (@($script:Config.CompareMore).Count -ne 0) { throw "clearing did not remove the extra comparisons" }
+    }
+    Invoke-SmokeStep "Drawings" {
+        Set-ActiveTab -TabName "Chart"; Update-AllUiViews; $pnlChartCanvas.Refresh(); & $pump
+        $L = Get-CanvasLayout -Canvas $pnlChartCanvas
+        if ($null -eq $L) { $script:SmokeNotes.Add("drawings: no chart layout (no data?)"); return }
+        $pr = $L.PriceRect
+        $click = { param([int]$X, [int]$Y, $Btn = [System.Windows.Forms.MouseButtons]::Left) & $script:ChartMouseDownHandler $pnlChartCanvas (New-Object System.Windows.Forms.MouseEventArgs($Btn, 1, $X, ($Y + [int]$L.OffsetY), 0)); & $pump }
+        $u = ([string]$script:Config.ActiveTicker).ToUpper()
+        $n0 = if ($script:Drawings.ContainsKey($u)) { $script:Drawings[$u].Count } else { 0 }
+        Set-DrawMode "H"; & $click ($pr.Left + [int]($pr.Width / 2)) ($pr.Top + [int]($pr.Height / 3))
+        Set-DrawMode "T"; & $click ($pr.Left + 20) ($pr.Bottom - 30); & $click ($pr.Right - 40) ($pr.Top + 40)
+        & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::D)); & $pump
+        if ($script:DrawMode -ne "T") { throw "D did not start the trend line mode" }
+        Set-DrawMode "F"; & $click ($pr.Left + 60) ($pr.Bottom - 20); & $click ($pr.Left + 200) ($pr.Top + 20)
+        if ($script:Drawings[$u].Count -ne ($n0 + 3)) { throw "expected 3 new drawings, got $($script:Drawings[$u].Count - $n0)" }
+        $pnlChartCanvas.Refresh(); & $pump
+        $hit = Find-DrawingAt -L $L -X ($pr.Left + 10) -Y ($pr.Top + [int]($pr.Height / 3) + [int]$L.OffsetY)
+        if ($null -eq $hit -or $hit.Kind -ne "H") { throw "right-click hit test did not find the horizontal line" }
+        $na = $script:Alerts.Count
+        New-DrawingAlert $hit
+        New-DrawingAlert (@($script:Drawings[$u] | Where-Object { $_.Kind -eq "T" })[0])
+        if ($script:Alerts.Count -lt $na + 1) { $script:SmokeNotes.Add("drawing alerts: no quote yet") }
+        Evaluate-GlobalAlerts
+        Read-Drawings
+        if ($script:Drawings[$u].Count -ne ($n0 + 3)) { throw "drawings were not saved" }
+        Remove-Drawing -All
+        Set-DrawMode ""
+    }
     Invoke-SmokeStep "Prev close + health" {
         Set-Timeframe -Tf "1d"; & $pump
         $cmiPrevClose.PerformClick(); & $pump
@@ -14360,7 +14875,7 @@ function Invoke-SmokeTest {
         if (-not $script:HealthLevel) { throw "no health level after refresh" }
     }
     foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
-    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL", "NEWS DEPOT", "NEWS MSFT", "NEWS", "N", "PRIV ON", "PRIV OFF")) {
+    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL", "NEWS DEPOT", "NEWS MSFT", "NEWS", "N", "PRIV ON", "PRIV OFF", "DRAW H", "DRAW CLEAR", "NVDA CMP", "CMP")) {
         Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
     }
     Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
