@@ -1554,6 +1554,117 @@ Describe "Log scale and chart markers (v4.8)" {
     }
 }
 
+Describe "News tab (v4.9)" {
+    BeforeAll {
+        $now = Get-Date -Year 2026 -Month 11 -Day 24 -Hour 12 -Minute 0 -Second 0
+        function New-TestNews {
+            param([string]$Title, [string]$Link, [double]$HoursAgo, [string[]]$Tickers = @(), [string]$Pub = "P")
+            [PSCustomObject]@{ Title = $Title; Publisher = $Pub; Link = $Link; Time = $now.AddHours(-$HoursAgo); Tickers = $Tickers }
+        }
+    }
+    It "asks for holdings first, each ticker once, without FX / indices / futures" {
+        $s = @(Get-NewsSymbols -Holdings @("nvda", "EUNL.DE") -Watchlist @("NVDA", "^GSPC", "EURUSD=X", "GC=F", "BTC-USD", " ", $null, "msft"))
+        ($s -join ",") | Should -Be "NVDA,EUNL.DE,BTC-USD,MSFT"
+        @(Get-NewsSymbols -Watchlist @("A", "B", "C") -Max 2).Count | Should -Be 2
+        @(Get-NewsSymbols).Count | Should -Be 0
+    }
+    It "merges per-ticker lists into one feed, newest first, without duplicates" {
+        $by = @{
+            "NVDA" = @((New-TestNews "Chips up" "https://x.example/a?src=yahoo" 1 @("NVDA", "AMD")), (New-TestNews "Old one" "https://x.example/old" 30))
+            "AMD"  = @((New-TestNews "Chips up" "https://x.example/a" 1), (New-TestNews "AMD news" "" 0.5))
+            "MSFT" = @((New-TestNews "Ancient" "https://x.example/z" (24 * 20)))
+        }
+        $f = @(Merge-NewsFeed -BySymbol $by -Now $now)
+        ($f | ForEach-Object { $_.Title }) -join "|" | Should -Be "AMD news|Chips up|Old one"
+        ($f[1].Syms -join ",") | Should -Be "AMD,NVDA"
+        $f[0].Key | Should -Be "t:amd news"
+        @(Merge-NewsFeed -BySymbol $by -Now $now -Max 1).Count | Should -Be 1
+        @(Merge-NewsFeed -BySymbol @{} -Now $now).Count | Should -Be 0
+        @(Merge-NewsFeed -BySymbol $null -Now $now).Count | Should -Be 0
+    }
+    It "adds related tickers only when they are ours" {
+        $by = @{ "NVDA" = @((New-TestNews "T" "https://x.example/t" 1 @("TSM", "nvda", "MSFT"))); "MSFT" = @() }
+        $f = @(Merge-NewsFeed -BySymbol $by -Now $now)
+        ($f[0].Syms -join ",") | Should -Be "MSFT,NVDA"
+    }
+    It "filters by holdings, watchlist or one ticker" {
+        $items = @(
+            [PSCustomObject]@{ Title = "a"; Syms = @("NVDA") },
+            [PSCustomObject]@{ Title = "b"; Syms = @("MSFT", "AMD") },
+            [PSCustomObject]@{ Title = "c"; Syms = @("TSLA") }
+        )
+        @(Select-NewsItems -Items $items -Filter "All").Count | Should -Be 3
+        @(Select-NewsItems -Items $items -Filter "").Count | Should -Be 3
+        (@(Select-NewsItems -Items $items -Filter "Holdings" -Holdings @("nvda", "AMD")) | ForEach-Object { $_.Title }) -join "" | Should -Be "ab"
+        (@(Select-NewsItems -Items $items -Filter "Watchlist" -Watchlist @("TSLA")) | ForEach-Object { $_.Title }) -join "" | Should -Be "c"
+        (@(Select-NewsItems -Items $items -Filter "msft") | ForEach-Object { $_.Title }) -join "" | Should -Be "b"
+        @(Select-NewsItems -Items $items -Filter "Holdings" -Holdings @()).Count | Should -Be 0
+    }
+    It "formats the age of an item" {
+        Format-NewsAge -Time $now.AddSeconds(-20) -Now $now | Should -Be "jetzt"
+        Format-NewsAge -Time $now.AddSeconds(30) -Now $now | Should -Be "jetzt"
+        Format-NewsAge -Time $now.AddMinutes(-12) -Now $now | Should -Be "vor 12 min"
+        Format-NewsAge -Time $now.AddMinutes(-12) -Now $now -Lang "EN" | Should -Be "12 min ago"
+        Format-NewsAge -Time $now.AddHours(-3.5) -Now $now | Should -Be "vor 3 h"
+        Format-NewsAge -Time $now.Date.AddDays(-1).AddHours(14.5) -Now $now | Should -Be "gestern 14:30"
+        Format-NewsAge -Time $now.Date.AddDays(-1).AddHours(14.5) -Now $now -Lang "EN" | Should -Be "yesterday 14:30"
+        Format-NewsAge -Time $now.Date.AddDays(-3).AddHours(9.25) -Now $now | Should -Be "21.11. 09:15"
+        Format-NewsAge -Time ([DateTime]::MinValue) -Now $now | Should -Be ""
+    }
+    It "counts unread items" {
+        $items = @([PSCustomObject]@{ Time = $now }, [PSCustomObject]@{ Time = $now.AddHours(-2) }, [PSCustomObject]@{ Time = [DateTime]::MinValue })
+        Get-NewsUnreadCount -Items $items -Since $now.AddHours(-1) | Should -Be 1
+        Get-NewsUnreadCount -Items $items -Since ([DateTime]::MinValue) | Should -Be 2
+        Get-NewsUnreadCount -Items @() -Since $now | Should -Be 0
+    }
+    It "marks the ticker that moves most today" {
+        $pct = @{ "NVDA" = 4.2; "AMD" = -6.1; "MSFT" = 0.4; "X" = [double]::NaN }
+        $m = Get-NewsMover -Syms @("nvda", "AMD") -DayPct $pct -Threshold 3
+        $m.Sym | Should -Be "AMD"
+        $m.Pct | Should -Be -6.1
+        Get-NewsMover -Syms @("MSFT", "X", "NONE") -DayPct $pct -Threshold 3 | Should -BeNullOrEmpty
+        Get-NewsMover -Syms @("NVDA") -DayPct $pct -Threshold 0 | Should -BeNullOrEmpty
+        Get-NewsMover -Syms @("NVDA") -DayPct $null | Should -BeNullOrEmpty
+    }
+    It "polls less often while markets are closed" {
+        Get-NewsPollMinutes -Minutes 15 | Should -Be 15
+        Get-NewsPollMinutes -Minutes 15 -AllClosed $true | Should -Be 30
+        Get-NewsPollMinutes -Minutes 1 | Should -Be 5
+        Get-NewsPollMinutes -Minutes 200 -AllClosed $true | Should -Be 240
+    }
+    It "puts the news tab below the chart in the Terminal layout" {
+        $r = Get-TerminalLayoutRects -X 10 -Y 90 -W 1600 -H 900 -ChartPct 50 -ActiveBottom "News" -PanelMinW 756 -Gap 8 -MinBottomH 300
+        $r.News | Should -Be @(10, 548, 1600, 442)
+        $r.Watchlist | Should -BeNullOrEmpty
+        $r.Portfolio | Should -BeNullOrEmpty
+        $r2 = Get-TerminalLayoutRects -X 0 -Y 0 -W 900 -H 800 -ShowWatch $false -ShowPortfolio $false -ActiveBottom "News"
+        $r2.News | Should -Not -BeNullOrEmpty
+        (Get-TerminalLayoutRects -X 0 -Y 0 -W 900 -H 800 -ActiveBottom "Watchlist").News | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Look and feel (v4.9)" {
+    It "uses the wanted number font only when it is installed" {
+        Resolve-MonoFont -Wanted "Cascadia Mono" -Installed @("Arial", "Cascadia Mono") | Should -Be "Cascadia Mono"
+        Resolve-MonoFont -Wanted "Cascadia Mono" -Installed @("Arial") | Should -Be "Consolas"
+        Resolve-MonoFont -Wanted "Comic Sans MS" -Installed @("Comic Sans MS") | Should -Be "Consolas"
+        Resolve-MonoFont -Wanted "" -Installed @() | Should -Be "Consolas"
+    }
+    It "scales font sizes in half points" {
+        Get-ScaledFontSize -Base 8.5 -ScalePct 100 | Should -Be 8.5
+        Get-ScaledFontSize -Base 8.5 -ScalePct 110 | Should -Be 9.5
+        Get-ScaledFontSize -Base 8.5 -ScalePct 90 | Should -Be 7.5
+        Get-ScaledFontSize -Base 13 -ScalePct 120 | Should -Be 15.5
+        Get-ScaledFontSize -Base 8.5 -ScalePct 77 | Should -Be 8.5
+    }
+    It "picks the window corner style" {
+        Get-WindowCornerPref -Kind "Window" | Should -Be 2
+        Get-WindowCornerPref -Kind "Strip" | Should -Be 3
+        Get-WindowCornerPref -Kind "Fullscreen" | Should -Be 1
+        Get-WindowCornerPref -Kind "Window" -Round $false | Should -Be 1
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
