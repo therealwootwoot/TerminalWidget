@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "4.7"
+$script:AppVersion    = "4.8"
 $script:SchemaVersion = 4
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -510,6 +510,9 @@ $defaultConfig = [PSCustomObject]@{
     FirstRunDone          = $false
     # v4.7
     Language              = "DE"
+    # v4.8
+    LogScale              = $false
+    CompactShow           = "DayAbs,Ext,Spark,Market"
     SmaFastPeriod         = 20
     SmaSlowPeriod         = 50
     RsiPeriod             = 14
@@ -1765,7 +1768,7 @@ function New-RefreshPlan {
         }
     }
 
-    $activeChartUrl = Get-ChartUrl -Symbol $active -Interval $tfParams.Interval -Range $tfParams.Range -PrePost:$useExt
+    $activeChartUrl = (Get-ChartUrl -Symbol $active -Interval $tfParams.Interval -Range $tfParams.Range -PrePost:$useExt) + "&events=div"
     $fallbackUrl = ""
     $fallbacks = @{}
     if ($tf -eq "1d") {
@@ -2175,6 +2178,8 @@ function Build-ActiveChartSeries {
     $is1d     = ($tf -eq "1d")
 
     $script:ActiveLoadError = ""
+    # v4.8: ex-dividend dates for the markers in the chart
+    $script:ActiveDividends = @(ConvertFrom-ChartDividendEvents $Res0)
     $meta0 = $Res0.meta
     $rawCurr0 = if ($meta0.currency) { [string]$meta0.currency } else { "USD" }
     $rawMkt0  = if ($null -ne $meta0.regularMarketPrice) { [double]$meta0.regularMarketPrice } else { 0.0 }
@@ -2728,9 +2733,17 @@ function Render-ChartAndRsi {
         if ($script:ActivePrevClose -gt $maxP) { $maxP = $script:ActivePrevClose }
     }
     if ($maxP -eq $minP) { $maxP += 1.0; $minP -= 1.0 }
-    $padRange = ($maxP - $minP) * 0.08
-    $minP -= $padRange
-    $maxP += $padRange
+    # v4.8: logarithmic price axis (only possible with positive prices)
+    $isLog = [bool]$script:Config.LogScale
+    $lr = if ($isLog) { Get-LogPaddedRange -Min $minP -Max $maxP } else { $null }
+    if ($null -ne $lr) {
+        $minP = $lr.Min; $maxP = $lr.Max
+    } else {
+        $isLog = $false
+        $padRange = ($maxP - $minP) * 0.08
+        $minP -= $padRange
+        $maxP += $padRange
+    }
     $spanP = $maxP - $minP
 
     # Horizontal Grid & Right Y-Axis
@@ -2738,7 +2751,7 @@ function Render-ChartAndRsi {
     for ($s = 0; $s -le $gridSteps; $s++) {
         $frac = $s / [double]$gridSteps
         $y = [int]($priceRect.Bottom - ($frac * $priceRect.Height))
-        $val = $minP + ($frac * $spanP)
+        $val = Get-PriceFromFrac $frac $minP $spanP $isLog
         $g.DrawLine($c["gridPen"], $priceRect.Left, $y, $priceRect.Right, $y)
         $g.DrawString(("{0:N2}" -f $val), $fontAxis, $c["axisTextBrush"], ($priceRect.Right + (S 6)), ($y - (S 6)))
     }
@@ -2789,7 +2802,7 @@ function Render-ChartAndRsi {
 
     # Previous Close Dashed Line (1D)
     if ($script:ActivePrevClose -gt 0 -and $script:Config.Timeframe -eq "1d") {
-        $prevY = [int]($priceRect.Bottom - ((($script:ActivePrevClose - $minP) / $spanP) * $priceRect.Height))
+        $prevY = [int]($priceRect.Bottom - ((Get-PriceFrac ($script:ActivePrevClose) $minP $spanP $isLog) * $priceRect.Height))
         if ($prevY -ge $priceRect.Top -and $prevY -le $priceRect.Bottom) {
             $g.DrawLine($c["dashPen"], $priceRect.Left, $prevY, $priceRect.Right, $prevY)
         }
@@ -2799,7 +2812,7 @@ function Render-ChartAndRsi {
     $pts = New-Object System.Drawing.PointF[] $n
     for ($i = 0; $i -lt $n; $i++) {
         $x = $priceRect.Left + (($i / [double]($n - 1)) * $priceRect.Width)
-        $y = $priceRect.Bottom - ((($series[$i].Close - $minP) / $spanP) * $priceRect.Height)
+        $y = $priceRect.Bottom - ((Get-PriceFrac ($series[$i].Close) $minP $spanP $isLog) * $priceRect.Height)
         $pts[$i] = New-Object System.Drawing.PointF([float]$x, [float]$y)
     }
 
@@ -2813,10 +2826,10 @@ function Render-ChartAndRsi {
 
         for ($i = 0; $i -lt $n; $i++) {
             $cx = [int]$pts[$i].X
-            $yOpen  = [int]($priceRect.Bottom - ((($series[$i].Open  - $minP) / $spanP) * $priceRect.Height))
+            $yOpen  = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].Open) $minP $spanP $isLog) * $priceRect.Height))
             $yClose = [int]$pts[$i].Y
-            $yHigh  = [int]($priceRect.Bottom - ((($series[$i].High  - $minP) / $spanP) * $priceRect.Height))
-            $yLow   = [int]($priceRect.Bottom - ((($series[$i].Low   - $minP) / $spanP) * $priceRect.Height))
+            $yHigh  = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].High) $minP $spanP $isLog) * $priceRect.Height))
+            $yLow   = [int]($priceRect.Bottom - ((Get-PriceFrac ($series[$i].Low) $minP $spanP $isLog) * $priceRect.Height))
 
             $bull = ($series[$i].Close -ge $series[$i].Open)
             $wPen = if ($bull) { $c["penUp"] } else { $c["penDown"] }
@@ -2858,8 +2871,8 @@ function Render-ChartAndRsi {
         for ($i = 0; $i -lt $n; $i++) {
             $x = $pts[$i].X
             if ($i -lt $vBbU.Count -and -not [double]::IsNaN($vBbU[$i])) {
-                $yu = $priceRect.Bottom - ((($vBbU[$i] - $minP) / $spanP) * $priceRect.Height)
-                $yl = $priceRect.Bottom - ((($vBbL[$i] - $minP) / $spanP) * $priceRect.Height)
+                $yu = $priceRect.Bottom - ((Get-PriceFrac ($vBbU[$i]) $minP $spanP $isLog) * $priceRect.Height)
+                $yl = $priceRect.Bottom - ((Get-PriceFrac ($vBbL[$i]) $minP $spanP $isLog) * $priceRect.Height)
                 $bbUpPts.Add((New-Object System.Drawing.PointF([float]$x, [float]$yu)))
                 $bbLoPts.Add((New-Object System.Drawing.PointF([float]$x, [float]$yl)))
             }
@@ -2880,11 +2893,11 @@ function Render-ChartAndRsi {
         for ($i = 0; $i -lt $n; $i++) {
             $x = $pts[$i].X
             if ($i -lt $vSma20.Count -and -not [double]::IsNaN($vSma20[$i])) {
-                $y20 = $priceRect.Bottom - ((($vSma20[$i] - $minP) / $spanP) * $priceRect.Height)
+                $y20 = $priceRect.Bottom - ((Get-PriceFrac ($vSma20[$i]) $minP $spanP $isLog) * $priceRect.Height)
                 $sma20Pts.Add((New-Object System.Drawing.PointF([float]$x, [float]$y20)))
             }
             if ($i -lt $vSma50.Count -and -not [double]::IsNaN($vSma50[$i])) {
-                $y50 = $priceRect.Bottom - ((($vSma50[$i] - $minP) / $spanP) * $priceRect.Height)
+                $y50 = $priceRect.Bottom - ((Get-PriceFrac ($vSma50[$i]) $minP $spanP $isLog) * $priceRect.Height)
                 $sma50Pts.Add((New-Object System.Drawing.PointF([float]$x, [float]$y50)))
             }
         }
@@ -2905,7 +2918,7 @@ function Render-ChartAndRsi {
         $vwapPts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
         for ($i = 0; $i -lt $n; $i++) {
             if ($i -lt $vVwap.Count -and -not [double]::IsNaN($vVwap[$i])) {
-                $yv = $priceRect.Bottom - ((($vVwap[$i] - $minP) / $spanP) * $priceRect.Height)
+                $yv = $priceRect.Bottom - ((Get-PriceFrac ($vVwap[$i]) $minP $spanP $isLog) * $priceRect.Height)
                 $vwapPts.Add((New-Object System.Drawing.PointF([float]$pts[$i].X, [float]$yv)))
             }
         }
@@ -2923,7 +2936,7 @@ function Render-ChartAndRsi {
         $lastPct = [double]::NaN
         for ($i = 0; $i -lt $n; $i++) {
             if ([double]::IsNaN($cmpVals[$i])) { continue }
-            $yc = $priceRect.Bottom - ((($cmpVals[$i] - $minP) / $spanP) * $priceRect.Height)
+            $yc = $priceRect.Bottom - ((Get-PriceFrac ($cmpVals[$i]) $minP $spanP $isLog) * $priceRect.Height)
             $cPts.Add((New-Object System.Drawing.PointF([float]$pts[$i].X, [float]$yc)))
             $lastPct = $cmpPct[$i]
         }
@@ -2950,7 +2963,7 @@ function Render-ChartAndRsi {
 
     # Position cost basis (EK) and price alerts of this ticker as levels
     if ([bool]$script:Config.ShowLevels) {
-        Draw-ChartLevels -g $g -PriceRect $priceRect -MinP $minP -SpanP $spanP -Legends $legends
+        Draw-ChartLevels -g $g -PriceRect $priceRect -MinP $minP -SpanP $spanP -Legends $legends -IsLog $isLog
     }
 
     # Right Y-Axis Current Price Pill Tag
@@ -2961,6 +2974,41 @@ function Render-ChartAndRsi {
     $g.FillRectangle($tagBrush, $tagRect)
     $g.DrawString(("{0:N2}" -f $series[$n - 1].Close), $fontBadge, $c["tagTextBr"], ($tagRect.Left + 3), ($tagRect.Top + 2))
     $tagBrush.Dispose()
+
+    # v4.8: ex-dividend markers (D) at the bottom of the price panel, next earnings date top right
+    if (@($script:ActiveDividends).Count -gt 0 -and $n -ge 2) {
+        $barTs = [long[]]@($series | ForEach-Object { [long]$_.Ts })
+        $gapMs = [long][math]::Max(3600000, ([double]($barTs[$n - 1] - $barTs[0]) / [math]::Max(1, $n - 1)) * 1.5)
+        $mBr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(56, 189, 248))
+        try {
+            foreach ($dv in @($script:ActiveDividends)) {
+                $bi = Get-NearestBarIndex -BarTsMs $barTs -TsMs ([long]$dv.Ts * 1000) -MaxGapMs $gapMs
+                if ($bi -lt 0) { continue }
+                $mx = $priceRect.Left + (($bi / [double]($n - 1)) * $priceRect.Width)
+                $my = $priceRect.Bottom - (S 14)
+                $pts = [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF([float]$mx, [float]($my - (S 5)))), (New-Object System.Drawing.PointF([float]($mx + (S 5)), [float]$my)),
+                    (New-Object System.Drawing.PointF([float]$mx, [float]($my + (S 5)))), (New-Object System.Drawing.PointF([float]($mx - (S 5)), [float]$my)))
+                $g.FillPolygon($mBr, $pts)
+                $dTxt = "Ex-Dividende {0:N2} {1}" -f ([double]$dv.Amount), $script:ActiveNativeCurr
+                & $addLeg $dTxt ($mx - (S 6)) ($my - (S 6)) "EXDATE"
+            }
+        } finally { $mBr.Dispose() }
+    }
+    $evA = $script:Events[([string]$script:Config.ActiveTicker).ToUpper()]
+    if ($null -ne $evA -and $evA.EarningsDate) {
+        $ebA = Get-EarningsBadge -EarningsDate ([string]$evA.EarningsDate) -WindowDays 30
+        if ($null -ne $ebA) {
+            $eTxt = "Zahlen {0} ({1})" -f (Format-IsoDateDe $ebA.Date).Substring(0, 6), $ebA.Text
+            $eSz = $g.MeasureString($eTxt, $fontAxis)
+            $eBr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 158, 11))
+            $ex = $priceRect.Right - $eSz.Width - (S 6)
+            $g.DrawString($eTxt, $fontAxis, $eBr, [float]$ex, [float]($priceRect.Top + (S 4)))
+            & $addLeg $eTxt $ex ($priceRect.Top + (S 4)) "EARNINGS"
+            $eBr.Dispose()
+        }
+    }
+    if ($isLog) { $g.DrawString("log", $fontAxis, $c["axisTextBrush"], ($priceRect.Right + (S 6)), ($priceRect.Top - (S 2))) }
 
     $bottomAxisAnchor = $priceRect.Bottom
     $rsiRectL = $null
@@ -3098,6 +3146,7 @@ function Render-ChartAndRsi {
         BottomAxis     = $bottomAxisAnchor
         MinP           = $minP
         SpanP          = $spanP
+        LogScale       = $isLog
         Pts            = $pts
         N              = $n
         IsCandle       = $isCandle
@@ -3227,7 +3276,7 @@ function Get-ChartLevels {
 }
 
 function Draw-ChartLevels {
-    param([System.Drawing.Graphics]$g, [System.Drawing.Rectangle]$PriceRect, [double]$MinP, [double]$SpanP, $Legends = $null)
+    param([System.Drawing.Graphics]$g, [System.Drawing.Rectangle]$PriceRect, [double]$MinP, [double]$SpanP, $Legends = $null, [bool]$IsLog = $false)
     $levels = @(Get-ChartLevels)
     if ($levels.Count -eq 0) { return }
     $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
@@ -3236,7 +3285,7 @@ function Draw-ChartLevels {
     foreach ($lv in $levels) {
         $colr = if ($lv.Kind -eq "EK") { $script:Pal.Accent } elseif ($lv.Hit) { $script:Pal.Muted } else { $amber }
         $txt = $lv.Label
-        $ly = $PriceRect.Bottom - ((([double]$lv.Price - $MinP) / $SpanP) * $PriceRect.Height)
+        $ly = $PriceRect.Bottom - ((Get-PriceFrac ([double]$lv.Price) $MinP $SpanP $IsLog) * $PriceRect.Height)
         $sz = $g.MeasureString($txt, $fontAxis)
         $tw = [int][math]::Ceiling($sz.Width) + (S 6)
         $th = S 15
@@ -3317,13 +3366,13 @@ function Render-ChartOverlay {
     # Y-axis tag: price at the horizontal line
     $tagH = S 18
     $tagW = [int]$L.RightAxisWidth - 4
-    $yVal = [double]$L.MinP + ((($pr.Bottom - $hy) / [double]$pr.Height) * [double]$L.SpanP)
+    $yVal = Get-PriceFromFrac (($pr.Bottom - $hy) / [double]$pr.Height) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)
     $tagRect = New-Object System.Drawing.Rectangle(($pr.Right + 2), ($hy - [int]($tagH / 2)), $tagW, $tagH)
     $g.FillRectangle($c["crossTagBg"], $tagRect)
     $g.DrawString(("{0:N2}" -f $yVal), $fontBadge, $c["crossTagFg"], ($tagRect.Left + 3), ($tagRect.Top + 2))
 
     # RSI pane: horizontal line + value tag at the mouse
-    if ($inRsi -and $rr.Height -gt 0) {
+    if ($inRsi -and $rr.Height -gt 0 -and [string]$script:Config.LowerPanel -ne "MACD") {
         $g.DrawLine($c["crossPen"], $rr.Left, $my, $rr.Right, $my)
         $rVal = (($rr.Bottom - $my) / [double]$rr.Height) * 100.0
         $rTag = New-Object System.Drawing.Rectangle(($rr.Right + 2), ($my - [int]($tagH / 2)), $tagW, $tagH)
@@ -3443,7 +3492,8 @@ function Update-ChartCacheSignature {
         $cfg.SmaFastPeriod, $cfg.SmaSlowPeriod, $cfg.RsiPeriod, $cfg.RsiOverbought, $cfg.RsiOversold,
         $lblLivePrice.Text, $lblDayChange.Text, $lblDayAbs.Text, $lblExtQuote.Text, $lblHeaderName.Text,
         $cfg.ShowLevels, (@(Get-ChartLevels | ForEach-Object { "{0:N4}{1}{2}" -f $_.Price, $_.Kind, $_.Hit }) -join ","),
-        $cfg.CompareTicker, $script:CompareSig, $script:ViewCount, $script:ViewOffset
+        $cfg.CompareTicker, $script:CompareSig, $script:ViewCount, $script:ViewOffset,
+        $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType
     ) -join "|"
     if ($sig -ne $script:ChartSignature) {
         $script:ChartSignature = $sig
@@ -4236,6 +4286,11 @@ $cmiLevels     = New-Object System.Windows.Forms.ToolStripMenuItem("EK- und Alar
 $cmiLevels.CheckOnClick = $true
 $cmiLevels.Checked = [bool]$script:Config.ShowLevels
 [void]$chartContextMenu.Items.Add($cmiLevels)
+# v4.8: logarithmic price axis
+$cmiLog = New-Object System.Windows.Forms.ToolStripMenuItem("Logarithmische Skala (Y)")
+$cmiLog.CheckOnClick = $true
+$cmiLog.Checked = [bool]$script:Config.LogScale
+[void]$chartContextMenu.Items.Add($cmiLog)
 # "Alarm here" goes on top; its text is set when the menu opens
 $cmiAlertHere = New-Object System.Windows.Forms.ToolStripMenuItem("Alarm hier setzen")
 $chartContextMenu.Items.Insert(0, $cmiAlertHere)
@@ -4418,7 +4473,7 @@ $script:ChartMouseDownHandler = {
         $my = $e.Y - [int]$L.OffsetY
         $pr = $L.PriceRect
         $script:CtxPrice = if ($my -ge $pr.Top -and $my -le $pr.Bottom -and $pr.Height -gt 0) {
-            [double]$L.MinP + ((($pr.Bottom - $my) / [double]$pr.Height) * [double]$L.SpanP)
+            Get-PriceFromFrac (($pr.Bottom - $my) / [double]$pr.Height) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)
         } else { [double]::NaN }
         return
     }
@@ -5460,7 +5515,13 @@ function Apply-Layout {
         $pnlHeader.Size = New-Object System.Drawing.Size($barW, (S 48))
         $lblHeaderName.Visible   = $false
         $picCompactSpark.Visible = $true
-        $lblMarketStatus.Visible = -not $isTicker
+        # v4.8: what the Compact / Ticker bar shows
+        $cs = @(([string]$script:Config.CompactShow) -split ',' | ForEach-Object { $_.Trim() })
+        $picCompactSpark.Visible = ($cs -contains "Spark")
+        $lblDayAbs.Visible = ($cs -contains "DayAbs")
+        $lblExtQuote.Visible = ($cs -contains "Ext")
+        $csM = @(([string]$script:Config.CompactShow) -split ',' | ForEach-Object { $_.Trim() })
+        $lblMarketStatus.Visible = (-not $isTicker) -and (($csM -contains "Market") -or ($csM -contains "Depot"))
         $lblMarketStatus.Location = New-Object System.Drawing.Point((S 470), (S 16))
         $lblMarketStatus.Size     = New-Object System.Drawing.Size((S 124), (S 17))
         $btnCurrency.Visible = $false
@@ -5481,6 +5542,8 @@ function Apply-Layout {
         $lblHeaderName.Visible   = $true
         $lblMarketStatus.Visible = $true
         $picCompactSpark.Visible = $false
+        $lblDayAbs.Visible = $true
+        $lblExtQuote.Visible = $true
         $lblMarketStatus.Location = New-Object System.Drawing.Point((S 390), (S 26))
         $lblMarketStatus.Size     = New-Object System.Drawing.Size((S 150), (S 17))
         $btnCurrency.Visible = $true
@@ -5607,6 +5670,8 @@ function Restore-GridState {
 }
 
 function Refresh-PortfolioGrid {
+    # v4.8: never rebuild the rows while a cell is being edited
+    if ($dgvPortfolio.IsCurrentCellInEditMode) { return }
     $curr = $script:Config.Currency
     $rows = New-Object System.Collections.Generic.List[PSObject]
     $totVal  = 0.0
@@ -6082,6 +6147,12 @@ function Get-MarketStateColor {
 
 function Update-MarketStatusUi {
     if ($script:IsClosing -or $form.IsDisposed) { return }
+    # v4.8: the Compact bar can show today's portfolio result instead
+    if ([bool]$script:Config.CompactMode -and (([string]$script:Config.CompactShow) -split ',') -contains "Depot") {
+        $dl = Get-TrayDepotLine -Currency ([string]$script:Config.Currency)
+        $lblMarketStatus.Text = if ($dl) { $dl } else { "Depot: warte auf Kurse" }
+        return
+    }
     $sym = $script:Config.ActiveTicker.ToUpper()
     $q = if ($script:QuoteStore.ContainsKey($sym)) { $script:QuoteStore[$sym] } else { $null }
     if ($null -eq $q -or $null -eq $q.Tp) {
@@ -9057,11 +9128,11 @@ function Show-AboutDialog {
         elseif ($t.StartsWith("file:") -and (Test-Path $t.Substring(5))) { try { Start-Process -FilePath "notepad.exe" -ArgumentList ('"{0}"' -f $t.Substring(5)) } catch { } }
     } -OnShown {
         Set-InfoRows -Rows $script:InfoCtl.Rows
-        $u = "https://api.github.com/repos/therealwootwoot/TerminalWidget/tags?per_page=30"
+        $u = "https://raw.githubusercontent.com/therealwootwoot/TerminalWidget/main/version.json"
         Start-FetchJob -Urls @($u) -MaxConcurrency 1 -Context @{ Url = $u } -OnComplete {
             param($Box, $Ctx)
             if ($null -eq $script:InfoCtl) { return }
-            $latest = Get-LatestTagVersion $Box.Results[$Ctx.Url]
+            $latest = Get-LatestVersionFromJson $Box.Results[$Ctx.Url]
             $script:InfoCtl.Footer.Text = if (-not $latest) { "Update-Prüfung nicht möglich (offline oder keine Versionen veröffentlicht). Doppelklick auf eine Zeile öffnet Ordner / Seite." }
                 elseif ((Compare-AppVersion $latest $script:AppVersion) -gt 0) { "Neue Version $latest verfügbar - Doppelklick auf 'Projekt' öffnet die Seite." }
                 else { "Aktuell (neueste Version: $latest). Doppelklick auf eine Zeile öffnet Ordner / Seite." }
@@ -9136,6 +9207,10 @@ function Invoke-TerminalCommand {
                 Update-AllUiViews
             }
             "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "SCALE"  {
+                if ($arg0 -eq "LOG") { Set-LogScale $true } elseif ($arg0 -eq "LIN") { Set-LogScale $false } else { Set-LogScale (-not [bool]$script:Config.LogScale) }
+            }
+            "BAR"    { Show-CompactOptions }
             "TOUR"   { Show-WelcomeTour }
             "THEME"  {
                 if (-not $arg0) { $btnThemeCycle.PerformClick(); return "" }
@@ -10125,6 +10200,39 @@ function Use-UserLayout {
 }
 
 # ---- welcome tour ----
+function Show-CompactOptions {
+    # v4.8: which parts the Compact / Ticker bar shows (saved immediately)
+    param($Owner = $null)
+    $p = $script:Pal
+    $opts = [ordered]@{ "DayAbs" = "Tagesänderung absolut"; "Ext" = "Vor- / Nachbörse"; "Spark" = "Mini-Chart"; "Market" = "Marktstatus (nur Compact)"; "Depot" = "Depot heute statt Marktstatus (nur Compact)" }
+    $cur = @(([string]$script:Config.CompactShow) -split ',' | ForEach-Object { $_.Trim() })
+    $dlg = New-DialogForm -Title "Compact / Ticker zeigt" -W (S 360) -H (S 240)
+    $y = S 14
+    $boxes = @{}
+    foreach ($k in $opts.Keys) {
+        $c = New-Object System.Windows.Forms.CheckBox
+        $c.SetBounds((S 16), $y, (S 330), (S 24)); $c.Text = $opts[$k]; $c.Checked = ($cur -contains $k)
+        $c.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+        $dlg.Controls.Add($c)
+        $boxes[$k] = $c
+        $y += S 28
+    }
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds((S 252), ($y + (S 8)), (S 94), (S 28)); $ok.Text = "OK"
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($ok)
+    $dlg.AcceptButton = $ok
+    $dlg.ClientSize = New-Object System.Drawing.Size((S 360), ($y + (S 50)))
+    $res = $dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form }))
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:Config.CompactShow = (@($opts.Keys | Where-Object { $boxes[$_].Checked }) -join ",")
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        if ([bool]$script:Config.CompactMode) { Apply-Layout ([string]$script:Config.Layout) }
+    }
+    $dlg.Dispose()
+}
+
 function Show-WelcomeTour {
     $pages = @(
         @("Willkommen beim TerminalWidget", "Vom kleinen Ticker bis zum Terminal: mit L (oder dem Layout-Button oben rechts) wechselst du zwischen Ticker, Compact, Standard und Terminal.`r`n`r`nMaus über ein Element halten zeigt eine Erklärung. G öffnet das Glossar, H alle Tastenkürzel."),
@@ -10470,6 +10578,14 @@ function Show-SettingsDialog {
     $chkTWatch = & $addCheck "Terminal: Watchlist und Alarme anzeigen" ([bool]$cfg.TerminalShowWatch) "" "LAYOUT"
     $chkTPort  = & $addCheck "Terminal: Portfolio anzeigen" ([bool]$cfg.TerminalShowPortfolio) "" "LAYOUT"
     $nTChart   = & $addNum "Terminal: Chart-Höhe (%)" 25 80 ([int]$cfg.TerminalChartPct) "Anteil des Charts an der Fensterhöhe; der Rest gehört den Listen" "LAYOUT" 5
+    $btnBar = New-Object System.Windows.Forms.Button
+    $btnBar.SetBounds(($lay.X + (S 26)), $lay.Y, (S 230), (S 26))
+    Style-FlatButton -Btn $btnBar -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnBar.Text = "Compact / Ticker zeigt ..."
+    $btnBar.Add_Click({ Show-CompactOptions -Owner $script:SettingsCtl.Dlg })
+    $dlg.Controls.Add($btnBar)
+    Set-DynTip $btnBar "Was die schmale Leiste anzeigt: Tagesänderung absolut, Vor-/Nachbörse, Mini-Chart, Marktstatus oder das Depot-Ergebnis von heute" "LAYOUT"
+    $lay.Y += S 32
 
     # v4.6: colours and window
     & $addSection "Farben und Fenster"
@@ -10800,6 +10916,7 @@ T  theme               C  compact on/off
 L  next layout         G  glossary
 P  portfolio analysis  S  settings
 H  this help           Z  reset zoom   X  compare
+Y  log scale           (diamond in the chart = ex-dividend)
 
 Command line: NVDA, NVDA GP 1Y, NVDA DES, NVDA N, NVDA DVD,
 NVDA EE, NVDA ALRT TRAIL 8, NVDA WL, PORT, ANA, DVD, CAL, TOP,
@@ -10824,6 +10941,7 @@ Mausrad (Chart) Zeitraum wechseln
 1 - 6           Zeitraum 1D / 5D / 1M / 3M / 6M / 1Y
 F11             Chart im Vollbild (auch Doppelklick auf Chart)
 
+Y  Log-Skala an/aus     (Raute im Chart = Ex-Dividende)
 K  Linie / Kerzen       V  Volumen
 M  SMA                  A  VWAP
 B  Bollinger            R  RSI
@@ -10866,7 +10984,7 @@ NVDA DVD      Dividenden         NVDA EE     Termine
 NVDA ALRT TRAIL 8 / >= 150 / TAG- 3 / 52H / VOL 2
 NVDA WL / CMP / TX   Watchlist / Vergleich / Transaktion
 PORT  ANA  DVD  CAL  TOP  FX  LOG  REP  TF 3M  LAYOUT TERMINAL
-THEME OLED  SET  PUSH  GLOS  ABOUT  PF <Depot>  IMP  BAK
+THEME OLED  SET  PUSH  GLOS  ABOUT  PF <Depot>  IMP  BAK  SCALE LOG
 IND MACD/EMA  LAYOUT SAVE <Name>  CT (Durchklicken)  TOUR
 
 Strg+Z         Löschen rückgängig (10 Sekunden)
@@ -11050,6 +11168,15 @@ $cmiAlertHere.Add_Click({
         Update-AllUiViews
     }
 })
+function Set-LogScale {
+    param([bool]$On)
+    $script:Config.LogScale = $On
+    $cmiLog.Checked = $On
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Set-TransientStatus $(if ($On) { "Logarithmische Preisachse" } else { "Lineare Preisachse" }) 2
+    Update-AllUiViews
+}
+$cmiLog.Add_Click({ Set-LogScale ([bool]$cmiLog.Checked) })
 $cmiLevels.Add_Click({
     $script:Config.ShowLevels = $cmiLevels.Checked
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
@@ -11061,6 +11188,43 @@ $cmiZoomReset.Add_Click({ Reset-ChartZoom })
 
 # Portfolio Grid & Editor Events
 Update-DepotCombo
+# v4.8: shares and cost can be typed directly into the portfolio table
+$dgvPortfolio.ReadOnly = $false
+foreach ($col in $dgvPortfolio.Columns) { $col.ReadOnly = ($col.Name -notin @("Shares", "Avg")) }
+$dgvPortfolio.Columns["Shares"].ToolTipText = "Stück - Zelle markieren und tippen (oder F2) zum Ändern"
+$dgvPortfolio.Columns["Avg"].ToolTipText = "EK in Anzeigewährung - Zelle markieren und tippen (oder F2) zum Ändern"
+$dgvPortfolio.Add_CellEndEdit({
+    param($sender, $e)
+    $col = $sender.Columns[$e.ColumnIndex].Name
+    if ($col -notin @("Shares", "Avg")) { return }
+    $row = $sender.Rows[$e.RowIndex]
+    $sym = ([string]$row.Cells["Ticker"].Value).ToUpper()
+    $raw = [string]$row.Cells[$col].Value
+    if (-not $script:Portfolio.ContainsKey($sym)) { return }
+    $pf = $script:Portfolio[$sym]
+    $v = Parse-DecimalInput $raw
+    if (-not (Test-DecimalInput $raw) -or $v -le 0) {
+        Set-TransientStatus "Ungültige Zahl: '$raw'" 4
+        Refresh-PortfolioGrid
+        return
+    }
+    $before = "{0:N4} Stk @ {1:N4} {2}" -f $pf.Shares, $pf.AvgPrice, $pf.Currency
+    if ($col -eq "Shares") { $pf.Shares = $v }
+    else { $pf.AvgPrice = Convert-CurrencyValue -Amount $v -FromCurrency ([string]$script:Config.Currency) -ToCurrency ([string]$pf.Currency) }
+    Save-JsonState -Path $script:PortfolioPath -Data $script:Portfolio
+    Write-WidgetLog ("Position edited in the grid: {0} {1} -> {2:N4} Stk @ {3:N4} {4}" -f $sym, $before, $pf.Shares, $pf.AvgPrice, $pf.Currency)
+    Set-TransientStatus ("{0} geändert (ohne Buchung) - Strg+Z = rückgängig" -f $sym) 6
+    Update-AllUiViews
+})
+$dgvPortfolio.Add_CellBeginEdit({
+    param($sender, $e)
+    # remember the position for Ctrl+Z
+    $sym = ([string]$sender.Rows[$e.RowIndex].Cells["Ticker"].Value).ToUpper()
+    if ($script:Portfolio.ContainsKey($sym)) {
+        $pf = $script:Portfolio[$sym]
+        $script:Undo = @{ Kind = "Position"; Data = @{ Key = $sym; Item = [PSCustomObject]@{ Ticker = $sym; Shares = [double]$pf.Shares; AvgPrice = [double]$pf.AvgPrice; Currency = [string]$pf.Currency; BuyAmount = [double]$pf.BuyAmount; TargetAvg = [double]$pf.TargetAvg } }; Until = (Get-Date).AddSeconds(30) }
+    }
+})
 # v4.6: columns (right-click a header), global hotkey, snapping to screen edges
 Enable-GridCustomization -Grid $dgvWatchlist -Key "Watchlist"
 Enable-GridCustomization -Grid $dgvPortfolio -Key "Portfolio"
@@ -11837,6 +12001,9 @@ $script:GlobalKeyHandler = {
         ([System.Windows.Forms.Keys]::H) {
             Show-ShortcutHelp; $e.Handled = $true
         }
+        ([System.Windows.Forms.Keys]::Y) {
+            Set-LogScale (-not [bool]$script:Config.LogScale); $e.Handled = $true
+        }
         ([System.Windows.Forms.Keys]::Divide) {
             $e.SuppressKeyPress = $true; Show-CommandPalette; $e.Handled = $true
         }
@@ -12083,7 +12250,7 @@ function Invoke-SmokeTest {
     foreach ($lay in @("Terminal", "Standard", "Compact", "Ticker", "Standard")) { Invoke-SmokeStep "Layout $lay" { Apply-Layout $lay; & $pump } }
     foreach ($tab in @("Chart", "Portfolio", "Watchlist", "Chart")) { Invoke-SmokeStep "Tab $tab" { Set-ActiveTab -TabName $tab; & $pump } }
     foreach ($th in @("OLED", "Light", "Terminal", "Dark")) { Invoke-SmokeStep "Theme $th" { $script:Config.Theme = $th; Apply-ThemeToAllControls; & $pump } }
-    foreach ($cmd in @("TF 1Y", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
+    foreach ($cmd in @("SCALE LOG", "TF 1Y", "SCALE LIN", "IND MACD", "IND EMA", "TF 5D", "IND RSI", "IND SMA", "NVDA GP 3M", "NVDA CMP", "CMP", "PORT", "ALRT", "LAYOUT SAVE SMOKE", "LAYOUT SMOKE", "LAYOUT DEL SMOKE", "NVDA ALRT TRAIL 8", "NVDA ALRT >= 99999", "ALRT DTAG- 50", "NVDA WL")) {
         Invoke-SmokeStep "Command $cmd" { $m = Invoke-TerminalCommand $cmd; if ($m) { $script:SmokeNotes.Add("Command '$cmd': $m") }; & $pump }
     }
     Invoke-SmokeStep "Fullscreen chart" { Toggle-ChartFullscreen; & $pump; Close-ChartFullscreen; & $pump }
@@ -12111,8 +12278,28 @@ function Invoke-SmokeTest {
         "Compare" = { Show-CompareDialog }
         "Command palette" = { Show-CommandPalette -Initial "NV" }
         "Welcome tour" = { Show-WelcomeTour }
+        "Compact options" = { Show-CompactOptions }
     }
     foreach ($k in $dialogs.Keys) { Invoke-SmokeStep "Dialog $k" $dialogs[$k] 2500 }
+    Invoke-SmokeStep "Compact with depot line" {
+        $script:Config.CompactShow = "Depot,Spark,DayAbs"
+        Apply-Layout "Compact"; & $pump; Update-MarketStatusUi
+        Apply-Layout "Ticker"; & $pump
+        $script:Config.CompactShow = "DayAbs,Ext,Spark,Market"
+        Apply-Layout "Standard"; & $pump
+    }
+    Invoke-SmokeStep "Grid edit" {
+        Set-ActiveTab -TabName "Portfolio"; & $pump
+        if ($dgvPortfolio.Rows.Count -gt 0) {
+            $dgvPortfolio.CurrentCell = $dgvPortfolio.Rows[0].Cells["Shares"]
+            [void]$dgvPortfolio.BeginEdit($true)
+            $dgvPortfolio.CurrentCell.Value = "12"
+            [void]$dgvPortfolio.EndEdit()
+            & $pump
+            [void](Invoke-Undo)
+        }
+        Set-ActiveTab -TabName "Chart"
+    }
     Invoke-SmokeStep "Depot switch" {
         $script:Config.Depots = @([PSCustomObject]@{ Id = "smoke"; Name = "Smoke" })
         Switch-Depot "smoke"; & $pump
@@ -12120,7 +12307,7 @@ function Invoke-SmokeTest {
     }
     Invoke-SmokeStep "Undo" {
         $script:Alerts.Add([PSCustomObject]@{ Id = "x"; Ticker = "AAPL"; Condition = ">="; TargetPrice = 1.0; Currency = "EUR"; Triggered = $false; Note = ""; RearmMin = 0; TriggeredAt = ""; ExpiresAt = ""; Peak = 0.0; Push = $true })
-        Update-AllUiViews
+        Refresh-WatchlistAndAlerts
         $lstAlerts.SelectedIndex = $script:Alerts.Count - 1
         $btnDelAlert.PerformClick()
         [void](Invoke-Undo)

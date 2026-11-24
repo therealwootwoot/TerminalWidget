@@ -2546,6 +2546,8 @@ function Get-TerminalFunctions {
         "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
         "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
         "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
+        "SCALE"  = @{ Scope = "G";  Desc = "Preisachse: SCALE LOG / SCALE LIN" }
+        "BAR"    = @{ Scope = "G";  Desc = "Was die Compact-/Ticker-Leiste zeigt" }
     }
 }
 
@@ -2638,6 +2640,7 @@ function Get-CommandSuggestions {
             "TF"     { @("1D", "5D", "1M", "3M", "6M", "1Y") }
             "LAYOUT" { @("TERMINAL", "STANDARD", "COMPACT", "TICKER") + @($Layouts | ForEach-Object { ([string]$_).ToUpperInvariant() }) + @("SAVE") }
             "IND"    { @("MACD", "RSI", "EMA", "SMA") }
+            "SCALE"  { @("LOG", "LIN") }
             "PF"     { @($Depots | ForEach-Object { ([string]$_).ToUpperInvariant() }) }
             default  { @() }
         }
@@ -3101,4 +3104,74 @@ function Get-SnappedPosition {
 function Test-UndoValid {
     param($Undo, [DateTime]$Now = (Get-Date))
     return ($null -ne $Undo -and $null -ne $Undo.Until -and $Now -le [DateTime]$Undo.Until)
+}
+
+# ==============================================================================
+# v4.8: log scale, chart event markers, version file
+# ==============================================================================
+function Get-PriceFrac {
+    # Price -> 0..1 position between MinP and MinP+SpanP (linear or logarithmic)
+    param([double]$V, [double]$MinP, [double]$SpanP, [bool]$Log = $false)
+    if ($SpanP -eq 0) { return 0.5 }
+    if (-not $Log) { return (($V - $MinP) / $SpanP) }
+    $top = $MinP + $SpanP
+    if ($MinP -le 0 -or $top -le 0) { return (($V - $MinP) / $SpanP) }
+    if ($V -le 0) { return -0.05 }
+    $l0 = [math]::Log($MinP)
+    return (([math]::Log($V) - $l0) / ([math]::Log($top) - $l0))
+}
+
+function Get-PriceFromFrac {
+    # Inverse of Get-PriceFrac
+    param([double]$F, [double]$MinP, [double]$SpanP, [bool]$Log = $false)
+    if (-not $Log -or $MinP -le 0 -or ($MinP + $SpanP) -le 0) { return ($MinP + $F * $SpanP) }
+    $l0 = [math]::Log($MinP)
+    $l1 = [math]::Log($MinP + $SpanP)
+    return [math]::Exp($l0 + $F * ($l1 - $l0))
+}
+
+function Get-LogPaddedRange {
+    # Min/max with 8 % padding in log space; $null when log is impossible (<= 0)
+    param([double]$Min, [double]$Max, [double]$Pad = 0.08)
+    if ($Min -le 0 -or $Max -le 0) { return $null }
+    $a = [math]::Log($Min); $b = [math]::Log($Max)
+    if ($b -le $a) { $b = $a + 0.01 }
+    $p = ($b - $a) * $Pad
+    return @{ Min = [math]::Exp($a - $p); Max = [math]::Exp($b + $p) }
+}
+
+function ConvertFrom-ChartDividendEvents {
+    # chart result (events=div) -> @(@{ Ts = unix seconds; Amount })
+    param($Result)
+    $out = @()
+    try {
+        $d = $Result.events.dividends
+        if ($null -ne $d) {
+            foreach ($p in $d.PSObject.Properties) {
+                $e = $p.Value
+                if ($null -ne $e -and $null -ne $e.date -and [double]$e.amount -gt 0) { $out += @{ Ts = [long]$e.date; Amount = [double]$e.amount } }
+            }
+        }
+    } catch { }
+    return @($out | Sort-Object -Property @{ Expression = { $_.Ts } })
+}
+
+function Get-NearestBarIndex {
+    # Index of the bar whose time (ms) is closest to $TsMs, -1 when farther than $MaxGapMs
+    param([long[]]$BarTsMs, [long]$TsMs, [long]$MaxGapMs)
+    $best = -1; $bd = [long]::MaxValue
+    for ($i = 0; $i -lt @($BarTsMs).Count; $i++) {
+        $d = [math]::Abs([long]$BarTsMs[$i] - $TsMs)
+        if ($d -lt $bd) { $bd = $d; $best = $i }
+    }
+    if ($best -lt 0 -or $bd -gt $MaxGapMs) { return -1 }
+    return $best
+}
+
+function Get-LatestVersionFromJson {
+    # version.json in the repository: { "version": "4.8" }
+    param($Json)
+    try { $v = [string]$Json.version } catch { $v = "" }
+    if ($v -match '^\d+(\.\d+){1,2}$') { return $v }
+    return ""
 }
