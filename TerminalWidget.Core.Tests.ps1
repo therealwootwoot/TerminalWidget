@@ -1982,6 +1982,99 @@ Describe "Workspace (v5.0)" {
     }
 }
 
+Describe "Currency (v5.1)" {
+    It "guesses the trading currency from the exchange suffix" {
+        Get-TickerCurrencyGuess "ABBN.SW" | Should -Be "CHF"
+        Get-TickerCurrencyGuess "sap.de" | Should -Be "EUR"
+        Get-TickerCurrencyGuess "NVDA" | Should -Be "USD"
+        Get-TickerCurrencyGuess "VOD.L" | Should -Be "GBP"
+        Get-TickerCurrencyGuess "EURUSD=X" | Should -Be "USD"
+        Get-TickerCurrencyGuess "^GDAXI" | Should -Be ""
+        Get-TickerCurrencyGuess "XYZ.QQ" | Should -Be ""
+    }
+    It "cycles Auto and the fixed currencies with W" {
+        Get-NextCurrencyMode -Current "CHF" -Auto $true | Should -Be "EUR"
+        Get-NextCurrencyMode -Current "EUR" -Auto $false | Should -Be "USD"
+        Get-NextCurrencyMode -Current "GBP" -Auto $false | Should -Be "AUTO"
+    }
+}
+
+Describe "Analysis (v5.1)" {
+    It "splits the depot result by position" {
+        $by = @{
+            "A" = [PSCustomObject]@{ Value = [double[]]@(100, 120, 150); Buys = [double[]]@(100, 100, 100); Sells = [double[]]@(0, 0, 0); Divs = [double[]]@(0, 0, 2) }
+            "B" = [PSCustomObject]@{ Value = [double[]]@(0, 50, 40); Buys = [double[]]@(0, 50, 50); Sells = [double[]]@(0, 0, 0); Divs = [double[]]@(0, 0, 0) }
+        }
+        $c = Get-Contributions -BySym $by -Start 0 -End 2
+        $c.Rows[0].Sym | Should -Be "A"
+        $c.Rows[0].Contribution | Should -Be 52
+        $c.Rows[1].Contribution | Should -Be -10
+        $c.Total | Should -Be 42
+        [math]::Round($c.Rows[1].Pct, 2) | Should -Be -40
+    }
+    It "tracks per-ticker values in the value series" {
+        $tx = @(
+            [PSCustomObject]@{ Date = "2024-01-02"; Type = "Kauf"; Ticker = "AAA"; Shares = 10; Price = 10; Fee = 0; Currency = "EUR" }
+            [PSCustomObject]@{ Date = "2024-01-04"; Type = "Verkauf"; Ticker = "AAA"; Shares = 5; Price = 12; Fee = 0; Currency = "EUR" }
+        )
+        $prices = @{ "AAA" = [PSCustomObject]@{ Dates = @("2024-01-02", "2024-01-03", "2024-01-04"); Closes = @(10.0, 11.0, 12.0); Currency = "EUR"; Splits = @() } }
+        $s = Get-PortfolioValueSeries -Transactions $tx -Prices $prices -Base "EUR" -EndDate "2024-01-04"
+        $s.BySym["AAA"].Value[1] | Should -Be 110
+        $s.BySym["AAA"].Sells[2] | Should -Be 60
+        (Get-Contributions -BySym $s.BySym -Start 0 -End 2).Total | Should -Be 20
+    }
+    It "builds a time-weighted index and rolling returns" {
+        $x = Get-TwrIndex -Value @(100, 110, 220, 200) -Invested @(100, 100, 200, 200)
+        [math]::Round($x[2], 6) | Should -Be 120
+        (Get-TwrIndex -Value @(50, 60) -Start 1)[1] | Should -Be 100
+        $r = Get-RollingReturns -Dates @("2024-01-01", "2024-06-01", "2025-01-02") -Values @(100, 110, 120) -Days 365
+        @($r.Values).Count | Should -Be 1
+        [math]::Round($r.Values[0], 9) | Should -Be 20
+    }
+    It "estimates a market scenario with beta" {
+        $s = Get-ScenarioImpact -Positions @([PSCustomObject]@{ Sym = "A"; Value = 1000; Beta = 1.5 }, [PSCustomObject]@{ Sym = "B"; Value = 1000; Beta = [double]::NaN }) -MarketPct -20
+        $s.Change | Should -Be -500
+        ($s.Rows | Where-Object { $_.Sym -eq "B" }).BetaAssumed | Should -BeTrue
+        $s.Pct | Should -Be -25
+    }
+    It "finds support and resistance and rates the signals" {
+        $c = New-Object double[] 260
+        for ($i = 0; $i -lt 260; $i++) { $c[$i] = 100 + 10 * [math]::Sin($i / 8.0) + $i * 0.05 }
+        $sr = Get-SupportResistance -Highs $c -Lows $c -Closes $c
+        $sr.Support | Should -BeLessThan $c[259]
+        $sr.Resistance | Should -BeGreaterThan $c[259]
+        $t = Get-TechnicalSignals -Closes $c
+        @($t.Rows | Where-Object { $_.Key -eq "SMA200" }).Count | Should -Be 1
+        @($t.Rows | Where-Object { $_.Key -eq "RSI" }).Count | Should -Be 1
+        $t.Summary | Should -BeIn @("überwiegend positiv", "überwiegend negativ", "gemischt")
+        (Get-TechnicalSignals -Closes @(1.0, 2.0)).Summary | Should -Be "Zu wenig Kursdaten"
+    }
+    It "reads fundamentals and compares them with peers" {
+        $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{
+            summaryDetail = [PSCustomObject]@{ trailingPE = [PSCustomObject]@{ raw = 30.0 }; marketCap = [PSCustomObject]@{ raw = 2.5e9 } }
+            financialData = [PSCustomObject]@{ profitMargins = [PSCustomObject]@{ raw = 0.25 }; financialCurrency = "EUR" }
+            defaultKeyStatistics = [PSCustomObject]@{ forwardPE = [PSCustomObject]@{ raw = 20.0 } } }) } }
+        $f = ConvertFrom-YahooFundamentals -Summary $sum
+        $f.TrailingPE | Should -Be 30
+        $f.ForwardPE | Should -Be 20
+        $f.Currency | Should -Be "EUR"
+        ConvertFrom-YahooFundamentals -Summary $null | Should -BeNullOrEmpty
+        $rows = Get-FundamentalRows -Fund $f -Peers @([PSCustomObject]@{ TrailingPE = 20; ProfitMargin = 0.1 }, [PSCustomObject]@{ TrailingPE = 24; ProfitMargin = $null })
+        ($rows | Where-Object { $_.Key -eq "TrailingPE" }).Score | Should -Be -1
+        ($rows | Where-Object { $_.Key -eq "TrailingPE" }).Peer | Should -Be "22.00"
+        ($rows | Where-Object { $_.Key -eq "ProfitMargin" }).Peer | Should -Be "-"
+        ($rows | Where-Object { $_.Key -eq "MarketCap" }).Value | Should -Be "2.5 Mrd. EUR"
+    }
+    It "compares sectors with the MSCI World" {
+        $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{ topHoldings = [PSCustomObject]@{ sectorWeightings = @([PSCustomObject]@{ technology = [PSCustomObject]@{ raw = 0.25 } }, [PSCustomObject]@{ realestate = [PSCustomObject]@{ raw = 0.02 } }) } }) } }
+        $ref = ConvertFrom-YahooSectorWeights -Summary $sum
+        $ref["technology"] | Should -Be 25
+        $rows = Get-SectorComparison -Groups @([PSCustomObject]@{ Key = "Technology"; Pct = 60.0 }, [PSCustomObject]@{ Key = "Unbekannt"; Pct = 40.0 }) -Reference $ref
+        $rows[0].Diff | Should -Be 35
+        $rows[$rows.Count - 1].Sector | Should -Be "Andere / ETF / unbekannt"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

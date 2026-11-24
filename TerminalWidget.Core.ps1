@@ -674,6 +674,42 @@ function Get-NextDisplayCurrency {
     return $list[($i + 1) % $list.Count]
 }
 
+function Get-NextCurrencyMode {
+    # v5.1: W key with automatic currency: AUTO -> EUR -> USD -> CHF -> GBP -> AUTO
+    param([string]$Current, [bool]$Auto)
+    $list = @("AUTO") + @(Get-DisplayCurrencies)
+    $cur = if ($Auto) { "AUTO" } else { ([string]$Current).Trim().ToUpper() }
+    $i = [array]::IndexOf($list, $cur)
+    return $list[($i + 1) % $list.Count]
+}
+
+function Get-TickerCurrencyGuess {
+    # v5.1: trading currency from the exchange suffix, until Yahoo has answered
+    param([string]$Symbol)
+    $u = ([string]$Symbol).Trim().ToUpper()
+    if ($u -match '=X$') {
+        $pair = $u -replace '=X$', ''
+        if ($pair.Length -ge 6) { return $pair.Substring(3, 3) } else { return $pair }
+    }
+    if ($u.StartsWith("^")) { return "" }
+    if ($u -notmatch '\.([A-Z]+)$') { return "USD" }
+    switch ($Matches[1]) {
+        { $_ -in @("DE", "F", "BE", "DU", "HM", "HA", "MU", "SG", "PA", "AS", "BR", "MI", "MC", "VI", "HE", "LS", "IR", "AT") } { return "EUR" }
+        "SW" { return "CHF" }
+        "L"  { return "GBP" }
+        "TO" { return "CAD" }
+        "V"  { return "CAD" }
+        "T"  { return "JPY" }
+        "HK" { return "HKD" }
+        "ST" { return "SEK" }
+        "CO" { return "DKK" }
+        "OL" { return "NOK" }
+        "AX" { return "AUD" }
+        "WA" { return "PLN" }
+        default { return "" }
+    }
+}
+
 function Get-NormalizedCurrencyCode {
     # ISO code for a stored or Yahoo currency: GBp/GBX -> GBP, ZAc -> ZAR,
     # ILA -> ILS, otherwise upper case. "" if it is not a 3-letter code.
@@ -1923,6 +1959,14 @@ function Get-PortfolioValueSeries {
         return $f
     }
 
+    # v5.1: per ticker value + cumulated buys / sales / dividends (attribution)
+    $bySym = @{}
+    $accB = @{}; $accS = @{}; $accD = @{}
+    foreach ($o in $books) {
+        if ($bySym.ContainsKey($o.Sym)) { continue }
+        $bySym[$o.Sym] = [PSCustomObject]@{ Value = (New-Object double[] $n); Buys = (New-Object double[] $n); Sells = (New-Object double[] $n); Divs = (New-Object double[] $n) }
+        $accB[$o.Sym] = 0.0; $accS[$o.Sym] = 0.0; $accD[$o.Sym] = 0.0
+    }
     $value = New-Object double[] $n
     $invested = New-Object double[] $n
     $divCum = New-Object double[] $n
@@ -1942,6 +1986,7 @@ function Get-PortfolioValueSeries {
                         $cv = Convert-AmountOnDate -Amount (($q * $px) + $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
                         $shares[$s] = $shares[$s] + ($q * $sf)
                         $net += $cv.Value
+                        $accB[$s] += $cv.Value
                         if ($null -ne $bench) { $bp = & $benchOnDate $bd; if ($bp -gt 0) { $units += $cv.Value / $bp } }
                     }
                 }
@@ -1953,6 +1998,7 @@ function Get-PortfolioValueSeries {
                         $pr = Convert-AmountOnDate -Amount (($q * $px) - $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
                         $shares[$s] = $shares[$s] - $qa
                         $net -= $pr.Value
+                        $accS[$s] += $pr.Value
                         if ($null -ne $bench) {
                             $bp = & $benchOnDate $bd
                             if ($bp -gt 0) { $units -= $pr.Value / $bp }
@@ -1964,6 +2010,7 @@ function Get-PortfolioValueSeries {
                     if ($px -gt 0) {
                         $gr = Convert-AmountOnDate -Amount ($px - $fee) -From $cur -To $base -Date $bd -History $History -FallbackFromEur $FallbackFromEur
                         $dv += $gr.Value
+                        $accD[$s] += $gr.Value
                     }
                 }
             }
@@ -1973,9 +2020,10 @@ function Get-PortfolioValueSeries {
         foreach ($s in $syms) {
             if ($shares[$s] -gt 0 -and $valBase.ContainsKey($s)) {
                 $px = $valBase[$s][$j]
-                if (-not [double]::IsNaN($px)) { $tot += $shares[$s] * $px }
+                if (-not [double]::IsNaN($px)) { $tot += $shares[$s] * $px; $bySym[$s].Value[$j] = $shares[$s] * $px }
             }
         }
+        foreach ($s in $bySym.Keys) { $bySym[$s].Buys[$j] = $accB[$s]; $bySym[$s].Sells[$j] = $accS[$s]; $bySym[$s].Divs[$j] = $accD[$s] }
         $value[$j] = $tot
         $invested[$j] = $net
         $divCum[$j] = $dv
@@ -1990,6 +2038,7 @@ function Get-PortfolioValueSeries {
         Missing      = $missing
         Approx       = $approx
         BenchClamped = $clampedBench
+        BySym        = $bySym
     }
 }
 
@@ -2009,6 +2058,91 @@ function Get-SeriesWindowStart {
     $f = $from.ToString("yyyy-MM-dd")
     for ($i = 0; $i -lt $Dates.Count; $i++) { if ([string]::CompareOrdinal($Dates[$i], $f) -ge 0) { return $i } }
     return ($Dates.Count - 1)
+}
+
+function Get-Contributions {
+    # v5.1: what each position added to the depot result between two points of
+    # the value series: end value + sales + dividends - start value - buys.
+    # Pct = modified Dietz return of the position (half the net flow counts).
+    param($BySym, [int]$Start, [int]$End)
+    $rows = New-Object System.Collections.Generic.List[PSObject]
+    $total = 0.0
+    foreach ($s in @($BySym.Keys | Sort-Object)) {
+        $x = $BySym[$s]
+        $n = @($x.Value).Count
+        if ($n -eq 0) { continue }
+        $a = [math]::Max(0, [math]::Min($Start, $n - 1)); $b = [math]::Max($a, [math]::Min($End, $n - 1))
+        $v0 = [double]$x.Value[$a]; $v1 = [double]$x.Value[$b]
+        $buy = [double]$x.Buys[$b] - [double]$x.Buys[$a]
+        $sell = [double]$x.Sells[$b] - [double]$x.Sells[$a]
+        $div = [double]$x.Divs[$b] - [double]$x.Divs[$a]
+        if ($v0 -eq 0 -and $v1 -eq 0 -and $buy -eq 0 -and $sell -eq 0 -and $div -eq 0) { continue }
+        $c = $v1 + $sell + $div - $v0 - $buy
+        $den = $v0 + 0.5 * ($buy - $sell)
+        $pct = if ($den -gt 0) { $c / $den * 100.0 } else { [double]::NaN }
+        $rows.Add([PSCustomObject]@{ Sym = $s; Start = $v0; End = $v1; Buys = $buy; Sells = $sell; Divs = $div; Contribution = $c; Pct = $pct; Share = [double]::NaN })
+        $total += $c
+    }
+    foreach ($r in $rows) { if ([math]::Abs($total) -gt 1e-9) { $r.Share = $r.Contribution / [math]::Abs($total) * 100.0 } }
+    $sorted = @($rows | Sort-Object -Property @{ Expression = { [double]$_.Contribution }; Descending = $true }, @{ Expression = { [string]$_.Sym }; Descending = $false })
+    return [PSCustomObject]@{ Rows = $sorted; Total = $total }
+}
+
+function Get-ScenarioImpact {
+    # v5.1: rough what-if: market moves MarketPct, each position by beta x that.
+    # Positions without a beta count with 1.0 (flagged).
+    param([array]$Positions, [double]$MarketPct)
+    $rows = @()
+    $tot = 0.0; $val = 0.0
+    foreach ($p in @($Positions)) {
+        if ($null -eq $p) { continue }
+        $b = [double]$p.Beta
+        $est = [double]::IsNaN($b)
+        if ($est) { $b = 1.0 }
+        $chg = [double]$p.Value * $b * $MarketPct / 100.0
+        $rows += [PSCustomObject]@{ Sym = [string]$p.Sym; Value = [double]$p.Value; Beta = $b; BetaAssumed = $est; Change = $chg }
+        $tot += $chg; $val += [double]$p.Value
+    }
+    return [PSCustomObject]@{ Rows = @($rows | Sort-Object -Property @{ Expression = { [double]$_.Change }; Descending = $false }); Change = $tot; Value = $val; Pct = $(if ($val -gt 0) { $tot / $val * 100.0 } else { 0.0 }) }
+}
+
+function Get-RollingReturns {
+    # v5.1: return over a window of Days calendar days, for every point that
+    # has such a window behind it. Values = index series (e.g. TWR growth).
+    param([string[]]$Dates, [double[]]$Values, [int]$Days = 365)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $outD = New-Object System.Collections.Generic.List[string]
+    $outV = New-Object System.Collections.Generic.List[double]
+    $n = @($Dates).Count
+    if ($n -lt 2) { return [PSCustomObject]@{ Dates = @(); Values = @() } }
+    $j = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        $from = [DateTime]::ParseExact($Dates[$i], "yyyy-MM-dd", $inv).AddDays(-$Days).ToString("yyyy-MM-dd")
+        if ([string]::CompareOrdinal($Dates[0], $from) -gt 0) { continue }
+        while (($j + 1) -lt $n -and [string]::CompareOrdinal($Dates[$j + 1], $from) -le 0) { $j++ }
+        if ($Values[$j] -gt 0) { $outD.Add($Dates[$i]); $outV.Add(($Values[$i] / $Values[$j] - 1.0) * 100.0) }
+    }
+    return [PSCustomObject]@{ Dates = $outD.ToArray(); Values = $outV.ToArray() }
+}
+
+function Get-TwrIndex {
+    # v5.1: time-weighted growth index (start 100) aligned with the value
+    # series; buys / sales are taken out like in Get-FlowAdjustedReturns.
+    # Without Invested it is simply Value rebased to 100 (benchmarks).
+    param([double[]]$Value, [double[]]$Invested = $null, [double[]]$Dividends = $null, [int]$Start = 0)
+    $n = @($Value).Count
+    $out = New-Object double[] $n
+    for ($i = 0; $i -lt $n; $i++) { $out[$i] = [double]::NaN }
+    if ($n -eq 0 -or $Start -ge $n) { return ,$out }
+    $out[$Start] = 100.0
+    for ($i = $Start + 1; $i -lt $n; $i++) {
+        $v0 = [double]$Value[$i - 1]; $v1 = [double]$Value[$i]
+        if ($v0 -le 0 -or [double]::IsNaN($v0) -or [double]::IsNaN($v1)) { $out[$i] = $out[$i - 1]; continue }
+        $dI = if ($null -ne $Invested -and $Invested.Count -gt $i) { [double]$Invested[$i] - [double]$Invested[$i - 1] } else { 0.0 }
+        $dD = if ($null -ne $Dividends -and $Dividends.Count -gt $i) { [double]$Dividends[$i] - [double]$Dividends[$i - 1] } else { 0.0 }
+        $out[$i] = $out[$i - 1] * (($v1 + $dD - $dI) / $v0)
+    }
+    return ,$out
 }
 
 # ------------------------------------------------------------------------------
@@ -2674,6 +2808,8 @@ function Get-TerminalFunctions {
     return [ordered]@{
         "GP"     = @{ Scope = "T";  Desc = "Chart (optional Zeitraum: GP 1Y)" }
         "DES"    = @{ Scope = "T";  Desc = "Beschreibung: Profil, Kennzahlen, Termine, Position" }
+        "TA"     = @{ Scope = "T";  Desc = "Ticker-Analyse: technische Signale, Unterstützung / Widerstand, Kennzahlen" }
+        "FA"     = @{ Scope = "T";  Desc = "Ticker-Analyse: Kennzahlen (KGV, Margen, Wachstum ...) im Vergleich" }
         "N"      = @{ Scope = "GT"; Desc = "Nachrichten (ohne Ticker: News-Tab)" }
         "NEWS"   = @{ Scope = "G";  Desc = "News-Tab: NEWS / NEWS DEPOT / NEWS WATCH / NEWS <Ticker>" }
         "DVD"    = @{ Scope = "GT"; Desc = "Dividenden (ohne Ticker: Depot-Dividenden)" }
@@ -4044,4 +4180,362 @@ function Test-SettingMatch {
     $t = ConvertTo-SearchKey $Text
     foreach ($w in ($q -split '\s+')) { if ($w -and -not $t.Contains($w)) { return $false } }
     return $true
+}
+
+# ------------------------------------------------------------------------------
+# v5.1: ticker analysis - technical signals, support / resistance, fundamentals
+# ------------------------------------------------------------------------------
+function ConvertFrom-YahooOhlc {
+    # Yahoo chart JSON (interval 1d) -> daily bars without gaps
+    param($Json)
+    $o = [PSCustomObject]@{ Dates = @(); Open = @(); High = @(); Low = @(); Close = @(); Volume = @(); Currency = ""; Name = "" }
+    $r = Get-ChartResult $Json
+    if ($null -eq $r -or $null -eq $r.timestamp -or $null -eq $r.indicators) { return $null }
+    $raw = [string]$r.meta.currency
+    $unit = Normalize-CurrencyAndPrice -Price 1.0 -RawCurrency $raw
+    $o.Currency = [string]$unit.Currency
+    $o.Name = if ($r.meta.shortName) { [string]$r.meta.shortName } else { [string]$r.meta.symbol }
+    $q = $r.indicators.quote[0]
+    $ts = @($r.timestamp); $c = @($q.close); $op = @($q.open); $hi = @($q.high); $lo = @($q.low); $vo = @($q.volume)
+    $d = New-Object System.Collections.Generic.List[string]
+    $lO = New-Object System.Collections.Generic.List[double]; $lH = New-Object System.Collections.Generic.List[double]
+    $lL = New-Object System.Collections.Generic.List[double]; $lC = New-Object System.Collections.Generic.List[double]
+    $lV = New-Object System.Collections.Generic.List[double]
+    $gmt = if ($null -ne $r.meta.gmtoffset) { [int]$r.meta.gmtoffset } else { 0 }
+    for ($i = 0; $i -lt [math]::Min($ts.Count, $c.Count); $i++) {
+        if ($null -eq $c[$i] -or [double]$c[$i] -le 0) { continue }
+        $cc = [double]$c[$i] * $unit.Price
+        $d.Add([DateTimeOffset]::FromUnixTimeSeconds([long]$ts[$i] + $gmt).UtcDateTime.ToString("yyyy-MM-dd"))
+        $lC.Add($cc)
+        $lO.Add($(if ($i -lt $op.Count -and $null -ne $op[$i]) { [double]$op[$i] * $unit.Price } else { $cc }))
+        $lH.Add($(if ($i -lt $hi.Count -and $null -ne $hi[$i]) { [double]$hi[$i] * $unit.Price } else { $cc }))
+        $lL.Add($(if ($i -lt $lo.Count -and $null -ne $lo[$i]) { [double]$lo[$i] * $unit.Price } else { $cc }))
+        $lV.Add($(if ($i -lt $vo.Count -and $null -ne $vo[$i]) { [double]$vo[$i] } else { 0.0 }))
+    }
+    if ($lC.Count -eq 0) { return $null }
+    $o.Dates = $d.ToArray(); $o.Open = $lO.ToArray(); $o.High = $lH.ToArray(); $o.Low = $lL.ToArray(); $o.Close = $lC.ToArray(); $o.Volume = $lV.ToArray()
+    return $o
+}
+
+function Get-SupportResistance {
+    # Swing highs / lows (Wing bars lower / higher on each side) of the last
+    # Lookback bars, grouped when within TolPct of each other. Returns the
+    # nearest group below the last close (support) and above (resistance).
+    param([double[]]$Highs, [double[]]$Lows, [double[]]$Closes, [int]$Lookback = 250, [int]$Wing = 5, [double]$TolPct = 1.5)
+    $n = @($Closes).Count
+    $res = [PSCustomObject]@{ Support = [double]::NaN; SupportTouches = 0; Resistance = [double]::NaN; ResistanceTouches = 0; Levels = @() }
+    if ($n -lt (2 * $Wing + 3)) { return $res }
+    $from = [math]::Max($Wing, $n - $Lookback)
+    $pts = New-Object System.Collections.Generic.List[double]
+    for ($i = $from; $i -lt ($n - $Wing); $i++) {
+        $isH = $true; $isL = $true
+        for ($k = 1; $k -le $Wing; $k++) {
+            if ($Highs[$i - $k] -gt $Highs[$i] -or $Highs[$i + $k] -gt $Highs[$i]) { $isH = $false }
+            if ($Lows[$i - $k] -lt $Lows[$i] -or $Lows[$i + $k] -lt $Lows[$i]) { $isL = $false }
+        }
+        if ($isH) { $pts.Add([double]$Highs[$i]) }
+        if ($isL) { $pts.Add([double]$Lows[$i]) }
+    }
+    if ($pts.Count -eq 0) { return $res }
+    $sorted = @($pts.ToArray() | Sort-Object)
+    $groups = New-Object System.Collections.Generic.List[PSObject]
+    $cur = New-Object System.Collections.Generic.List[double]
+    foreach ($p in $sorted) {
+        if ($cur.Count -gt 0) {
+            $avg = ($cur | Measure-Object -Average).Average
+            if ([math]::Abs($p - $avg) / $avg * 100.0 -gt $TolPct) { $groups.Add([PSCustomObject]@{ Level = $avg; Touches = $cur.Count }); $cur = New-Object System.Collections.Generic.List[double] }
+        }
+        $cur.Add($p)
+    }
+    if ($cur.Count -gt 0) { $groups.Add([PSCustomObject]@{ Level = ($cur | Measure-Object -Average).Average; Touches = $cur.Count }) }
+    $last = [double]$Closes[$n - 1]
+    foreach ($g in $groups) {
+        if ($g.Level -lt $last * 0.995) { if ([double]::IsNaN($res.Support) -or $g.Level -gt $res.Support) { $res.Support = [double]$g.Level; $res.SupportTouches = [int]$g.Touches } }
+        elseif ($g.Level -gt $last * 1.005) { if ([double]::IsNaN($res.Resistance) -or $g.Level -lt $res.Resistance) { $res.Resistance = [double]$g.Level; $res.ResistanceTouches = [int]$g.Touches } }
+    }
+    $res.Levels = $groups.ToArray()
+    return $res
+}
+
+function Get-TechnicalSignals {
+    # Signal table for one ticker from daily bars. Score per row: +1 positive,
+    # -1 negative, 0 neutral / information. Not advice - a summary of the
+    # classic indicators.
+    param([double[]]$Closes, [double[]]$Highs = $null, [double[]]$Lows = $null, [double[]]$Volumes = $null)
+    $n = @($Closes).Count
+    $rows = New-Object System.Collections.Generic.List[PSObject]
+    $out = [PSCustomObject]@{ Rows = @(); Score = 0; Positive = 0; Negative = 0; Summary = ""; Support = $null }
+    if ($n -lt 30) { $out.Summary = "Zu wenig Kursdaten"; return $out }
+    if ($null -eq $Highs -or $Highs.Count -ne $n) { $Highs = $Closes }
+    if ($null -eq $Lows -or $Lows.Count -ne $n) { $Lows = $Closes }
+    $last = [double]$Closes[$n - 1]
+    $add = { param([string]$K, [string]$Name, [string]$Val, [int]$Sc, [string]$Txt) $rows.Add([PSCustomObject]@{ Key = $K; Name = $Name; Value = $Val; Score = $Sc; Text = $Txt }) }
+    $pctTo = { param([double]$x) if ($x -gt 0) { ($last / $x - 1.0) * 100.0 } else { [double]::NaN } }
+    $s20 = Compute-Sma -Prices $Closes -Period 20
+    $s50 = Compute-Sma -Prices $Closes -Period 50
+    $s200 = Compute-Sma -Prices $Closes -Period 200
+    foreach ($t in @(@(200, $s200, "Trend lang (SMA 200)"), @(50, $s50, "Trend mittel (SMA 50)"), @(20, $s20, "Trend kurz (SMA 20)"))) {
+        $sv = [double]$t[1][$n - 1]
+        if ([double]::IsNaN($sv)) { & $add ("SMA" + $t[0]) $t[2] "-" 0 "zu wenig Daten"; continue }
+        $d = & $pctTo $sv
+        & $add ("SMA" + $t[0]) $t[2] ("{0:N2} ({1:+0.0;-0.0}%)" -f $sv, $d) $(if ($d -ge 0) { 1 } else { -1 }) $(if ($d -ge 0) { "Kurs darüber" } else { "Kurs darunter" })
+    }
+    if (-not [double]::IsNaN([double]$s200[$n - 1])) {
+        $gold = ([double]$s50[$n - 1] -gt [double]$s200[$n - 1])
+        $since = 0
+        for ($i = $n - 1; $i -ge 1; $i--) {
+            if ([double]::IsNaN([double]$s200[$i - 1])) { break }
+            if ((([double]$s50[$i - 1] -gt [double]$s200[$i - 1])) -ne $gold) { break }
+            $since++
+        }
+        $txt = if ($gold) { "Golden Cross" } else { "Death Cross" }
+        & $add "CROSS" "SMA 50 / SMA 200" ("{0} {1}" -f $since, "Tage") $(if ($gold) { 1 } else { -1 }) ("{0} seit {1} Handelstagen" -f $txt, $since)
+    }
+    $rsi = Compute-Rsi -Prices $Closes -Period 14
+    $rv = [double]$rsi[$n - 1]
+    if (-not [double]::IsNaN($rv)) {
+        $rs = 0; $rt = "neutral"
+        if ($rv -ge 70) { $rs = -1; $rt = "überkauft" } elseif ($rv -le 30) { $rs = 1; $rt = "überverkauft" } elseif ($rv -ge 50) { $rt = "neutral, eher stark" } else { $rt = "neutral, eher schwach" }
+        & $add "RSI" "RSI 14" ("{0:N1}" -f $rv) $rs $rt
+    }
+    $m = Compute-Macd -Prices $Closes
+    $mh = [double]$m.Hist[$n - 1]
+    if (-not [double]::IsNaN($mh)) {
+        $mh1 = [double]$m.Hist[$n - 2]
+        $rising = (-not [double]::IsNaN($mh1)) -and $mh -gt $mh1
+        & $add "MACD" "MACD (12/26/9)" ("{0:+0.000;-0.000}" -f $mh) $(if ($mh -ge 0) { 1 } else { -1 }) ("{0}, Histogramm {1}" -f $(if ($mh -ge 0) { "über der Signallinie" } else { "unter der Signallinie" }), $(if ($rising) { "steigt" } else { "fällt" }))
+    }
+    $bb = Compute-BollingerBands -Prices $Closes -Period 20 -Multiplier 2.0
+    $bu = [double]$bb.Upper[$n - 1]; $bl = [double]$bb.Lower[$n - 1]
+    if (-not [double]::IsNaN($bu) -and $bu -gt $bl) {
+        $pb = ($last - $bl) / ($bu - $bl)
+        $bs = 0; $bt = "innerhalb der Bänder"
+        if ($pb -gt 1) { $bs = -1; $bt = "über dem oberen Band" } elseif ($pb -lt 0) { $bs = 1; $bt = "unter dem unteren Band" }
+        & $add "BOLL" "Bollinger %B" ("{0:N2}" -f $pb) $bs $bt
+    }
+    foreach ($mm in @(@(63, "Momentum 3 Monate"), @(126, "Momentum 6 Monate"), @(252, "Momentum 12 Monate"))) {
+        if ($n -gt $mm[0]) {
+            $r = ($last / [double]$Closes[$n - 1 - $mm[0]] - 1.0) * 100.0
+            & $add ("MOM" + $mm[0]) $mm[1] ("{0:+0.0;-0.0}%" -f $r) $(if ($r -ge 0) { 1 } else { -1 }) $(if ($r -ge 0) { "gestiegen" } else { "gefallen" })
+        }
+    }
+    $w = [math]::Min(252, $n)
+    $hi = ($Highs[($n - $w)..($n - 1)] | Measure-Object -Maximum).Maximum
+    $lo = ($Lows[($n - $w)..($n - 1)] | Measure-Object -Minimum).Minimum
+    if ($hi -gt $lo) {
+        $pos = ($last - $lo) / ($hi - $lo) * 100.0
+        & $add "RANGE" "52-Wochen-Spanne" ("{0:N0}%" -f $pos) 0 ("{0:+0.0;-0.0}% zum Hoch, {1:+0.0;-0.0}% zum Tief" -f (($last / $hi - 1) * 100.0), (($last / $lo - 1) * 100.0))
+    }
+    if ($n -ge 15) {
+        $trs = New-Object double[] $n
+        for ($i = 1; $i -lt $n; $i++) { $trs[$i] = [math]::Max([double]$Highs[$i] - [double]$Lows[$i], [math]::Max([math]::Abs([double]$Highs[$i] - [double]$Closes[$i - 1]), [math]::Abs([double]$Lows[$i] - [double]$Closes[$i - 1]))) }
+        $atr = ($trs[($n - 14)..($n - 1)] | Measure-Object -Average).Average
+        & $add "ATR" "Schwankung (ATR 14)" ("{0:N2} ({1:N1}%)" -f $atr, ($atr / $last * 100.0)) 0 "durchschnittliche Tagesspanne"
+    }
+    if ($null -ne $Volumes -and $Volumes.Count -eq $n -and $n -ge 60) {
+        $v20 = ($Volumes[($n - 20)..($n - 1)] | Measure-Object -Average).Average
+        $v60 = ($Volumes[($n - 60)..($n - 1)] | Measure-Object -Average).Average
+        if ($v60 -gt 0) {
+            $vr = $v20 / $v60
+            & $add "VOL" "Volumen (20 zu 60 Tage)" ("{0:N2}x" -f $vr) 0 $(if ($vr -ge 1.2) { "mehr Umsatz als üblich" } elseif ($vr -le 0.8) { "weniger Umsatz als üblich" } else { "üblich" })
+        }
+    }
+    $sr = Get-SupportResistance -Highs $Highs -Lows $Lows -Closes $Closes
+    if (-not [double]::IsNaN($sr.Support)) { & $add "SUP" "Unterstützung" ("{0:N2} ({1:+0.0;-0.0}%)" -f $sr.Support, (($sr.Support / $last - 1) * 100.0)) 0 ("{0}x getestet" -f $sr.SupportTouches) }
+    if (-not [double]::IsNaN($sr.Resistance)) { & $add "RES" "Widerstand" ("{0:N2} ({1:+0.0;-0.0}%)" -f $sr.Resistance, (($sr.Resistance / $last - 1) * 100.0)) 0 ("{0}x getestet" -f $sr.ResistanceTouches) }
+    $out.Rows = $rows.ToArray()
+    $out.Support = $sr
+    foreach ($r in $rows) { $out.Score += $r.Score; if ($r.Score -gt 0) { $out.Positive++ } elseif ($r.Score -lt 0) { $out.Negative++ } }
+    $out.Summary = if ($out.Score -ge 3) { "überwiegend positiv" } elseif ($out.Score -le -3) { "überwiegend negativ" } else { "gemischt" }
+    return $out
+}
+
+function Get-FundamentalFields {
+    # Key, label, kind (Ratio / Pct / Money / Plain), better (Low / High / ""), Yahoo module.field
+    return @(
+        @("MarketCap", "Börsenwert", "Money", "", "summaryDetail.marketCap"),
+        @("TrailingPE", "KGV (12 Monate)", "Ratio", "Low", "summaryDetail.trailingPE"),
+        @("ForwardPE", "KGV erwartet", "Ratio", "Low", "summaryDetail.forwardPE"),
+        @("PEG", "PEG", "Ratio", "Low", "defaultKeyStatistics.pegRatio"),
+        @("PriceToSales", "KUV", "Ratio", "Low", "summaryDetail.priceToSalesTrailing12Months"),
+        @("PriceToBook", "KBV", "Ratio", "Low", "defaultKeyStatistics.priceToBook"),
+        @("EvEbitda", "EV / EBITDA", "Ratio", "Low", "defaultKeyStatistics.enterpriseToEbitda"),
+        @("DivYield", "Dividendenrendite", "Pct", "High", "summaryDetail.dividendYield"),
+        @("Payout", "Ausschüttungsquote", "Pct", "", "summaryDetail.payoutRatio"),
+        @("GrossMargin", "Bruttomarge", "Pct", "High", "financialData.grossMargins"),
+        @("OpMargin", "Operative Marge", "Pct", "High", "financialData.operatingMargins"),
+        @("ProfitMargin", "Nettomarge", "Pct", "High", "financialData.profitMargins"),
+        @("ROE", "Eigenkapitalrendite", "Pct", "High", "financialData.returnOnEquity"),
+        @("RevenueGrowth", "Umsatzwachstum", "Pct", "High", "financialData.revenueGrowth"),
+        @("EarningsGrowth", "Gewinnwachstum", "Pct", "High", "financialData.earningsGrowth"),
+        @("DebtToEquity", "Verschuldung (FK/EK)", "Plain", "Low", "financialData.debtToEquity"),
+        @("CurrentRatio", "Liquidität (Current Ratio)", "Ratio", "High", "financialData.currentRatio"),
+        @("FreeCashflow", "Free Cashflow", "Money", "", "financialData.freeCashflow"),
+        @("Beta", "Beta", "Ratio", "", "summaryDetail.beta")
+    )
+}
+
+function ConvertFrom-YahooFundamentals {
+    param($Summary)
+    $r = $null
+    try { $r = $Summary.quoteSummary.result[0] } catch { $r = $null }
+    if ($null -eq $r) { return $null }
+    $o = [ordered]@{}
+    $any = $false
+    foreach ($f in (Get-FundamentalFields)) {
+        $parts = $f[4].Split('.')
+        $v = $r.($parts[0])
+        if ($null -ne $v) { $v = $v.($parts[1]) }
+        $x = [double]::NaN
+        if ($null -ne $v) {
+            if ($v -is [ValueType]) { $x = [double]$v } elseif ($null -ne $v.raw) { $x = [double]$v.raw }
+        }
+        if (-not [double]::IsNaN($x)) { $any = $true }
+        $o[$f[0]] = $x
+    }
+    if ([double]::IsNaN([double]$o["ForwardPE"]) -and $null -ne $r.defaultKeyStatistics -and $null -ne $r.defaultKeyStatistics.forwardPE) {
+        $fp = $r.defaultKeyStatistics.forwardPE
+        if ($null -ne $fp.raw) { $o["ForwardPE"] = [double]$fp.raw; $any = $true }
+    }
+    $o["Currency"] = if ($null -ne $r.financialData -and $r.financialData.financialCurrency) { [string]$r.financialData.financialCurrency } elseif ($null -ne $r.summaryDetail -and $r.summaryDetail.currency) { [string]$r.summaryDetail.currency } else { "" }
+    if (-not $any) { return $null }
+    return [PSCustomObject]$o
+}
+
+function Get-Median {
+    param([double[]]$Values)
+    $v = @($Values | Where-Object { -not [double]::IsNaN([double]$_) } | Sort-Object)
+    if ($v.Count -eq 0) { return [double]::NaN }
+    if ($v.Count % 2 -eq 1) { return [double]$v[[int][math]::Floor($v.Count / 2)] }
+    return ([double]$v[$v.Count / 2 - 1] + [double]$v[$v.Count / 2]) / 2.0
+}
+
+function Format-FundamentalValue {
+    param([double]$X, [string]$Kind, [string]$Currency = "")
+    if ([double]::IsNaN($X)) { return "-" }
+    switch ($Kind) {
+        "Pct"   { return ("{0:N1}%" -f ($X * 100.0)) }
+        "Money" {
+            $a = [math]::Abs($X)
+            $t = if ($a -ge 1e12) { "{0:N2} Bio." -f ($X / 1e12) } elseif ($a -ge 1e9) { "{0:N1} Mrd." -f ($X / 1e9) } elseif ($a -ge 1e6) { "{0:N1} Mio." -f ($X / 1e6) } else { "{0:N0}" -f $X }
+            return ("{0} {1}" -f $t, $Currency).Trim()
+        }
+        "Plain" { return ("{0:N0}%" -f $X) }
+        default { return ("{0:N2}" -f $X) }
+    }
+}
+
+function Get-FundamentalRows {
+    # Rows for the ticker analysis: own value, median of the peers (your other
+    # tickers in the same sector) and a rough classification (+1 / 0 / -1)
+    param($Fund, [array]$Peers = @())
+    $rows = @()
+    if ($null -eq $Fund) { return $rows }
+    $cur = [string]$Fund.Currency
+    $num = {
+        param($O, [string]$K)
+        $pp = $O.PSObject.Properties[$K]
+        if ($null -eq $pp -or $null -eq $pp.Value -or [string]$pp.Value -eq "") { return [double]::NaN }
+        $d = 0.0
+        if ([double]::TryParse([string]$pp.Value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+        try { return [double]$pp.Value } catch { return [double]::NaN }
+    }
+    foreach ($f in (Get-FundamentalFields)) {
+        $k = $f[0]; $kind = $f[2]; $better = $f[3]
+        $x = & $num $Fund $k
+        $pv = @(@($Peers) | Where-Object { $null -ne $_ } | ForEach-Object { & $num $_ $k } | Where-Object { -not [double]::IsNaN($_) })
+        $med = if ($pv.Count -ge 2) { Get-Median -Values ([double[]]$pv) } else { [double]::NaN }
+        $sc = 0; $note = ""
+        if (-not [double]::IsNaN($x)) {
+            if (-not [double]::IsNaN($med) -and $better -and [math]::Abs($med) -gt 1e-12) {
+                $rel = $x / $med
+                $neg = ($k -in @("TrailingPE", "ForwardPE", "PEG", "EvEbitda") -and $x -le 0)
+                if ($neg) { $sc = -1; $note = "negativ (Verlust)" }
+                elseif ($better -eq "Low") { if ($rel -le 0.85) { $sc = 1; $note = "niedriger als Vergleich" } elseif ($rel -ge 1.15) { $sc = -1; $note = "höher als Vergleich" } else { $note = "ähnlich" } }
+                else { if ($x -ge $med * 1.15 -or ($med -lt 0 -and $x -gt $med)) { $sc = 1; $note = "besser als Vergleich" } elseif ($x -le $med * 0.85) { $sc = -1; $note = "schwächer als Vergleich" } else { $note = "ähnlich" } }
+            } else {
+                switch ($k) {
+                    "PEG"           { if ($x -gt 0 -and $x -lt 1) { $sc = 1; $note = "unter 1" } elseif ($x -gt 2) { $sc = -1; $note = "über 2" } }
+                    "TrailingPE"    { if ($x -le 0) { $sc = -1; $note = "Verlust" } }
+                    "DebtToEquity"  { if ($x -gt 200) { $sc = -1; $note = "hoch verschuldet" } elseif ($x -lt 50) { $sc = 1; $note = "wenig Schulden" } }
+                    "CurrentRatio"  { if ($x -lt 1) { $sc = -1; $note = "unter 1" } elseif ($x -ge 1.5) { $sc = 1; $note = "solide" } }
+                    "RevenueGrowth" { if ($x -gt 0.05) { $sc = 1; $note = "wächst" } elseif ($x -lt 0) { $sc = -1; $note = "schrumpft" } }
+                    "EarningsGrowth" { if ($x -gt 0.05) { $sc = 1; $note = "wächst" } elseif ($x -lt 0) { $sc = -1; $note = "schrumpft" } }
+                    "ProfitMargin"  { if ($x -lt 0) { $sc = -1; $note = "Verlust" } }
+                    "Payout"        { if ($x -gt 1) { $sc = -1; $note = "mehr als der Gewinn" } }
+                }
+            }
+        }
+        $rows += [PSCustomObject]@{ Key = $k; Name = $f[1]; Value = (Format-FundamentalValue -X $x -Kind $kind -Currency $cur); Peer = (Format-FundamentalValue -X $med -Kind $kind -Currency $cur); PeerCount = $pv.Count; Score = $sc; Note = $note }
+    }
+    return $rows
+}
+
+function ConvertTo-SectorKey {
+    # "Financial Services" / "financial_services" -> "financialservices"
+    param([string]$Name)
+    return ((([string]$Name).ToLowerInvariant()) -replace '[^a-z]', '')
+}
+
+function ConvertFrom-YahooSectorWeights {
+    # v5.1: quoteSummary topHoldings.sectorWeightings of an ETF -> sector key -> percent
+    param($Summary)
+    $out = @{}
+    $r = $null
+    try { $r = $Summary.quoteSummary.result[0] } catch { $r = $null }
+    if ($null -eq $r -or $null -eq $r.topHoldings -or $null -eq $r.topHoldings.sectorWeightings) { return $out }
+    foreach ($item in @($r.topHoldings.sectorWeightings)) {
+        if ($null -eq $item) { continue }
+        foreach ($pp in $item.PSObject.Properties) {
+            $v = $pp.Value
+            $x = [double]::NaN
+            if ($v -is [ValueType]) { $x = [double]$v } elseif ($null -ne $v -and $null -ne $v.raw) { $x = [double]$v.raw }
+            if (-not [double]::IsNaN($x)) { $out[(ConvertTo-SectorKey $pp.Name)] = $x * 100.0 }
+        }
+    }
+    return $out
+}
+
+function Get-SectorComparison {
+    # Depot groups (Key = sector name, Pct) against reference weights (key -> %)
+    param([array]$Groups, [hashtable]$Reference)
+    $names = @{
+        "technology" = "Technology"; "financialservices" = "Financial Services"; "healthcare" = "Healthcare"
+        "consumercyclical" = "Consumer Cyclical"; "industrials" = "Industrials"; "communicationservices" = "Communication Services"
+        "consumerdefensive" = "Consumer Defensive"; "energy" = "Energy"; "basicmaterials" = "Basic Materials"
+        "realestate" = "Real Estate"; "utilities" = "Utilities"
+    }
+    $dep = @{}
+    $other = 0.0
+    foreach ($g in @($Groups)) {
+        if ($null -eq $g) { continue }
+        $k = ConvertTo-SectorKey ([string]$g.Key)
+        if ($names.ContainsKey($k)) { $dep[$k] = [double]$dep[$k] + [double]$g.Pct } else { $other += [double]$g.Pct }
+    }
+    $rows = @()
+    foreach ($k in $names.Keys) {
+        $d = if ($dep.ContainsKey($k)) { [double]$dep[$k] } else { 0.0 }
+        $rf = if ($null -ne $Reference -and $Reference.ContainsKey($k)) { [double]$Reference[$k] } else { [double]::NaN }
+        if ($d -eq 0 -and ([double]::IsNaN($rf) -or $rf -eq 0)) { continue }
+        $rows += [PSCustomObject]@{ Sector = $names[$k]; Depot = $d; Ref = $rf; Diff = $(if ([double]::IsNaN($rf)) { [double]::NaN } else { $d - $rf }) }
+    }
+    $rows = @($rows | Sort-Object -Property @{ Expression = { [double]$_.Depot }; Descending = $true }, @{ Expression = { $(if ([double]::IsNaN([double]$_.Ref)) { 0.0 } else { [double]$_.Ref }) }; Descending = $true }, @{ Expression = { [string]$_.Sector }; Descending = $false })
+    if ($other -gt 0) { $rows += [PSCustomObject]@{ Sector = "Andere / ETF / unbekannt"; Depot = $other; Ref = [double]::NaN; Diff = [double]::NaN } }
+    return $rows
+}
+
+function Get-AlignedIndex {
+    # v5.1: close series rebased to 100 on the target dates (last close on or
+    # before each date); NaN before the first close
+    param([string[]]$Target, [string[]]$Dates, [double[]]$Closes)
+    $n = @($Target).Count
+    $out = New-Object double[] $n
+    $j = -1; $base = [double]::NaN
+    for ($i = 0; $i -lt $n; $i++) {
+        while (($j + 1) -lt @($Dates).Count -and [string]::CompareOrdinal([string]$Dates[$j + 1], [string]$Target[$i]) -le 0) { $j++ }
+        if ($j -lt 0 -or [double]$Closes[$j] -le 0) { $out[$i] = [double]::NaN; continue }
+        if ([double]::IsNaN($base)) { $base = [double]$Closes[$j] }
+        $out[$i] = [double]$Closes[$j] / $base * 100.0
+    }
+    return ,$out
 }
