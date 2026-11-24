@@ -12,9 +12,9 @@
 ## Look and feel
 - **Same window frame everywhere**: every dialog now gets the dark title bar plus the theme's caption and border colour (before, only the main window did).
 - **Rounded corners** on Windows 11, also on the borderless Ticker strip and the command palette (Settings → Schrift und Rahmen; the fullscreen chart stays square).
-- **Font for numbers**: Consolas, Cascadia Mono, Cascadia Code or Lucida Console (only installed fonts are offered). **Font size** 90 / 100 / 110 / 120 %. Both apply after a restart; the widget offers to restart.
+- **Font for numbers**: Consolas, Cascadia Mono, Cascadia Code or Lucida Console (only installed fonts are offered). **List + chart font size** 90 / 100 / 110 / 120 %: tables (rows grow with it) and chart labels; buttons and input boxes keep their size so nothing gets cut off. Both apply after a restart; the widget offers to restart.
 - **Numbers right-aligned** in the watchlist and portfolio (headers too), so digits stay in place when prices change. Can be switched off.
 
 ## Other
-- The nav bar's command button gets narrower in small windows before the status text disappears.
+- The nav bar's command button gets narrower in small windows (then it reads just "> Befehl") before the status text disappears. The theme button is wider, so "Terminal" fits.
 - Tests: 12 new Pester tests (feed merging, filters, ages, unread count, movers, Terminal geometry, fonts, corners); the UI smoke test also covers the News tab, its filters, the unread count and the Terminal layout with News.

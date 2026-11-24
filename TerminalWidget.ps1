@@ -2400,15 +2400,22 @@ try {
     $ifc.Dispose()
 } catch { }
 $script:MonoFamily = Resolve-MonoFont -Wanted ([string]$script:Config.MonoFont) -Installed $script:InstalledFonts
+# The size setting only scales the lists (grid cells + row height) and the
+# chart labels: buttons, labels and input boxes have fixed pixel sizes and
+# would clip larger text.
 $fsc = [int]$script:Config.FontScale
-$fontTicker = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 10.5 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontPrice  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 13.0 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontUi     = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc))
-$fontUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
-$fontMono   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc))
-$fontMonoBold = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$script:GridRowScale = $fsc / 100.0
+$fontTicker = New-Object System.Drawing.Font($script:MonoFamily, 10.5, [System.Drawing.FontStyle]::Bold)
+$fontPrice  = New-Object System.Drawing.Font($script:MonoFamily, 13.0, [System.Drawing.FontStyle]::Bold)
+$fontUi     = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$fontUiBold = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$fontMono   = New-Object System.Drawing.Font($script:MonoFamily, 8.5)
 $fontAxis   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc))
 $fontBadge  = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.0 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontGrid       = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc))
+$fontGridBold   = New-Object System.Drawing.Font($script:MonoFamily, (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
+$fontGridUi     = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc))
+$fontGridUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize 8.5 $fsc), [System.Drawing.FontStyle]::Bold)
 
 $script:GdiCache = @{}
 
@@ -3647,7 +3654,7 @@ $script:EnText = @{
     "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
     "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
     # v4.9: news tab, fonts, frame
-    "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße (ab Neustart)" = "Font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
+    "> Befehl" = "> Command"; "> Befehl     Strg+K" = "> Command    Ctrl+K"; "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße Listen + Chart (ab Neustart)" = "List + chart font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
 }
 
 function Tr {
@@ -3825,7 +3832,7 @@ function Style-DataGrid {
     $Grid.EnableHeadersVisualStyles = $false
     $Grid.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
     $Grid.ColumnHeadersHeight = S 26
-    $Grid.RowTemplate.Height = S 25
+    $Grid.RowTemplate.Height = S ([math]::Round(25 * $script:GridRowScale))
 
     $hdrStyle = New-Object System.Windows.Forms.DataGridViewCellStyle
     $hdrStyle.BackColor = $script:Pal.Input
@@ -3838,7 +3845,7 @@ function Style-DataGrid {
     $cellStyle.ForeColor = $script:Pal.Text
     $cellStyle.SelectionBackColor = $script:Pal.Hover
     $cellStyle.SelectionForeColor = $script:Pal.Text
-    $cellStyle.Font = $fontMono
+    $cellStyle.Font = $fontGrid
     $Grid.DefaultCellStyle = $cellStyle
 }
 
@@ -4263,7 +4270,7 @@ Set-Tip $cmbRefresh "Auto-Refresh Intervall" "REFRESH"
 
 $btnThemeCycle = New-Object System.Windows.Forms.Button
 $btnThemeCycle.Location = New-Object System.Drawing.Point((S ($script:NavX + 96)), (S 2))
-$btnThemeCycle.Size = New-Object System.Drawing.Size((S 54), (S 27))
+$btnThemeCycle.Size = New-Object System.Drawing.Size((S 66), (S 27))
 Style-FlatButton -Btn $btnThemeCycle -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnThemeCycle.Font = $fontUi
 $btnThemeCycle.Text = $script:Config.Theme
@@ -4271,7 +4278,7 @@ $pnlNav.Controls.Add($btnThemeCycle)
 Set-Tip $btnThemeCycle "Theme wechseln: Dark / OLED / Light / Terminal (Taste T)" "THEME"
 
 $btnSettings = New-Object System.Windows.Forms.Button
-$btnSettings.Location = New-Object System.Drawing.Point((S ($script:NavX + 154)), (S 2))
+$btnSettings.Location = New-Object System.Drawing.Point((S ($script:NavX + 166)), (S 2))
 $btnSettings.Size = New-Object System.Drawing.Size((S 30), (S 27))
 Style-FlatButton -Btn $btnSettings -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnSettings.Font = $fontUiBold
@@ -4280,7 +4287,7 @@ $pnlNav.Controls.Add($btnSettings)
 Set-Tip $btnSettings "Einstellungen (Taste S)"
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = New-Object System.Drawing.Point((S ($script:NavX + 188)), (S 6))
+$lblStatus.Location = New-Object System.Drawing.Point((S ($script:NavX + 200)), (S 6))
 $lblStatus.Size = New-Object System.Drawing.Size((S 222), (S 20))
 $lblStatus.Font = $fontMono
 $lblStatus.ForeColor = $script:Pal.Muted
@@ -4291,7 +4298,7 @@ $pnlNav.Controls.Add($lblStatus)
 
 # v4.4: command line button (Ctrl+K)
 $btnCmd = New-Object System.Windows.Forms.Button
-$btnCmd.SetBounds((S ($script:NavX + 188)), (S 3), (S 170), (S 24))
+$btnCmd.SetBounds((S ($script:NavX + 200)), (S 3), (S 170), (S 24))
 Style-FlatButton -Btn $btnCmd -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnCmd.Font = $fontMono
 $btnCmd.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
@@ -5122,7 +5129,7 @@ $dgvNews.Columns["Age"].Width  = S 104
 $dgvNews.Columns["Syms"].Width = S 150
 $dgvNews.Columns["Src"].Width  = S 120
 $dgvNews.Columns["Title"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
-$dgvNews.Columns["Title"].DefaultCellStyle.Font = $fontUi
+$dgvNews.Columns["Title"].DefaultCellStyle.Font = $fontGridUi
 foreach ($nc in $dgvNews.Columns) { $nc.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
 $viewNews.Controls.Add($dgvNews)
 $dgvNews.Columns["Age"].ToolTipText  = "Wann die Meldung erschienen ist"
@@ -5254,8 +5261,8 @@ function Refresh-NewsGrid {
         $row.Cells["Src"].Style.ForeColor = $p.Muted
         $row.Cells["Syms"].Style.ForeColor = if ($null -eq $mv) { $p.Accent } elseif ($mv.Pct -ge 0) { $colGreen } else { $colRed }
         if ([DateTime]$n.Time -gt $script:NewsBoldSince) {
-            foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontMonoBold }
-            $row.Cells["Title"].Style.Font = $fontUiBold
+            foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontGridBold }
+            $row.Cells["Title"].Style.Font = $fontGridUiBold
         }
         $tip = Get-NewsTooltip $n
         foreach ($cn in @("Age", "Src", "Title")) { $row.Cells[$cn].ToolTipText = $tip }
@@ -5594,9 +5601,13 @@ function Update-MainLayout {
     # Navigation bar: status text uses the extra width
     $pnlNav.Width = $W - (S 24)
     # v4.9: the command button gets narrower before the status text vanishes
-    $cmdX = S ($script:NavX + 188)
+    $cmdX = S ($script:NavX + 200)
     $cmdW = [math]::Max((S 110), [math]::Min((S 170), $pnlNav.Width - $cmdX - (S 220)))
     $btnCmd.SetBounds($cmdX, (S 3), $cmdW, (S 24))
+    # v4.9: short label when the button is narrow (the tooltip names Ctrl+K)
+    $cmdTxt = if ($cmdW -lt (S 150)) { "> Befehl" } else { "> Befehl     Strg+K" }
+    $cmdTxt = Tr $cmdTxt
+    if ($btnCmd.Text -ne $cmdTxt) { $btnCmd.Text = $cmdTxt }
     $stX = $cmdX + $cmdW + (S 8)
     $lblStatus.SetBounds($stX, (S 6), [math]::Max(0, $pnlNav.Width - $stX), (S 20))
 
@@ -11098,7 +11109,7 @@ function Show-SettingsDialog {
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
     $cbMono  = & $addCombo "Schrift für Zahlen (ab Neustart)" $monoOffered ([string]$cfg.MonoFont) "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal."
     $scaleItems = @(Get-FontScaleSteps | ForEach-Object { "$_ %" })
-    $cbScale = & $addCombo "Schriftgröße (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Größer = besser lesbar, braucht aber mehr Platz in den Spalten"
+    $cbScale = & $addCombo "Schriftgröße Listen + Chart (ab Neustart)" $scaleItems ("{0} %" -f [int]$cfg.FontScale) "Vergrößert Tabellen (Zeilenhöhe wächst mit) und Chart-Beschriftung. Knöpfe und Eingabefelder bleiben gleich groß, damit nichts abgeschnitten wird."
     $chkAlignR = & $addCheck "Zahlen rechtsbündig (Watchlist, Portfolio)" ([bool]$cfg.AlignNumbersRight) "Ziffern bleiben beim Aktualisieren an ihrem Platz"
     $chkRound  = & $addCheck "Abgerundete Fensterecken (Windows 11)" ([bool]$cfg.RoundCorners)
 
