@@ -58,3 +58,24 @@ Data format version 5: on the first start the widget makes a backup of all data 
 
 ### Tests
 - 8 new Pester tests (time ↔ bar mapping, Fibonacci, line hit test, trend line alerts, Heikin-Ashi, chart type cycle, comparison list); the UI smoke test draws all three kinds with real mouse clicks, finds them with a right-click hit test, creates line alerts, books a trade and renders it, cycles the chart types with K and loads three comparisons.
+
+## Stage C – Workspace
+
+### Draggable dividers (Terminal layout)
+- Drag the gap between the chart and the lists up or down to change the chart height; drag the gap between Watchlist and Portfolio (when side by side) to share the width differently. Double-click a divider = default sizes. Saved.
+
+### Watchlist groups
+- New drop-down next to the watchlist title: **Alle** or one of your groups (e.g. Tech, ETFs, Dividenden), with the number of tickers. "+ Neue Gruppe ..." creates one, "Gruppe löschen" removes the shown group (the tickers stay in the watchlist).
+- Right-click a ticker → **Zu Gruppe**: tick / untick groups or create a new one with this ticker. A ticker can be in several groups. Drag & drop ordering works inside a group too.
+
+### Hover card
+- Rest the mouse on a ticker in the watchlist or portfolio: a card shows name, price and day change, the day range, a 52-week bar, the 5-day line, your position (amounts hidden in privacy mode), the next earnings date and the analyst view. Off in Settings → Erklärungen.
+
+### Settings search
+- "Suchen:" at the bottom of the settings window: matching settings light up, the rest fades (umlauts are folded, so "grosse" finds "Größe").
+
+### Back where you were
+- A list shown as a full page (Terminal) and an open Analyse window come back after a restart; `P` opens Analyse on the page you used last.
+
+### Tests
+- 4 new Pester tests (divider percentage, split widths, groups, settings search); the UI smoke test drags the chart height, checks the full-page memory, filters the watchlist by a group via the right-click menu and shows / hides the hover card.

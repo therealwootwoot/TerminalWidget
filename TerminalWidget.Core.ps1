@@ -918,7 +918,8 @@ function Get-TerminalLayoutRects {
         [int]$Gap = 8,
         [int]$MinBottomH = 300,
         [int]$MinChartH = 160,
-        [string]$Full = ""
+        [string]$Full = "",
+        [double]$SplitPct = 50
     )
     # v4.9: ActiveBottom "News" puts the news tab below the chart, full width
     $out = [PSCustomObject]@{ Chart = $null; Watchlist = $null; Portfolio = $null; News = $null; SideBySide = $false }
@@ -949,7 +950,10 @@ function Get-TerminalLayoutRects {
         return $out
     }
     if ($bottom.Count -eq 2 -and $W -ge (2 * $PanelMinW + $Gap)) {
-        $half = [int][math]::Floor(($W - $Gap) / 2)
+        # v5.0: the divider between the two lists can be dragged (SplitPct = watchlist share)
+        $sp = [math]::Max(25.0, [math]::Min(75.0, $SplitPct))
+        $half = [int][math]::Floor(($W - $Gap) * $sp / 100.0)
+        $half = [math]::Max($PanelMinW, [math]::Min($W - $Gap - $PanelMinW, $half))
         $out.Watchlist = @($X, $by, $half, $bottomH)
         $out.Portfolio = @(($X + $half + $Gap), $by, ($W - $half - $Gap), $bottomH)
         $out.SideBySide = $true
@@ -3979,4 +3983,65 @@ function Set-CompareList {
     if ($list.Count -ge $Max) { return [PSCustomObject]@{ List = @($list); Msg = "full" } }
     $list.Add($s)
     return [PSCustomObject]@{ List = @($list); Msg = "added" }
+}
+
+# ==============================================================================
+# v5.0 Stage C: workspace (dividers, watchlist groups, settings search)
+# ==============================================================================
+function Get-DragPct {
+    # Divider dragged to Pos inside a span starting at Start with Length -> % (clamped)
+    param([double]$Pos, [double]$Start, [double]$Length, [double]$Min = 20, [double]$Max = 80)
+    if ($Length -le 0) { return [math]::Round(($Min + $Max) / 2) }
+    $p = ($Pos - $Start) / $Length * 100.0
+    return [math]::Round([math]::Max($Min, [math]::Min($Max, $p)))
+}
+
+function Get-WatchGroupSymbols {
+    # Watchlist (in its order) limited to a group; "" = all
+    param([string[]]$Watchlist, $Groups, [string]$Group = "")
+    $wl = @(@($Watchlist) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpperInvariant() })
+    if (-not $Group) { return $wl }
+    $g = @(@($Groups) | Where-Object { $null -ne $_ -and [string]$_.Name -eq $Group })
+    if ($g.Count -eq 0) { return $wl }
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($s in @($g[0].Symbols)) { if ($s) { [void]$set.Add(([string]$s).ToUpperInvariant()) } }
+    return @($wl | Where-Object { $set.Contains($_) })
+}
+
+function Set-WatchGroupMember {
+    # Adds (In = $true) or removes a ticker in a group; a new name creates the
+    # group. Returns the new group list (name order kept, empty groups stay).
+    param($Groups, [string]$Group, [string]$Symbol, [bool]$In = $true)
+    $out = @()
+    $found = $false
+    $s = ([string]$Symbol).Trim().ToUpperInvariant()
+    foreach ($g in @($Groups)) {
+        if ($null -eq $g -or -not $g.Name) { continue }
+        $syms = @(@($g.Symbols) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpperInvariant() })
+        if ([string]$g.Name -eq $Group) {
+            $found = $true
+            $syms = @($syms | Where-Object { $_ -ne $s })
+            if ($In -and $s) { $syms += $s }
+        }
+        $out += [PSCustomObject]@{ Name = [string]$g.Name; Symbols = @($syms) }
+    }
+    if (-not $found -and $Group -and $In) { $out += [PSCustomObject]@{ Name = $Group; Symbols = @($(if ($s) { $s })) } }
+    return ,$out
+}
+
+function ConvertTo-SearchKey {
+    # lower case, umlauts and ß folded, so "uber" finds "Über"
+    param([string]$Text)
+    $t = ([string]$Text).ToLowerInvariant()
+    return ($t -replace 'ä', 'a' -replace 'ö', 'o' -replace 'ü', 'u' -replace 'ß', 'ss')
+}
+
+function Test-SettingMatch {
+    # Settings search: every word of the query must appear in the text
+    param([string]$Text, [string]$Query)
+    $q = (ConvertTo-SearchKey $Query).Trim()
+    if (-not $q) { return $false }
+    $t = ConvertTo-SearchKey $Text
+    foreach ($w in ($q -split '\s+')) { if ($w -and -not $t.Contains($w)) { return $false } }
+    return $true
 }

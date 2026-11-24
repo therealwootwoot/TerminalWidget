@@ -1946,6 +1946,42 @@ Describe "Chart tools (v5.0)" {
     }
 }
 
+Describe "Workspace (v5.0)" {
+    It "turns a divider position into a clamped percentage" {
+        Get-DragPct -Pos 550 -Start 100 -Length 900 | Should -Be 50
+        Get-DragPct -Pos 0 -Start 100 -Length 900 -Min 25 -Max 80 | Should -Be 25
+        Get-DragPct -Pos 5000 -Start 100 -Length 900 -Min 25 -Max 80 | Should -Be 80
+        Get-DragPct -Pos 5 -Start 0 -Length 0 -Min 20 -Max 80 | Should -Be 50
+    }
+    It "splits the two lists by the dragged share" {
+        $r = Get-TerminalLayoutRects -X 0 -Y 0 -W 2000 -H 900 -SplitPct 60 -PanelMinW 756 -Gap 8
+        $r.Watchlist[2] | Should -Be 1195
+        ($r.Watchlist[2] + 8 + $r.Portfolio[2]) | Should -Be 2000
+        # never narrower than PanelMinW
+        (Get-TerminalLayoutRects -X 0 -Y 0 -W 2000 -H 900 -SplitPct 75 -PanelMinW 756 -Gap 8).Portfolio[2] | Should -Be 756
+    }
+    It "keeps watchlist groups" {
+        $g = Set-WatchGroupMember -Groups @() -Group "Tech" -Symbol "nvda"
+        $g = Set-WatchGroupMember -Groups $g -Group "Tech" -Symbol "MSFT"
+        $g = Set-WatchGroupMember -Groups $g -Group "ETF" -Symbol "EUNL.DE"
+        @($g).Count | Should -Be 2
+        ($g[0].Symbols -join ",") | Should -Be "NVDA,MSFT"
+        (Get-WatchGroupSymbols -Watchlist @("msft", "ABBN.SW", "NVDA") -Groups $g -Group "Tech") -join "," | Should -Be "MSFT,NVDA"
+        @(Get-WatchGroupSymbols -Watchlist @("A", "B") -Groups $g -Group "").Count | Should -Be 2
+        @(Get-WatchGroupSymbols -Watchlist @("A", "B") -Groups $g -Group "Gone").Count | Should -Be 2
+        $g = Set-WatchGroupMember -Groups $g -Group "Tech" -Symbol "NVDA" -In $false
+        ($g[0].Symbols -join ",") | Should -Be "MSFT"
+        $e = Set-WatchGroupMember -Groups @() -Group "Leer" -Symbol ""
+        @($e[0].Symbols).Count | Should -Be 0
+    }
+    It "finds settings by words, umlauts folded" {
+        Test-SettingMatch -Text "Schriftgröße Listen + Chart (ab Neustart)" -Query "schrift grosse" | Should -BeTrue
+        Test-SettingMatch -Text "Handy-Push einrichten ..." -Query "push" | Should -BeTrue
+        Test-SettingMatch -Text "Theme" -Query "push" | Should -BeFalse
+        Test-SettingMatch -Text "Theme" -Query "  " | Should -BeFalse
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

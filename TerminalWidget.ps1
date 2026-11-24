@@ -564,6 +564,13 @@ $defaultConfig = [PSCustomObject]@{
     TerminalShowWatch     = $true
     TerminalShowPortfolio = $true
     TerminalChartPct      = 55
+    TerminalSplitPct      = 50                # v5.0: watchlist share when side by side
+    TerminalFull          = ""                # v5.0: list shown as a full page (restored at start)
+    ReopenAnalysis        = ""                # v5.0: Analyse page that was open when the widget closed
+    AnalysisLastPage      = "Perf"
+    WatchGroups           = @()               # v5.0: @{ Name; Symbols }
+    WatchGroup            = ""                # shown group, "" = all
+    HoverCards            = $true             # v5.0: info card when the mouse rests on a ticker
     TerminalBottom        = "Watchlist"       # bottom panel when only one fits
     TerminalW             = 0                 # remembered client size of the Terminal layout
     TerminalH             = 0
@@ -3941,6 +3948,7 @@ $script:EnText = @{
     # v5.0
     "Cash-Konto für dieses Depot führen" = "Keep a cash account for this depot"; "Währung:" = "Currency:"; "Einzahlung" = "Deposit"; "Auszahlung" = "Withdrawal"; "Zinsen" = "Interest"; "Stand setzen" = "Set balance"; "Kontostand" = "Balance"; "Aus - Haken setzen, um den Kontostand mitzuführen" = "Off - tick the box to track the balance"; "Kontostand beim Einschalten" = "Balance when switched on"; "gesetzt auf" = "set to"; "+ Sparplan" = "+ Savings plan"; "Jetzt prüfen" = "Check now"; "Speichern" = "Save"; "Transaktion" = "Transaction"; "Cash-Konto ... (CASH)" = "Cash account ... (CASH)"; "Sparpläne ... (SPAR)" = "Savings plans ... (SPAR)"; "Zielgewichte / Rebalancing (REBAL)" = "Target weights / rebalancing (REBAL)"; "Risiko (RISK)" = "Risk (RISK)"; "Heatmap (HEAT)" = "Heatmap (HEAT)"; "Risiko" = "Risk"; "Zielgewichte" = "Targets"; "Risikoloser Zins für Sharpe (% p.a.):" = "Risk-free rate for Sharpe (% p.a.):"; "Kennzahl" = "Measure"; "Depot" = "Depot"; "Zu wenig Verlauf - erst ein paar Wochen Buchungen / Kurse" = "Not enough history yet - a few weeks of bookings / prices needed"; "Zeitraum" = "Period"; "Werte" = "values"; "Rendite p.a. (zeitgewichtet)" = "Return p.a. (time-weighted)"; "Rendite im Zeitraum" = "Return in period"; "Volatilität p.a." = "Volatility p.a."; "Max. Drawdown" = "Max. drawdown"; "Beta zur Benchmark" = "Beta vs. benchmark"; "Korrelation zur Benchmark" = "Correlation with benchmark"; "Bester Tag" = "Best day"; "Schlechtester Tag" = "Worst day"; "gemeinsame Tage" = "common days"; "Neues Geld:" = "New money:"; "Cash-Konto einbeziehen" = "Include cash account"; "Nur kaufen (nichts verkaufen)" = "Buy only (no sales)"; "Gleich verteilen" = "Equal weights"; "Ziele löschen" = "Clear targets"; "Noch keine Ziele: in der Spalte 'Ziel %' Anteile eintragen (Enter) oder 'Gleich verteilen'. Positionen ohne Ziel bleiben unverändert." = "No targets yet: enter shares in the 'Ziel %' column (Enter) or use 'Equal weights'. Positions without a target stay as they are."; "Basis (Positionen mit Ziel + Geld)" = "Base (positions with target + money)"; "übrig" = "left"; "Vorschlag ohne Gebühren und Steuern, Stückzahlen gerundet auf 2 Stellen. Keine Anlageberatung." = "Suggestion without fees and taxes, shares rounded to 2 decimals. Not investment advice."; "Privat-Modus: Beträge ausgeblendet (F9)." = "Privacy mode: amounts hidden (F9)."; "Depot (Größe = Anteil)" = "Depot (size = weight)"; "Watchlist (gleich groß)" = "Watchlist (equal size)"; "Keine Positionen mit aktuellem Kurs." = "No positions with a current price."
     "Zeichnen" = "Draw"; "Horizontale Linie" = "Horizontal line"; "Trendlinie (D)" = "Trend line (D)"; "Fibonacci" = "Fibonacci"; "Alle Zeichnungen dieses Tickers löschen" = "Delete all drawings of this ticker"; "Alarm auf diese Linie" = "Alert on this line"; "Zeichnung löschen" = "Delete drawing"; "Eigene Käufe / Verkäufe anzeigen" = "Show own buys / sells"
+    "+ Neue Gruppe ..." = "+ New group ..."; "Gruppe löschen:" = "Delete group:"; "Zu Gruppe" = "To group"; "Neue Gruppe ..." = "New group ..."; "Tag:" = "Day:"; "Im Depot" = "In depot"; "Zahlen:" = "Earnings:"; "Analysten:" = "Analysts:"; "Infokarte, wenn die Maus auf einem Ticker ruht" = "Info card when the mouse rests on a ticker"
 }
 
 function Tr {
@@ -5353,11 +5361,88 @@ $form.Controls.Add($viewWatch)
 
 $lblWlTitle = New-Object System.Windows.Forms.Label
 $lblWlTitle.Location = New-Object System.Drawing.Point((S 10), (S 8))
-$lblWlTitle.Size = New-Object System.Drawing.Size((S 350), (S 20))
+$lblWlTitle.Size = New-Object System.Drawing.Size((S 228), (S 20))
+$lblWlTitle.AutoEllipsis = $true
 $lblWlTitle.Font = $fontUiBold
 $lblWlTitle.ForeColor = $script:Pal.Accent
 $lblWlTitle.Text = "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)"
 $viewWatch.Controls.Add($lblWlTitle)
+Set-Tip $lblWlTitle "Ziehen = Reihenfolge, Entf = Löschen, Rechtsklick auf einen Ticker = Aktionen und Gruppen"
+
+# v5.0: watchlist groups (e.g. Tech, ETFs) - a filter over the one watchlist
+$cmbWlGroup = New-Object System.Windows.Forms.ComboBox
+$cmbWlGroup.Location = New-Object System.Drawing.Point((S 242), (S 6))
+$cmbWlGroup.Size = New-Object System.Drawing.Size((S 118), (S 24))
+$cmbWlGroup.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbWlGroup.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$cmbWlGroup.BackColor = $script:Pal.Input
+$cmbWlGroup.ForeColor = $script:Pal.Accent
+$cmbWlGroup.Font = $fontUi
+$cmbWlGroup.DropDownWidth = S 200
+$viewWatch.Controls.Add($cmbWlGroup)
+Set-Tip $cmbWlGroup "Gruppe anzeigen: Alle oder eine eigene Gruppe. Ticker per Rechtsklick > 'Zu Gruppe' einsortieren."
+$script:WlGroupKeys = New-Object System.Collections.Generic.List[string]
+$script:WlGroupUpdating = $false
+$script:WlGroupSig = ""
+function Update-WatchGroupCombo {
+    $sig = "{0}|{1}|{2}|{3}" -f (@($script:Config.Watchlist) -join ","), [string]$script:Config.WatchGroup, (@($script:Config.WatchGroups | ForEach-Object { "{0}:{1}" -f $_.Name, (@($_.Symbols) -join " ") }) -join ";"), [string]$script:Config.Language
+    if ($sig -eq $script:WlGroupSig -and $cmbWlGroup.Items.Count -gt 0) { return }
+    $script:WlGroupSig = $sig
+    $script:WlGroupUpdating = $true
+    $cmbWlGroup.BeginUpdate()
+    $cmbWlGroup.Items.Clear(); $script:WlGroupKeys.Clear()
+    $all = @($script:Config.Watchlist).Count
+    [void]$cmbWlGroup.Items.Add(("{0} ({1})" -f (Tr "Alle"), $all)); $script:WlGroupKeys.Add("")
+    foreach ($gr in @($script:Config.WatchGroups)) {
+        if ($null -eq $gr -or -not $gr.Name) { continue }
+        $cnt = @(Get-WatchGroupSymbols -Watchlist @($script:Config.Watchlist) -Groups @($script:Config.WatchGroups) -Group ([string]$gr.Name)).Count
+        [void]$cmbWlGroup.Items.Add(("{0} ({1})" -f $gr.Name, $cnt)); $script:WlGroupKeys.Add([string]$gr.Name)
+    }
+    [void]$cmbWlGroup.Items.Add((Tr "+ Neue Gruppe ...")); $script:WlGroupKeys.Add("|new")
+    if ([string]$script:Config.WatchGroup) { [void]$cmbWlGroup.Items.Add(("{0} '{1}'" -f (Tr "Gruppe löschen:"), $script:Config.WatchGroup)); $script:WlGroupKeys.Add("|del") }
+    $ix = $script:WlGroupKeys.IndexOf([string]$script:Config.WatchGroup)
+    $cmbWlGroup.SelectedIndex = [math]::Max(0, $ix)
+    $cmbWlGroup.EndUpdate()
+    $script:WlGroupUpdating = $false
+}
+function Set-WatchGroup {
+    param([string]$Name)
+    $script:Config.WatchGroup = $Name
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-WatchGroupCombo
+    Refresh-WatchlistAndAlerts
+}
+function New-WatchGroup {
+    param([string]$Symbol = "")
+    $nm = Read-TextInput -Title "Neue Gruppe" -Prompt "Name der Gruppe (z. B. Tech, ETFs, Dividenden):"
+    if (-not $nm) { return "" }
+    $nm = $nm.Trim()
+    if (@($script:Config.WatchGroups | Where-Object { $null -ne $_ -and [string]$_.Name -eq $nm }).Count -eq 0) {
+        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true)
+    } elseif ($Symbol) {
+        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true)
+    }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    return $nm
+}
+$cmbWlGroup.Add_SelectionChangeCommitted({
+    if ($script:WlGroupUpdating) { return }
+    $k = $script:WlGroupKeys[$cmbWlGroup.SelectedIndex]
+    if ($k -eq "|new") {
+        $nm = New-WatchGroup
+        if ($nm) { Set-WatchGroup $nm } else { Update-WatchGroupCombo }
+        return
+    }
+    if ($k -eq "|del") {
+        $gn = [string]$script:Config.WatchGroup
+        if (Confirm-Action -Text ("Gruppe '{0}' löschen? (Die Ticker bleiben in der Watchlist.)" -f $gn) -Title "Gruppe") {
+            $script:Config.WatchGroups = @(@($script:Config.WatchGroups) | Where-Object { $null -ne $_ -and [string]$_.Name -ne $gn })
+            Set-WatchGroup ""
+        } else { Update-WatchGroupCombo }
+        return
+    }
+    Set-WatchGroup $k
+})
 
 $btnWlAddActive = New-Object System.Windows.Forms.Button
 $btnWlAddActive.Location = New-Object System.Drawing.Point((S 366), (S 6))
@@ -6069,6 +6154,7 @@ $pnlChartControls.Anchor = $aB -bor $aL -bor $aR
 $lblPortSummary.Anchor = $aT -bor $aL -bor $aR
 $cmbPortSort.Anchor    = $aT -bor $aR
 $cmbDepot.Anchor       = $aT -bor $aR
+$cmbWlGroup.Anchor     = $aT -bor $aL
 $btnPrivacy.Anchor     = $aT -bor $aR
 $dgvPortfolio.Anchor   = $anchorAll
 $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
@@ -6124,6 +6210,55 @@ function Set-ViewVisibility {
     if ($new -ne $old -and $script:StartupDone -and $form.Visible) { Update-VisibleTabContent }
 }
 
+# v5.0: dividers of the Terminal layout (drag = chart height / list widths)
+$script:SplitDrag = ""
+$script:SplitArea = @{ X = 0; Y = 0; W = 1; H = 1 }
+$splitChart = New-Object System.Windows.Forms.Panel
+$splitChart.Cursor = [System.Windows.Forms.Cursors]::HSplit
+$splitChart.Visible = $false
+$splitChart.Tag = "Chart"
+$splitLists = New-Object System.Windows.Forms.Panel
+$splitLists.Cursor = [System.Windows.Forms.Cursors]::VSplit
+$splitLists.Visible = $false
+$splitLists.Tag = "Lists"
+foreach ($sp in @($splitChart, $splitLists)) {
+    $sp.BackColor = $script:Pal.BodyBg
+    $form.Controls.Add($sp)
+    $sp.Add_MouseEnter({ param($sender, $e) $sender.BackColor = $script:Pal.Border })
+    $sp.Add_MouseLeave({ param($sender, $e) if (-not $script:SplitDrag) { $sender.BackColor = $script:Pal.BodyBg } })
+    $sp.Add_MouseDown({ param($sender, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $script:SplitDrag = [string]$sender.Tag; $sender.Capture = $true } })
+    $sp.Add_MouseMove({
+        param($sender, $e)
+        if (-not $script:SplitDrag) { return }
+        $pt = $form.PointToClient([System.Windows.Forms.Cursor]::Position)
+        $a = $script:SplitArea
+        if ($script:SplitDrag -eq "Chart") {
+            $pct = Get-DragPct -Pos $pt.Y -Start $a.Y -Length $a.H -Min 25 -Max 80
+            if ($pct -ne [int]$script:Config.TerminalChartPct) { $script:Config.TerminalChartPct = $pct; Update-MainLayout }
+        } else {
+            $pct = Get-DragPct -Pos $pt.X -Start $a.X -Length $a.W -Min 25 -Max 75
+            if ($pct -ne [int]$script:Config.TerminalSplitPct) { $script:Config.TerminalSplitPct = $pct; Update-MainLayout }
+        }
+    })
+    $sp.Add_MouseUp({
+        param($sender, $e)
+        if (-not $script:SplitDrag) { return }
+        $script:SplitDrag = ""
+        $sender.Capture = $false
+        $sender.BackColor = $script:Pal.BodyBg
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    })
+    $sp.Add_DoubleClick({
+        # double-click = back to the default sizes
+        param($sender, $e)
+        if ([string]$sender.Tag -eq "Chart") { $script:Config.TerminalChartPct = 55 } else { $script:Config.TerminalSplitPct = 50 }
+        Save-JsonState -Path $script:ConfigPath -Data $script:Config
+        Update-MainLayout
+    })
+}
+Set-Tip $splitChart "Ziehen = Chart-Höhe ändern, Doppelklick = Standard"
+Set-Tip $splitLists "Ziehen = Breite von Watchlist und Portfolio ändern, Doppelklick = Standard"
+
 function Update-MainLayout {
     if ([bool]$script:Config.CompactMode -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
     $W = $form.ClientSize.Width
@@ -6164,7 +6299,8 @@ function Update-MainLayout {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
             -ShowWatch ([bool]$script:Config.TerminalShowWatch) -ShowPortfolio ([bool]$script:Config.TerminalShowPortfolio) `
-            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull)
+            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull) `
+            -SplitPct ([double]$script:Config.TerminalSplitPct)
         $on = @{}
         foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio), @("News", $viewNews))) {
             $rect = $r.($pair[0])
@@ -6174,9 +6310,21 @@ function Update-MainLayout {
             }
         }
         Set-ViewVisibility $on
+        # v5.0: draggable dividers in the gaps (chart / lists, watchlist / portfolio)
+        $bottomR = @($r.Watchlist, $r.Portfolio, $r.News) | Where-Object { $null -ne $_ } | Select-Object -First 1
+        if ($null -ne $r.Chart -and $null -ne $bottomR) {
+            $splitChart.SetBounds($vx, ([int]$r.Chart[1] + [int]$r.Chart[3]), $vw, ([int]$bottomR[1] - [int]$r.Chart[1] - [int]$r.Chart[3]))
+            $splitChart.Visible = $true; $splitChart.BringToFront()
+        } else { $splitChart.Visible = $false }
+        if ([bool]$r.SideBySide) {
+            $splitLists.SetBounds(([int]$r.Watchlist[0] + [int]$r.Watchlist[2]), [int]$r.Watchlist[1], ([int]$r.Portfolio[0] - [int]$r.Watchlist[0] - [int]$r.Watchlist[2]), [int]$r.Watchlist[3])
+            $splitLists.Visible = $true; $splitLists.BringToFront()
+        } else { $splitLists.Visible = $false }
+        $script:SplitArea = @{ X = $vx; Y = $vy; W = $vw; H = $vh }
     } else {
         foreach ($v in @($viewChart, $viewPortfolio, $viewWatch, $viewNews)) { $v.SetBounds($vx, $vy, $vw, $vh) }
         Set-ViewVisibility @{ ([string]$script:Config.ActiveTab) = $true }
+        $splitChart.Visible = $false; $splitLists.Visible = $false
     }
     Update-ChartControlsLayout
     $pnlChartCanvas.Invalidate()
@@ -6239,6 +6387,8 @@ function Apply-ThemeToAllControls {
     $lstTickerDropdown.ForeColor   = $p.Text
 
     $pnlNav.BackColor = $p.BodyBg
+    $splitChart.BackColor = $p.BodyBg; $splitLists.BackColor = $p.BodyBg
+    $pnlHover.BackColor = $p.HeaderBg
     $pnlHealth.BackColor = $p.BodyBg
     $pnlHealth.Invalidate()
     Style-FlatButton -Btn $btnRefreshNow -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
@@ -6295,6 +6445,7 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnWlAddSearch -BgColor $p.Input -FgColor $colGreen -BorderColor $p.Border
     Style-FlatButton -Btn $btnWlRemove    -BgColor $p.Input -FgColor $colRed   -BorderColor $p.Border
     $lstWlSearchDropdown.BackColor = $p.HeaderBg; $lstWlSearchDropdown.ForeColor = $p.Text
+    $cmbWlGroup.BackColor = $p.Input; $cmbWlGroup.ForeColor = $p.Accent
     Style-DataGrid -Grid $dgvWatchlist
 
     $txtAlertTicker.BackColor = $p.Input; $txtAlertTicker.ForeColor = $p.Text
@@ -6415,6 +6566,7 @@ function Set-ActiveTab {
     # v4.9.5: another tab while a list is shown as a full page: that one full page, Chart = split view
     if ($script:TerminalFull -and $TabName -ne $script:TerminalFull) { $script:TerminalFull = if ($TabName -eq "Chart") { "" } else { $TabName } }
     $script:Config.ActiveTab = $TabName
+    if ($script:HoverReady) { Hide-HoverCard }
     # Terminal: the Portfolio / Watch / News tabs pick the lower panel
     if ($TabName -in @("Portfolio", "Watchlist", "News")) { $script:Config.TerminalBottom = $TabName }
     $lstTickerDropdown.Visible   = $false
@@ -6445,6 +6597,7 @@ function Set-TerminalFull {
         return
     }
     $script:TerminalFull = $Panel
+    $script:Config.TerminalFull = $Panel
     if ($Panel) {
         $script:Config.TerminalBottom = $Panel
         $script:Config.ActiveTab = $Panel
@@ -6890,7 +7043,8 @@ function Get-WatchlistSortValue {
 }
 
 function Get-WatchlistOrder {
-    $syms = @($script:Config.Watchlist | ForEach-Object { ([string]$_).ToUpper() })
+    # v5.0: only the chosen group ("" = all)
+    $syms = @(Get-WatchGroupSymbols -Watchlist @($script:Config.Watchlist) -Groups @($script:Config.WatchGroups) -Group ([string]$script:Config.WatchGroup))
     $col = [string]$script:WlSort.Col
     if (-not $col) { return $syms }
     if ($col -eq "Sym") {
@@ -6940,6 +7094,12 @@ function Move-WatchlistSymbol {
     foreach ($w in $script:Config.Watchlist) { $list.Add(([string]$w).ToUpper()) }
     $old = $list.IndexOf($Symbol.ToUpper())
     if ($old -lt 0) { return }
+    # v5.0: inside a group the row number is a position in the group - use the
+    # position of the ticker shown there in the full watchlist
+    if ([string]$script:Config.WatchGroup) {
+        $vis = @(Get-WatchlistOrder)
+        if ($vis.Count -gt 0) { $NewIndex = $list.IndexOf([string]$vis[[math]::Max(0, [math]::Min($vis.Count - 1, $NewIndex))]) }
+    }
     $NewIndex = [math]::Max(0, [math]::Min($list.Count - 1, $NewIndex))
     if ($NewIndex -eq $old) { return }
     $list.RemoveAt($old)
@@ -6953,6 +7113,7 @@ function Move-WatchlistSymbol {
 }
 
 function Refresh-WatchlistAndAlerts {
+    Update-WatchGroupCombo
     $curr = $script:Config.Currency
     $obVal = [double]$script:Config.RsiOverbought
     $osVal = [double]$script:Config.RsiOversold
@@ -9649,6 +9810,7 @@ function Show-AnalysisPage {
     $ac = $script:AnaCtl
     if ($null -eq $ac) { return }
     $ac.Page = $Page
+    $script:Config.AnalysisLastPage = $Page
     foreach ($k in $ac.Pages.Keys) { $ac.Pages[$k].Visible = ($k -eq $Page) }
     if ($Page -eq "Heat") { Update-AnalysisHeat }
     foreach ($k in $ac.PageButtons.Keys) {
@@ -9659,8 +9821,10 @@ function Show-AnalysisPage {
 }
 
 function Show-AnalysisDialog {
-    param([string]$Page = "Perf")
+    param([string]$Page = "")
     if ($null -ne $script:AnaCtl) { return }
+    # v5.0: P opens the page used last time
+    if (-not $Page) { $Page = if ([string]$script:Config.AnalysisLastPage) { [string]$script:Config.AnalysisLastPage } else { "Perf" } }
     $p = $script:Pal
     $aT = [System.Windows.Forms.AnchorStyles]::Top; $aB = [System.Windows.Forms.AnchorStyles]::Bottom
     $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
@@ -12670,6 +12834,7 @@ function Show-SettingsDialog {
     $modes = Get-TooltipModes
     $cbTip = & $addCombo "Ausführlichkeit" @($modes.Values) ([string]$modes[[string]$cfg.TooltipMode]) "" "TOOLTIPS"
     $nTipDelay = & $addNum "Verzögerung (Millisekunden)" 0 3000 ([int]$cfg.TooltipDelayMs) "Wie lange die Maus stillstehen muss, bis der Hinweis erscheint" "TOOLTIPS" 100
+    $chkHover  = & $addCheck "Infokarte, wenn die Maus auf einem Ticker ruht" ([bool]$cfg.HoverCards) "Watchlist und Portfolio: Kurs, Tagesspanne, 52-Wochen-Balken, 5-Tage-Verlauf, Position, nächste Termine"
     $btnGloss = New-Object System.Windows.Forms.Button
     $btnGloss.SetBounds(($lay.X + (S 26)), $lay.Y, (S 150), (S 26))
     Style-FlatButton -Btn $btnGloss -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
@@ -12704,6 +12869,33 @@ function Show-SettingsDialog {
 
     $btnLog = New-Object System.Windows.Forms.Button
     $btnLog.SetBounds((S 266), $by, (S 100), (S 28))
+    # v5.0: search - matching settings light up, the rest fades
+    $lSearch = New-Object System.Windows.Forms.Label
+    $lSearch.SetBounds((S 384), ($by + (S 6)), (S 52), (S 18)); $lSearch.Text = "Suchen:"
+    $dlg.Controls.Add($lSearch)
+    $tSearch = New-Object System.Windows.Forms.TextBox
+    $tSearch.SetBounds((S 438), ($by + (S 2)), (S 200), (S 24))
+    $tSearch.BackColor = $p.Input; $tSearch.ForeColor = $p.Text; $tSearch.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $dlg.Controls.Add($tSearch)
+    Set-DynTip $tSearch "Einstellung suchen, z. B. 'schrift', 'push', 'news' - Treffer werden hervorgehoben"
+    $script:SetSearchColors = @{}
+    foreach ($sc0 in $dlg.Controls) {
+        if (($sc0 -is [System.Windows.Forms.Label] -or $sc0 -is [System.Windows.Forms.CheckBox] -or $sc0 -is [System.Windows.Forms.Button]) -and $sc0.Text) { $script:SetSearchColors[$sc0] = $sc0.ForeColor }
+    }
+    $script:SetSearchColors.Remove($lSearch)
+    $tSearch.Add_TextChanged({
+        param($sender, $e)
+        $qq = $sender.Text
+        $hits = 0
+        foreach ($c0 in @($script:SetSearchColors.Keys)) {
+            if ($c0.IsDisposed) { continue }
+            if (-not $qq.Trim()) { $c0.ForeColor = $script:SetSearchColors[$c0]; continue }
+            $tipT = ""
+            try { $tipT = [string]$toolTip.GetToolTip($c0) } catch { }
+            if (Test-SettingMatch -Text ($c0.Text + " " + $tipT) -Query $qq) { $c0.ForeColor = $script:Pal.Accent; $hits++ } else { $c0.ForeColor = $script:Pal.Border }
+        }
+        $script:SettingsSearchHits = $hits
+    })
     # v4.5: restore / export / import / portable
     $mkDataBtn = {
         param([string]$T, [int]$X, [string]$Tip, [scriptblock]$Act)
@@ -12803,6 +12995,7 @@ function Show-SettingsDialog {
     $cfg.TerminalChartPct      = [int]$nTChart.Value
     foreach ($mk in $modes.Keys) { if ($modes[$mk] -eq [string]$cbTip.SelectedItem) { $cfg.TooltipMode = $mk } }
     $cfg.TooltipDelayMs        = [int]$nTipDelay.Value
+    $cfg.HoverCards            = [bool]$chkHover.Checked
     $newLang = if ([string]$cbLang.SelectedItem -eq "English") { "EN" } else { "DE" }
     $langChanged = ($newLang -ne [string]$cfg.Language)
     $cfg.Language              = $newLang
@@ -13867,6 +14060,123 @@ $btnWlAddSearch.Add_Click({
     }
 })
 
+# ---- v5.0: hover card (mouse rests on a ticker in the watchlist / portfolio) ----
+$script:HoverSym = ""
+$script:HoverPending = $null
+$pnlHover = New-Object System.Windows.Forms.Panel
+$pnlHover.Size = New-Object System.Drawing.Size((S 300), (S 172))
+$pnlHover.Visible = $false
+$pnlHover.BackColor = $script:Pal.HeaderBg
+Enable-DoubleBuffering -Control $pnlHover
+$form.Controls.Add($pnlHover)
+$script:HoverTimer = New-Object System.Windows.Forms.Timer
+$script:HoverTimer.Interval = 650
+$script:HoverTimer.Add_Tick({
+    $script:HoverTimer.Stop()
+    $hp = $script:HoverPending
+    if ($null -eq $hp -or -not [bool]$script:Config.HoverCards) { return }
+    $script:HoverSym = [string]$hp.Sym
+    $pt = $form.PointToClient([System.Windows.Forms.Cursor]::Position)
+    $x = $pt.X + (S 18); $y = $pt.Y + (S 14)
+    if ($x + $pnlHover.Width -gt $form.ClientSize.Width - (S 4)) { $x = $pt.X - $pnlHover.Width - (S 12) }
+    if ($y + $pnlHover.Height -gt $form.ClientSize.Height - (S 4)) { $y = $pt.Y - $pnlHover.Height - (S 8) }
+    $pnlHover.Location = New-Object System.Drawing.Point([math]::Max(0, $x), [math]::Max(0, $y))
+    $pnlHover.Visible = $true
+    $pnlHover.BringToFront()
+    $pnlHover.Invalidate()
+})
+function Hide-HoverCard {
+    $script:HoverTimer.Stop()
+    $script:HoverPending = $null
+    if ($pnlHover.Visible) { $pnlHover.Visible = $false }
+}
+$script:HoverEnter = {
+    param($sender, $e)
+    if ($e.RowIndex -lt 0 -or -not [bool]$script:Config.HoverCards) { return }
+    $sym = ([string]$sender.Rows[$e.RowIndex].Cells[0].Value).Trim().ToUpper()
+    if (-not $sym -or -not $script:QuoteStore.ContainsKey($sym)) { Hide-HoverCard; return }
+    if ($pnlHover.Visible -and $script:HoverSym -eq $sym) { return }
+    if ($pnlHover.Visible) { $pnlHover.Visible = $false }
+    $script:HoverPending = @{ Sym = $sym }
+    $script:HoverTimer.Stop(); $script:HoverTimer.Start()
+}
+foreach ($hg in @($dgvWatchlist, $dgvPortfolio)) {
+    $hg.Add_CellMouseEnter($script:HoverEnter)
+    $hg.Add_MouseLeave({ Hide-HoverCard })
+    $hg.Add_Scroll({ Hide-HoverCard })
+    $hg.Add_MouseDown({ Hide-HoverCard })
+}
+$pnlHover.Add_MouseEnter({ Hide-HoverCard })
+$script:HoverReady = $true
+$pnlHover.Add_Paint({
+    param($sender, $e)
+    $g = $e.Graphics
+    $p = $script:Pal
+    $sym = $script:HoverSym
+    $q = $script:QuoteStore[$sym]
+    $w = $sender.Width; $h = $sender.Height
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    $g.Clear($p.HeaderBg)
+    $bp = New-Object System.Drawing.Pen($p.Accent, [float]1)
+    $g.DrawRectangle($bp, 0, 0, $w - 1, $h - 1); $bp.Dispose()
+    if ($null -eq $q) { return }
+    $txt = New-Object System.Drawing.SolidBrush($p.Text)
+    $mut = New-Object System.Drawing.SolidBrush($p.Muted)
+    $acc = New-Object System.Drawing.SolidBrush($p.Accent)
+    $upB = New-Object System.Drawing.SolidBrush($(if ([double]$q.ChangePct -ge 0) { $colGreen } else { $colRed }))
+    try {
+        $x0 = S 10; $y = S 8
+        $g.DrawString($sym, $fontTicker, $acc, $x0, $y)
+        $nm = if ($q.LongName) { [string]$q.LongName } else { "" }
+        $g.DrawString($nm, $fontUi, $mut, (New-Object System.Drawing.RectangleF([float]($x0 + (S 90)), [float]($y + 2), [float]($w - (S 104)), [float](S 18))))
+        $y += S 22
+        $curr = [string]$script:Config.Currency
+        $pc = Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency $curr
+        $g.DrawString(("{0:N2} {1}" -f $pc, $curr), $fontPrice, $txt, $x0, $y)
+        $g.DrawString(("{0:+0.00;-0.00}%" -f [double]$q.ChangePct), $fontTicker, $upB, ($x0 + (S 150)), ($y + (S 3)))
+        $y += S 26
+        # day range (from the quote meta) and 52-week bar
+        $dLo = [double]::NaN; $dHi = [double]::NaN
+        if ($null -ne $q.Meta) { try { $dLo = [double]$q.Meta.regularMarketDayLow; $dHi = [double]$q.Meta.regularMarketDayHigh } catch { } }
+        if ($dLo -gt 0 -and $dHi -gt 0) { $g.DrawString(("{0} {1:N2} - {2:N2} {3}" -f (Tr "Tag:"), $dLo, $dHi, $q.Currency), $fontUi, $mut, $x0, $y); $y += S 17 }
+        $f52 = Get-RangePosition -Price ([double]$q.Price) -Low ([double]$q.Low52) -High ([double]$q.High52)
+        if (-not [double]::IsNaN($f52)) {
+            $g.DrawString(("52W {0:N2}" -f [double]$q.Low52), $fontAxis, $mut, $x0, $y)
+            $hiTxt = "{0:N2}" -f [double]$q.High52
+            $hiW = $g.MeasureString($hiTxt, $fontAxis).Width
+            $g.DrawString($hiTxt, $fontAxis, $mut, [float]($w - (S 10) - $hiW), $y)
+            $bx0 = $x0 + (S 78); $bx1 = $w - (S 18) - $hiW; $by = $y + (S 7)
+            $tp = New-Object System.Drawing.Pen($p.Border, [float](S 3)); $g.DrawLine($tp, [float]$bx0, [float]$by, [float]$bx1, [float]$by); $tp.Dispose()
+            $mx = $bx0 + ($bx1 - $bx0) * $f52
+            $g.FillEllipse($acc, [float]($mx - (S 4)), [float]($by - (S 4)), [float](S 8), [float](S 8))
+            $y += S 18
+        }
+        # 5-day sparkline
+        if ($script:SparklineStore.ContainsKey($sym)) {
+            Draw-MiniSparkline -g $g -Rect (New-Object System.Drawing.Rectangle($x0, $y, ($w - 2 * $x0), (S 26))) -Values $script:SparklineStore[$sym]
+            $y += S 30
+        }
+        # position, next event, analysts
+        $lines = @()
+        if ($script:Portfolio.ContainsKey($sym)) {
+            $pf = $script:Portfolio[$sym]
+            $val = [double]$pf.Shares * $pc
+            $cost = [double]$pf.Shares * (Convert-CurrencyValue -Amount ([double]$pf.AvgPrice) -FromCurrency ([string]$pf.Currency) -ToCurrency $curr)
+            $pl = if ($cost -gt 0) { ($val / $cost - 1) * 100 } else { [double]::NaN }
+            $lines += $(if ([bool]$script:Config.PrivacyMode) { "{0}: {1:+0.0;-0.0}%" -f (Tr "Im Depot"), $pl } else { "{0}: {1:N2} Stk, {2:N2} {3} ({4:+0.0;-0.0}%)" -f (Tr "Im Depot"), [double]$pf.Shares, $val, $curr, $pl })
+        }
+        $ev = $script:Events[$sym]
+        if ($null -ne $ev) {
+            if ($ev.EarningsDate) { $lines += ("{0} {1}" -f (Tr "Zahlen:"), (Format-IsoDateDe ([string]$ev.EarningsDate))) }
+            $lab = Get-ConsensusLabel ([string]$ev.RecKey) -Long
+            $up = Get-TargetUpside -Target ([double]$ev.TargetMean) -Price ([double]$q.Price)
+            if ($lab -or -not [double]::IsNaN($up)) { $lines += ("{0} {1}{2}" -f (Tr "Analysten:"), $lab, $(if (-not [double]::IsNaN($up)) { " (Ziel {0:+0;-0}%)" -f $up } else { "" })) }
+        }
+        foreach ($ln in $lines) { if ($y -lt $h - (S 16)) { $g.DrawString($ln, $fontUi, $txt, $x0, $y); $y += S 17 } }
+    } finally { $txt.Dispose(); $mut.Dispose(); $acc.Dispose(); $upB.Dispose() }
+})
+
 # v4.9.5: right-click actions on a ticker (watchlist and portfolio)
 $script:RowMenuSym = ""
 $rowMenu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -13879,6 +14189,9 @@ $miRowDes   = $rowMenu.Items.Add("Beschreibung (DES)")
 $miRowSep   = New-Object System.Windows.Forms.ToolStripSeparator
 [void]$rowMenu.Items.Add($miRowSep)
 $miRowRemove = $rowMenu.Items.Add("Aus der Watchlist entfernen")
+# v5.0: groups
+$miRowGroup = New-Object System.Windows.Forms.ToolStripMenuItem("Zu Gruppe")
+$rowMenu.Items.Insert($rowMenu.Items.IndexOf($miRowSep), $miRowGroup)
 $miRowChart.Add_Click({ $s0 = $script:RowMenuSym; if ([string]$script:Config.Layout -ne "Terminal") { Set-ActiveTab -TabName "Chart" }; Switch-ActiveTicker -NewTicker $s0 -SkipResolve $true })
 $miRowAlert.Add_Click({
     $s0 = $script:RowMenuSym
@@ -13909,6 +14222,26 @@ $script:RowMenuHandler = {
     $miRowRemove.Visible = $inWl -and ($sender -eq $dgvWatchlist)
     $miRowSep.Visible = $miRowRemove.Visible
     $miRowChart.Text = "{0}: {1}" -f (Tr "Chart öffnen"), $sym
+    # groups: tick = member; click toggles; last entry creates a new group
+    $miRowGroup.DropDownItems.Clear()
+    $miRowGroup.Visible = $inWl
+    foreach ($gr in @($script:Config.WatchGroups)) {
+        if ($null -eq $gr -or -not $gr.Name) { continue }
+        $gi = New-Object System.Windows.Forms.ToolStripMenuItem([string]$gr.Name)
+        $gi.Checked = (@($gr.Symbols | ForEach-Object { ([string]$_).ToUpper() }) -contains $sym)
+        $gi.Tag = [string]$gr.Name
+        $gi.Add_Click({
+            param($s2, $e2)
+            $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$s2.Tag) -Symbol $script:RowMenuSym -In (-not $s2.Checked))
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+            Update-WatchGroupCombo
+            Refresh-WatchlistAndAlerts
+        })
+        [void]$miRowGroup.DropDownItems.Add($gi)
+    }
+    $gn = New-Object System.Windows.Forms.ToolStripMenuItem((Tr "Neue Gruppe ..."))
+    $gn.Add_Click({ $nm = New-WatchGroup -Symbol $script:RowMenuSym; if ($nm) { Update-WatchGroupCombo; Refresh-WatchlistAndAlerts } })
+    [void]$miRowGroup.DropDownItems.Add($gn)
     $rowMenu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
 }
 $dgvWatchlist.Add_CellMouseDown($script:RowMenuHandler)
@@ -14578,6 +14911,14 @@ $form.Add_Shown({
     }
     $script:StartupDone = $true
     Update-PrivacyIndicator
+    # v5.0: back to where you were: full-page list, open Analyse window
+    if ([string]$script:Config.Layout -eq "Terminal" -and [string]$script:Config.TerminalFull -in @("Portfolio", "Watchlist", "News")) { Set-TerminalFull ([string]$script:Config.TerminalFull) }
+    if ([string]$script:Config.ReopenAnalysis -and -not $script:SmokeMode) {
+        $script:ReopenTimer = New-Object System.Windows.Forms.Timer
+        $script:ReopenTimer.Interval = 1500
+        $script:ReopenTimer.Add_Tick({ $script:ReopenTimer.Stop(); $pg0 = [string]$script:Config.ReopenAnalysis; $script:Config.ReopenAnalysis = ""; Show-AnalysisDialog -Page $pg0 })
+        $script:ReopenTimer.Start()
+    }
     # Start with focus on a button, not the search box (which used to pop the dropdown open)
     if (-not $script:Config.CompactMode) { $tabButtons[$script:Config.ActiveTab].Select() } else { $btnCompact.Select() }
     Refresh-AllMarketData -Force
@@ -14594,6 +14935,8 @@ $form.Add_Shown({
 
 $form.Add_FormClosing({
     $script:IsClosing = $true
+    # v5.0: an open Analyse window opens again at the next start
+    $script:Config.ReopenAnalysis = if ($null -ne $script:AnaCtl -and -not $script:SmokeMode) { [string]$script:AnaCtl.Page } else { "" }
     if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { try { $script:FsForm.Close() } catch { } }
     $pollTimer.Stop()
     $uiTimer.Stop()
@@ -14880,6 +15223,45 @@ function Invoke-SmokeTest {
         if ($script:Drawings[$u].Count -ne ($n0 + 3)) { throw "drawings were not saved" }
         Remove-Drawing -All
         Set-DrawMode ""
+    }
+    # v5.0 Stage C
+    Invoke-SmokeStep "Terminal dividers" {
+        Apply-Layout "Terminal"; Set-ActiveTab -TabName "Watchlist"; & $pump
+        if (-not $splitChart.Visible) { throw "no divider between chart and lists" }
+        $h0 = $viewChart.Height
+        $script:Config.TerminalChartPct = 35; Update-MainLayout; & $pump
+        if ($viewChart.Height -ge $h0) { throw "chart did not get smaller ($h0 -> $($viewChart.Height))" }
+        $script:Config.TerminalChartPct = 55; Update-MainLayout
+        Set-TerminalFull "Portfolio"
+        if ([string]$script:Config.TerminalFull -ne "Portfolio" -or $splitChart.Visible) { throw "full page not remembered or divider still shown" }
+        Set-TerminalFull ""
+        Apply-Layout "Standard"; & $pump
+        if ($splitChart.Visible) { throw "divider visible in Standard" }
+    }
+    Invoke-SmokeStep "Watchlist groups" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @() -Group "Tech" -Symbol "NVDA")
+        Set-WatchGroup "Tech"; & $pump
+        if ($dgvWatchlist.Rows.Count -ne 1) { throw "group view shows $($dgvWatchlist.Rows.Count) rows" }
+        $me = New-Object System.Windows.Forms.MouseEventArgs([System.Windows.Forms.MouseButtons]::Right, 1, 10, 10, 0)
+        & $script:RowMenuHandler $dgvWatchlist (New-Object System.Windows.Forms.DataGridViewCellMouseEventArgs(0, 0, 10, 10, $me)); & $pump
+        $tg = @($miRowGroup.DropDownItems | Where-Object { [string]$_.Tag -eq "Tech" })[0]
+        if ($null -eq $tg -or -not $tg.Checked) { throw "group menu does not tick the member" }
+        $rowMenu.Close()
+        Set-WatchGroup ""; & $pump
+        if ($dgvWatchlist.Rows.Count -lt 3) { throw "'Alle' does not show the whole watchlist" }
+        $script:Config.WatchGroups = @(); Update-WatchGroupCombo
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Hover card" {
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        & $script:HoverEnter $dgvWatchlist (New-Object System.Windows.Forms.DataGridViewCellEventArgs(0, 0))
+        for ($i = 0; $i -lt 20 -and -not $pnlHover.Visible; $i++) { Start-Sleep -Milliseconds 100; & $pump }
+        if (-not $pnlHover.Visible -and $script:QuoteStore.ContainsKey(([string]$dgvWatchlist.Rows[0].Cells[0].Value).ToUpper())) { throw "hover card did not appear" }
+        $pnlHover.Refresh(); & $pump
+        Hide-HoverCard
+        if ($pnlHover.Visible) { throw "hover card did not hide" }
+        Set-ActiveTab -TabName "Chart"
     }
     Invoke-SmokeStep "Prev close + health" {
         Set-Timeframe -Tf "1d"; & $pump
