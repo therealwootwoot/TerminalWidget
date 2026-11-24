@@ -1665,6 +1665,121 @@ Describe "Look and feel (v4.9)" {
     }
 }
 
+Describe "Polish (v4.9.5)" {
+    BeforeAll {
+        $now = Get-Date -Year 2026 -Month 11 -Day 24 -Hour 12 -Minute 0 -Second 0
+    }
+    It "marks the day move only on the newest item of each ticker" {
+        $items = @(
+            [PSCustomObject]@{ Key = "a"; Syms = @("NVDA") },
+            [PSCustomObject]@{ Key = "b"; Syms = @("NVDA") },
+            [PSCustomObject]@{ Key = "c"; Syms = @("AMD", "NVDA") },
+            [PSCustomObject]@{ Key = "d"; Syms = @("MSFT") }
+        )
+        $m = Get-NewsMoverRows -Items $items -DayPct @{ "NVDA" = 31.2; "AMD" = -5; "MSFT" = 0.2 } -Threshold 3
+        @($m.Keys | Sort-Object) -join "," | Should -Be "a,c"
+        $m["a"].Sym | Should -Be "NVDA"
+        $m["c"].Sym | Should -Be "AMD"
+        (Get-NewsMoverRows -Items $items -DayPct @{} -Threshold 3).Count | Should -Be 0
+    }
+    It "drops muted sources" {
+        $items = @([PSCustomObject]@{ Publisher = "Motley Fool" }, [PSCustomObject]@{ Publisher = "Reuters" }, [PSCustomObject]@{ Publisher = "" })
+        @(Remove-MutedNews -Items $items -Muted @(" motley fool ")).Count | Should -Be 2
+        @(Remove-MutedNews -Items $items -Muted @()).Count | Should -Be 3
+        @(Remove-MutedNews -Items $items -Muted $null).Count | Should -Be 3
+        # an empty feed must not turn into one $null item (broke the News tab on 5.1)
+        @(Select-NewsItems -Items (Remove-MutedNews -Items @() -Muted @()) -Filter "All").Count | Should -Be 0
+        @(Select-NewsItems -Items $null -Filter "All").Count | Should -Be 0
+    }
+    It "reads keyword lists" {
+        (ConvertTo-KeywordList "Downgrade, Übernahme;gewinnwarnung`n downgrade ,,") -join "|" | Should -Be "downgrade|übernahme|gewinnwarnung"
+        @(ConvertTo-KeywordList "").Count | Should -Be 0
+    }
+    It "finds keyword headlines of the chosen tickers, newer than the last check" {
+        $items = @(
+            [PSCustomObject]@{ Title = "Analyst issues DOWNGRADE on Nvidia"; Syms = @("NVDA"); Time = $now.AddMinutes(-5) },
+            [PSCustomObject]@{ Title = "Downgrade for Microsoft"; Syms = @("MSFT"); Time = $now.AddMinutes(-4) },
+            [PSCustomObject]@{ Title = "Old downgrade"; Syms = @("NVDA"); Time = $now.AddDays(-2) },
+            [PSCustomObject]@{ Title = "ABB: Übernahme geplant"; Syms = @("ABBN.SW"); Time = $now.AddMinutes(-30) }
+        )
+        $h = @(Find-NewsKeywordHits -Items $items -Keywords @("downgrade", "übernahme") -Symbols @("nvda", "ABBN.SW") -Since $now.AddDays(-1))
+        $h.Count | Should -Be 2
+        $h[0].Sym | Should -Be "ABBN.SW"
+        $h[0].Keyword | Should -Be "übernahme"
+        $h[1].Sym | Should -Be "NVDA"
+        @(Find-NewsKeywordHits -Items $items -Keywords @() -Symbols @("NVDA")).Count | Should -Be 0
+    }
+    It "rates the data health" {
+        Get-DataHealth -AgeSec 10 -RefreshSec 15 | Should -Be "OK"
+        Get-DataHealth -AgeSec 100 -RefreshSec 15 | Should -Be "WARN"
+        Get-DataHealth -AgeSec 1000 -RefreshSec 15 | Should -Be "ERR"
+        Get-DataHealth -AgeSec 1000 -RefreshSec 15 -AllClosed $true -ClosedMinutes 10 | Should -Be "OK"
+        Get-DataHealth -AgeSec 1500 -RefreshSec 15 -AllClosed $true -ClosedMinutes 10 | Should -Be "WARN"
+        Get-DataHealth -AgeSec 300 -RefreshSec 15 -AllClosed $true -ClosedMinutes 10 | Should -Be "OK"
+        Get-DataHealth -AgeSec 10 -RefreshSec 15 -RateLimited $true | Should -Be "WARN"
+        Get-DataHealth -AgeSec 10 -RefreshSec 15 -Offline $true | Should -Be "ERR"
+        Get-DataHealth -AgeSec ([double]::NaN) -RefreshSec 15 | Should -Be ""
+    }
+    It "fades the price flash" {
+        Get-FlashAlpha -ElapsedMs 100 | Should -Be 0.35
+        Get-FlashAlpha -ElapsedMs 600 | Should -Be 0.175
+        Get-FlashAlpha -ElapsedMs 950 | Should -Be 0
+        Get-FlashAlpha -ElapsedMs 400 -HoldMs 300 -FadeMs 0 | Should -Be 0
+    }
+    It "gives a direction for the tray icon" {
+        Get-DirectionKey 1.2 | Should -Be "up"
+        Get-DirectionKey -0.4 | Should -Be "down"
+        Get-DirectionKey 0.001 | Should -Be "none"
+        Get-DirectionKey ([double]::NaN) | Should -Be "none"
+    }
+    It "hides amounts in privacy mode" {
+        Protect-Amount "1.234,00 CHF" $false | Should -Be "1.234,00 CHF"
+        Protect-Amount "1.234,00 CHF" $true | Should -Be ([string]([char]0x2022) * 4)
+    }
+    It "reads analyst targets and consensus" {
+        $j = '{"quoteSummary":{"result":[{"financialData":{"targetMeanPrice":{"raw":200.5},"targetHighPrice":{"raw":250},"targetLowPrice":{"raw":140},"recommendationMean":{"raw":1.8},"recommendationKey":"buy","numberOfAnalystOpinions":{"raw":42}}}]}}' | ConvertFrom-Json
+        $c = ConvertFrom-YahooCalendar -Summary $j
+        $c.TargetMean | Should -Be 200.5
+        $c.TargetLow | Should -Be 140
+        $c.RecKey | Should -Be "buy"
+        $c.Analysts | Should -Be 42
+        $n = ConvertFrom-YahooCalendar -Summary ('{"quoteSummary":{"result":[{"financialData":{"recommendationKey":"none"}}]}}' | ConvertFrom-Json)
+        $n.RecKey | Should -Be ""
+        [double]::IsNaN($n.TargetMean) | Should -BeTrue
+        Get-ConsensusLabel "buy" | Should -Be "Kauf"
+        Get-ConsensusLabel "STRONG_BUY" -Long | Should -Be "Starker Kauf"
+        Get-ConsensusLabel "x" | Should -Be ""
+        [math]::Round((Get-TargetUpside -Target 110 -Price 100), 6) | Should -Be 10
+        [double]::IsNaN((Get-TargetUpside -Target ([double]::NaN) -Price 100)) | Should -BeTrue
+    }
+    It "places the price in the 52-week range" {
+        Get-RangePosition -Price 75 -Low 50 -High 100 | Should -Be 0.5
+        Get-RangePosition -Price 120 -Low 50 -High 100 | Should -Be 1
+        Get-RangePosition -Price 10 -Low 50 -High 100 | Should -Be 0
+        [double]::IsNaN((Get-RangePosition -Price 75 -Low 100 -High 50)) | Should -BeTrue
+    }
+    It "snoozes alerts" {
+        (Get-SnoozeUntil -Kind "1h" -Now $now) | Should -Be $now.AddHours(1)
+        (Get-SnoozeUntil -Kind "Tomorrow" -Now $now) | Should -Be $now.Date.AddDays(1).AddHours(8)
+        (Get-SnoozeUntil -Kind "" -Now $now) | Should -Be ([DateTime]::MinValue)
+        $a = [PSCustomObject]@{ Ticker = "X"; SnoozeUntil = $now.AddHours(1).ToString("o") }
+        Test-AlertSnoozed -Alert $a -Now $now | Should -BeTrue
+        Test-AlertSnoozed -Alert $a -Now $now.AddHours(2) | Should -BeFalse
+        Test-AlertSnoozed -Alert ([PSCustomObject]@{ Ticker = "X" }) -Now $now | Should -BeFalse
+        Test-AlertSnoozed -Alert ([PSCustomObject]@{ Ticker = "X"; SnoozeUntil = "" }) -Now $now | Should -BeFalse
+    }
+    It "builds a tab-separated table" {
+        $t = ConvertTo-TsvTable -Headers @("Ticker", "Kurs") -Rows @(, @("NVDA", "138,87 CHF"))
+        $t | Should -Be ("Ticker`tKurs`r`nNVDA`t138,87 CHF")
+        $t2 = ConvertTo-TsvTable -Headers @("A", "B") -Rows @(@("x`ty", "1"), @("z", "2`r`n3"))
+        ($t2 -split "`r`n")[1] | Should -Be "x y`t1"
+        ($t2 -split "`r`n")[2] | Should -Be "z`t2 3"
+    }
+    It "knows the privacy command" {
+        (ConvertFrom-TerminalCommand "PRIV").Kind | Should -Be "Global"
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"
