@@ -13249,8 +13249,8 @@ function Save-Drawings {
     Update-DrawingsSig
 }
 function Update-DrawingsSig {
-    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
-    $script:DrawingsSig = if ($null -eq $l) { "0" } else { "{0}|{1}" -f $l.Count, (@($l | ForEach-Object { $_.Id }) -join ",") }
+    $dl = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    $script:DrawingsSig = if ($null -eq $dl) { "0" } else { "{0}|{1}" -f $dl.Count, (@($dl | ForEach-Object { $_.Id }) -join ",") }
 }
 
 function Set-DrawMode {
@@ -13294,11 +13294,11 @@ function Get-DrawingPixels {
 
 function Find-DrawingAt {
     param($L, [int]$X, [int]$Y, [int]$Tol = 6)
-    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
-    if ($null -eq $l -or $L.N -lt 2) { return $null }
+    $dl = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    if ($null -eq $dl -or $L.N -lt 2) { return $null }
     $my = $Y - [int]$L.OffsetY
     $best = $null; $bd = [double](S $Tol)
-    foreach ($d in $l) {
+    foreach ($d in $dl) {
         $px = Get-DrawingPixels -L $L -D $d
         $dist = switch ($d.Kind) {
             "H" { [math]::Abs($my - $px.Y1) }
@@ -13349,8 +13349,8 @@ function Remove-Drawing {
 function Draw-ChartDrawings {
     # Static layer: all drawings of the active ticker
     param([System.Drawing.Graphics]$g, $L)
-    $l = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
-    if ($null -eq $l -or $l.Count -eq 0 -or $L.N -lt 2) { return }
+    $dl = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
+    if ($null -eq $dl -or $dl.Count -eq 0 -or $L.N -lt 2) { return }
     $pr = $L.PriceRect
     $col = [System.Drawing.Color]::FromArgb(250, 204, 21)
     $pen = New-Object System.Drawing.Pen($col, [float]1.5)
@@ -13360,7 +13360,7 @@ function Draw-ChartDrawings {
     $oldClip = $g.Clip
     $g.SetClip($pr)
     try {
-        foreach ($d in $l) {
+        foreach ($d in $dl) {
             $px = Get-DrawingPixels -L $L -D $d
             switch ($d.Kind) {
                 "H" {
