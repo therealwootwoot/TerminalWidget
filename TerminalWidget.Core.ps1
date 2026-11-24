@@ -1207,7 +1207,9 @@ function Get-DataMigrationAction {
 }
 
 function Get-DataFileNames {
-    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json")
+    # v5.5: cash, savings plans, drawings and notes travel with export / import too
+    return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json",
+        "cash.json", "savingsplans.json", "drawings.json", "notes.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -2816,6 +2818,7 @@ function Get-TerminalFunctions {
         "EE"     = @{ Scope = "GT"; Desc = "Termine: Quartalszahlen, Ex-Tag, Zahltag" }
         "ALRT"   = @{ Scope = "GT"; Desc = "Alarm anlegen: NVDA ALRT >= 150 / TRAIL 8 / 52H / VOL 2 (ohne Ticker: Alarmliste)" }
         "WL"     = @{ Scope = "T";  Desc = "Zur Watchlist hinzufügen" }
+        "NOTE"   = @{ Scope = "T";  Desc = "Notiz zum Ticker (Kaufgrund, These)" }
         "CMP"    = @{ Scope = "GT"; Desc = "Vergleich im Chart (CMP ohne Ticker = aus)" }
         "TX"     = @{ Scope = "GT"; Desc = "Transaktion erfassen / Historie" }
         "PORT"   = @{ Scope = "G";  Desc = "Portfolio" }
@@ -2831,6 +2834,9 @@ function Get-TerminalFunctions {
         "STYLE"  = @{ Scope = "G";  Desc = "Design umschalten: STYLE / STYLE FRESH / STYLE REFINED" }
         "SET"    = @{ Scope = "G";  Desc = "Einstellungen (SET <Suchwort> springt zur Einstellung)" }
         "MENU"   = @{ Scope = "G";  Desc = "Menüeintrag ausführen (MENU <Name>)" }
+        "HEALTH" = @{ Scope = "G";  Desc = "Zustand prüfen: Datendateien, Backups, Datenquelle, Schriften" }
+        "IMG"    = @{ Scope = "G";  Desc = "Bild: IMG = Chart in die Zwischenablage, IMG SAVE, IMG WIN (ganzes Fenster)" }
+        "DIAG"   = @{ Scope = "G";  Desc = "Diagnose als ZIP exportieren (Log, Einstellungen ohne Zugangsdaten, Zustand)" }
         "PUSH"   = @{ Scope = "G";  Desc = "Handy-Push einrichten" }
         "GLOS"   = @{ Scope = "G";  Desc = "Glossar" }
         "HELP"   = @{ Scope = "G";  Desc = "Tastenkürzel und Befehle" }
@@ -3359,11 +3365,11 @@ function Get-CsvColumnGuess {
         Date     = '^(datum|date|buchungstag|buchungsdatum|handelstag|ausführungsdatum|ausfuehrungsdatum|valuta|trade ?date|transaction ?date|zeit|time)'
         Type     = '^(typ|type|art|transaktion|transaktionsart|geschäftsart|geschaeftsart|buchungsart|transaction ?type|action|vorgang|aktion)'
         Ident    = '^(isin|symbol|ticker|wertpapier ?kennnummer|wkn|instrument)'
-        Shares   = '^(stück|stueck|stk|anzahl|menge|quantity|shares|nominale|units|anteile)'
+        Shares   = '^(stück|stueck|stk|anzahl|menge|quantity|shares|nominale|units|anteile|no\.? ?of ?shares)'
         Price    = '^(kurs($|[\s\(/])|preis|price|ausführungskurs|ausfuehrungskurs|execution ?price|t\. ?price|price ?per ?share)'
         Amount   = '^(betrag|amount|gesamt|total|kurswert|wert$|value|net ?amount|proceeds|summe)'
         Fee      = '^(gebühr|gebuehr|gebühren|gebuehren|provision|fee|fees|commission|comm|kosten|spesen)'
-        Tax      = '^(steuer|steuern|tax|taxes|quellensteuer|kapitalertragsteuer)'
+        Tax      = '^(steuer|steuern|tax|taxes|quellensteuer|kapitalertragsteuer|withholding ?tax)'
         Currency = '^(währung|waehrung|currency|whg|ccy)'
         Name     = '^(name|bezeichnung|wertpapier|titel|description|beschreibung)'
     }
@@ -3378,6 +3384,26 @@ function Get-CsvColumnGuess {
             if ($h -match $pat[$f]) { $map[$f] = $i; $used[$i] = $true; break }
         }
     }
+    # v5.5: extra columns (e.g. Trading212): currency of the total / of the
+    # withholding tax, exchange rate, further fees in the account currency
+    $extra = [ordered]@{
+        AmountCurrency = '^(currency|währung|waehrung) ?\((total|gesamt|betrag)'
+        TaxCurrency    = '^(currency|währung|waehrung) ?\((withholding|quellensteuer)'
+        Rate           = '^(exchange ?rate|wechselkurs|devisenkurs|fx ?rate)'
+    }
+    foreach ($f in $extra.Keys) {
+        $map[$f] = -1
+        for ($i = 0; $i -lt @($Headers).Count; $i++) {
+            if (([string]$Headers[$i]).Trim().ToLowerInvariant() -match $extra[$f]) { $map[$f] = $i; break }
+        }
+    }
+    $fx = @()
+    for ($i = 0; $i -lt @($Headers).Count; $i++) {
+        if ($used.ContainsKey($i)) { continue }
+        $h = ([string]$Headers[$i]).Trim().ToLowerInvariant()
+        if ($h -match '^(currency conversion fee|stamp duty|french transaction tax|transaction fee|finra fee|charge amount|ptm levy)') { $fx += $i }
+    }
+    $map["FeeExtra"] = $fx
     return $map
 }
 
@@ -3407,6 +3433,10 @@ function ConvertFrom-CsvType {
     param([string]$Raw)
     $t = ([string]$Raw).Trim().ToLowerInvariant()
     if (-not $t) { return "" }
+    # v5.5: cash movements (go to the cash account, not to the bookings)
+    if ($t -match '^(deposit|einzahlung|einlage)') { return "Einzahlung" }
+    if ($t -match '^(withdrawal|auszahlung|entnahme)') { return "Auszahlung" }
+    if ($t -match 'interest on cash|lending interest|cash interest|zinsgutschrift|habenzins') { return "Zinsen" }
     if ($t -match 'dividend|ausschüttung|ausschuettung|ertrag|distribution|coupon|zins') { return "Dividende" }
     if ($t -match 'verkauf|sell|^s$|^sld$|^sale') { return "Verkauf" }
     if ($t -match 'kauf|buy|^b$|^bot$|sparplan|savings ?plan|purchase|einbuchung') { return "Kauf" }
@@ -3421,11 +3451,15 @@ function Test-Isin {
 function ConvertFrom-BrokerRows {
     # Rows + column map -> @(@{ Date; Type; Ident; Name; Shares; Price; Fee; Currency; Ok; Note })
     # Price = per share for buys/sells, total gross amount for dividends (like the widget's own bookings)
+    # v5.5: cash rows (Einzahlung / Auszahlung / Zinsen) come back with Cash = $true
+    # and Amount (signed, in AmountCurrency); Trading212: fees in the account
+    # currency are converted with the row's exchange rate when it checks out
     param([array]$Rows, [hashtable]$Map, [string]$DefaultCurrency = "EUR")
-    $get = { param($R, [string]$F) $i = [int]$Map[$F]; if ($i -ge 0 -and $i -lt @($R).Count) { return [string]$R[$i] } return "" }
+    $get = { param($R, [string]$F) $i = if ($Map.ContainsKey($F) -and $null -ne $Map[$F] -and $Map[$F] -isnot [array]) { [int]$Map[$F] } else { -1 }; if ($i -ge 0 -and $i -lt @($R).Count) { return [string]$R[$i] } return "" }
+    $feeCols = if ($Map.ContainsKey("FeeExtra")) { @($Map["FeeExtra"]) } else { @() }
     $out = @()
     foreach ($r in @($Rows)) {
-        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = "" }
+        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = ""; Cash = $false; Amount = 0.0 }
         $dRaw = ((& $get $r "Date").Trim()) -replace '[T ,;].*$', ''
         $o.Date = ConvertTo-IsoDate $dRaw
         $o.Ident = (& $get $r "Ident").Trim().ToUpperInvariant()
@@ -3440,11 +3474,44 @@ function ConvertFrom-BrokerRows {
         $typ = if ([int]$Map["Type"] -ge 0) { ConvertFrom-CsvType (& $get $r "Type") } else { "" }
         if (-not $typ -and [int]$Map["Type"] -lt 0 -and -not [double]::IsNaN($sh) -and $sh -ne 0) { $typ = if ($sh -lt 0) { "Verkauf" } else { "Kauf" } }
         $o.Type = $typ
+        $amCur = Get-NormalizedCurrencyCode (& $get $r "AmountCurrency")
+        if ($typ -in @("Einzahlung", "Auszahlung", "Zinsen")) {
+            $o.Cash = $true
+            $o.Currency = if ($amCur) { $amCur } else { $o.Currency }
+            $v = if (-not [double]::IsNaN($am)) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px)) { [math]::Abs($px) } else { 0.0 }
+            $o.Amount = if ($typ -eq "Auszahlung") { -$v } else { $v }
+            $why = @()
+            if (-not $o.Date) { $why += "Datum fehlt" }
+            if ($v -le 0) { $why += "Betrag fehlt" }
+            $o.Ok = ($why.Count -eq 0); $o.Note = $why -join ", "
+            $out += [PSCustomObject]$o
+            continue
+        }
+        # factor: account currency -> price currency (only if the row's numbers agree)
+        $rate = ConvertFrom-CsvNumber (& $get $r "Rate")
+        $acc2px = $(if (-not $amCur -or $amCur -eq $o.Currency) { 1.0 } else { [double]::NaN })
+        if ([double]::IsNaN($acc2px) -and $rate -gt 0 -and $sh -ne 0 -and $px -gt 0 -and -not [double]::IsNaN($am) -and $am -ne 0) {
+            $gross = [math]::Abs($sh) * $px
+            if ([math]::Abs($gross / $rate / [math]::Abs($am) - 1) -lt 0.03) { $acc2px = $rate }
+            elseif ([math]::Abs($gross * $rate / [math]::Abs($am) - 1) -lt 0.03) { $acc2px = 1 / $rate }
+        }
+        $feeAcc = 0.0
+        foreach ($fc in $feeCols) { if ([int]$fc -ge 0 -and [int]$fc -lt @($r).Count) { $fv = ConvertFrom-CsvNumber ([string]$r[[int]$fc]); if (-not [double]::IsNaN($fv)) { $feeAcc += [math]::Abs($fv) } } }
         $o.Fee = if ([double]::IsNaN($fe)) { 0.0 } else { [math]::Abs($fe) }
+        if ($feeAcc -gt 0) {
+            if (-not [double]::IsNaN($acc2px)) { $o.Fee += $feeAcc * $acc2px }
+            else { $o.Note = "Gebühr ({0:N2} {1}) nicht umgerechnet" -f $feeAcc, $amCur }
+        }
+        $taxCur = Get-NormalizedCurrencyCode (& $get $r "TaxCurrency")
+        if (-not [double]::IsNaN($tx) -and $taxCur -and $taxCur -ne $o.Currency) {
+            $tx = if ($taxCur -eq $amCur -and -not [double]::IsNaN($acc2px)) { $tx * $acc2px } else { [double]::NaN }
+        }
         if (-not [double]::IsNaN($tx) -and $o.Type -ne "Dividende") { $o.Fee += [math]::Abs($tx) }
         $o.Shares = if ([double]::IsNaN($sh)) { 0.0 } else { [math]::Abs($sh) }
         if ($o.Type -eq "Dividende") {
-            $o.Price = if (-not [double]::IsNaN($am) -and $am -ne 0) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px) -and $o.Shares -gt 0) { [math]::Abs($px) * $o.Shares } else { 0.0 }
+            # v5.5: the total is in another currency (Trading212: account currency) -> gross from shares x per share
+            $useGross = ($amCur -and $amCur -ne $o.Currency -and $o.Shares -gt 0 -and -not [double]::IsNaN($px) -and $px -gt 0)
+            $o.Price = if ($useGross) { [math]::Abs($px) * $o.Shares } elseif (-not [double]::IsNaN($am) -and $am -ne 0) { [math]::Abs($am) } elseif (-not [double]::IsNaN($px) -and $o.Shares -gt 0) { [math]::Abs($px) * $o.Shares } else { 0.0 }
             if (-not [double]::IsNaN($tx)) { $o.Fee += [math]::Abs($tx) }
         } else {
             if (-not [double]::IsNaN($px) -and $px -ne 0) { $o.Price = [math]::Abs($px) }
@@ -3463,7 +3530,7 @@ function ConvertFrom-BrokerRows {
         if ($o.Type -ne "Dividende" -and $o.Shares -le 0) { $why += "Stück fehlen" }
         if ($o.Price -le 0) { $why += "Kurs/Betrag fehlt" }
         $o.Ok = ($why.Count -eq 0)
-        $o.Note = $why -join ", "
+        $o.Note = (@(@($why) + @($(if ($o.Note) { $o.Note }))) | Where-Object { $_ }) -join ", "
         $out += [PSCustomObject]$o
     }
     return $out
@@ -3973,9 +4040,12 @@ function Get-DueSavingsDates {
     $after = if ($Plan.LastBooked) { [DateTime]::ParseExact([string]$Plan.LastBooked, "yyyy-MM-dd", $inv) } else { $start.AddDays(-1) }
     $today = [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv)
     $m = New-Object DateTime($start.Year, $start.Month, 1)
+    # v5.5: pause months (e.g. "7,8" or "Jul, Aug") are skipped, not caught up later
+    $pause = @()
+    if ($null -ne $Plan.PSObject.Properties["Pause"]) { $pause = @(ConvertTo-PauseMonths ([string]$Plan.Pause)) }
     while ($m -le $today -and $out.Count -lt 24) {
         $d = New-Object DateTime($m.Year, $m.Month, $day)
-        if ($d -ge $start -and $d -gt $after -and $d -le $today) { $out.Add($d.ToString("yyyy-MM-dd", $inv)) }
+        if ($d -ge $start -and $d -gt $after -and $d -le $today -and $pause -notcontains $d.Month) { $out.Add($d.ToString("yyyy-MM-dd", $inv)) }
         $m = $m.AddMonths(1)
     }
     return @($out)
@@ -4796,4 +4866,308 @@ function ConvertFrom-SettingsExport {
     $r.Ok = ($r.Settings.Count -gt 0)
     if (-not $r.Ok) { $r.Error = "Die Datei enthält keine bekannten Einstellungen." }
     return $r
+}
+
+# ------------------------------------------------------------------------------
+# v5.5: per-ticker notes, health check, diagnostics
+# ------------------------------------------------------------------------------
+function ConvertTo-NoteText {
+    # what is stored: trimmed, Windows line breaks, at most 4000 characters
+    param([string]$Text)
+    $t = ([string]$Text) -replace "`r`n", "`n" -replace "`r", "`n"
+    $t = $t.Trim()
+    if ($t.Length -gt 4000) { $t = $t.Substring(0, 4000) }
+    return ($t -replace "`n", "`r`n")
+}
+
+function Get-NoteSnippet {
+    # one line for the hover card / tooltips
+    param([string]$Text, [int]$Max = 120)
+    $t = (([string]$Text) -replace '\s+', ' ').Trim()
+    if ($t.Length -le $Max) { return $t }
+    return ($t.Substring(0, [math]::Max(1, $Max - 1)).TrimEnd() + [string][char]0x2026)
+}
+
+function Get-BackupHealth {
+    # newest backup age -> OK (< 2 days) / WARN (< 8 days) / ERR
+    param($Newest, [DateTime]$Now = (Get-Date))
+    if ($null -eq $Newest) { return [PSCustomObject]@{ State = "ERR"; Days = [double]::NaN } }
+    $d = ($Now - [DateTime]$Newest).TotalDays
+    $st = if ($d -lt 2) { "OK" } elseif ($d -lt 8) { "WARN" } else { "ERR" }
+    return [PSCustomObject]@{ State = $st; Days = $d }
+}
+
+function Format-HealthReport {
+    # Checks: @(@{ Name; State = OK / WARN / ERR / INFO; Detail })
+    param($Checks, [string]$Title = "Zustand")
+    $sym = @{ "OK" = "OK  "; "WARN" = "!!  "; "ERR" = "XX  "; "INFO" = "    " }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $nW = 0; $nE = 0
+    foreach ($c in @($Checks)) {
+        if ($null -eq $c) { continue }
+        $st = [string]$c.State
+        if ($st -eq "WARN") { $nW++ } elseif ($st -eq "ERR") { $nE++ }
+        $pre = if ($sym.ContainsKey($st)) { $sym[$st] } else { "    " }
+        $lines.Add(("{0}{1,-24} {2}" -f $pre, [string]$c.Name, [string]$c.Detail).TrimEnd())
+    }
+    $head = if ($nE -gt 0) { "{0}: {1} Fehler, {2} Warnung(en)" -f $Title, $nE, $nW } elseif ($nW -gt 0) { "{0}: {1} Warnung(en)" -f $Title, $nW } else { "{0}: alles in Ordnung" -f $Title }
+    return (@($head, "") + $lines.ToArray()) -join "`r`n"
+}
+
+function Get-DiagnosticConfig {
+    # config for a bug report: secrets and personal lists removed
+    param($Config)
+    $c = $Config | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    foreach ($k in @("PushTokenEnc", "PushTopic", "PushChatId", "PushServer", "TwelveDataKeyEnc", "FinnhubKeyEnc")) {
+        if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = $(if ([string]$c.$k) { "(entfernt)" } else { "" }) }
+    }
+    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups")) {
+        if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
+    }
+    return $c
+}
+
+# ---- v5.5: privacy mask, CSV / HTML export, dialog placement ----
+function Test-AmountColumn {
+    # Columns whose values reveal money or position size (masked in privacy mode)
+    param([string]$Header)
+    $h = ConvertTo-SearchKey $Header
+    if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
+    foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
+                     "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
+        if ($h.Contains($w)) { return $true }
+    }
+    return $false
+}
+
+function Hide-AmountsInText {
+    # "Summe: 1.234,56 EUR (+3,2 %)" -> "Summe: ••• EUR (+3,2 %)"; percentages stay
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $dots = [string][char]0x2022 * 3
+    $cur = '(EUR|USD|CHF|GBP|JPY|CAD|AUD|SEK|NOK|DKK|PLN|HKD|€|\$|£)'
+    $num = '[-+−]?\d[\d.,'' ]*\d|[-+−]?\d'
+    $t = [regex]::Replace($Text, "(?<![\w.,])($num)(\s?)$cur(?!\w)", { param($m) $dots + $m.Groups[2].Value + $m.Groups[3].Value })
+    $t = [regex]::Replace($t, "$cur(\s?)($num)(?![\d%])", { param($m) $m.Groups[1].Value + $m.Groups[2].Value + $dots })
+    return $t
+}
+
+function ConvertTo-CsvText {
+    # Excel-friendly CSV (semicolon for German Excel); quotes where needed
+    param([string[]]$Headers, $Rows, [string]$Separator = ";")
+    $q = {
+        param($v)
+        $s = [string]$v
+        if ($s.Contains($Separator) -or $s.Contains('"') -or $s.Contains("`n") -or $s.Contains("`r")) { return '"' + $s.Replace('"', '""') + '"' }
+        return $s
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add((@($Headers | ForEach-Object { & $q $_ }) -join $Separator))
+    foreach ($r in @($Rows)) { if ($null -ne $r) { $lines.Add((@(@($r) | ForEach-Object { & $q $_ }) -join $Separator)) } }
+    return ($lines.ToArray() -join "`r`n")
+}
+
+function ConvertTo-HtmlReport {
+    # Sections: @(@{ Title; Headers; Rows; Note }) -> one self-contained HTML page
+    param([string]$Title, $Sections, [string]$Footer = "")
+    $enc = { param($v) [System.Net.WebUtility]::HtmlEncode([string]$v) }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("<!DOCTYPE html>`r`n<html lang=`"de`"><head><meta charset=`"utf-8`"><title>" + (& $enc $Title) + "</title>`r`n<style>")
+    [void]$sb.Append("body{font-family:'Segoe UI',sans-serif;margin:24px;color:#1f2328}h1{font-size:20px}h2{font-size:15px;margin-top:24px}")
+    [void]$sb.Append("table{border-collapse:collapse;font-size:13px}th,td{padding:4px 10px;border-bottom:1px solid #d0d7de;text-align:left}")
+    [void]$sb.Append("td.n{text-align:right;font-family:Consolas,monospace}th{background:#f6f8fa}p.note,footer{color:#656d76;font-size:12px}</style></head><body>`r`n")
+    [void]$sb.Append("<h1>" + (& $enc $Title) + "</h1>`r`n")
+    foreach ($sec in @($Sections)) {
+        if ($null -eq $sec) { continue }
+        if ($sec.Title) { [void]$sb.Append("<h2>" + (& $enc $sec.Title) + "</h2>`r`n") }
+        if ($sec.Note) { [void]$sb.Append("<p class=`"note`">" + (& $enc $sec.Note) + "</p>`r`n") }
+        if (@($sec.Headers).Count -eq 0) { continue }
+        [void]$sb.Append("<table><tr>")
+        foreach ($h in @($sec.Headers)) { [void]$sb.Append("<th>" + (& $enc $h) + "</th>") }
+        [void]$sb.Append("</tr>`r`n")
+        foreach ($r in @($sec.Rows)) {
+            if ($null -eq $r) { continue }
+            [void]$sb.Append("<tr>")
+            foreach ($v in @($r)) {
+                $sv = [string]$v
+                $cls = if ($sv -match '^[-+−]?[\d.,'' ]+\s?(%|[A-Z]{3})?$' -and $sv -match '\d') { " class=`"n`"" } else { "" }
+                [void]$sb.Append("<td$cls>" + (& $enc $sv) + "</td>")
+            }
+            [void]$sb.Append("</tr>`r`n")
+        }
+        [void]$sb.Append("</table>`r`n")
+    }
+    if ($Footer) { [void]$sb.Append("<footer><p>" + (& $enc $Footer) + "</p></footer>`r`n") }
+    [void]$sb.Append("</body></html>`r`n")
+    return $sb.ToString()
+}
+
+function Get-DialogPlacement {
+    # Saved bounds of a dialog, only if at least 120 x 60 px of its top part
+    # lie on one of the screens (monitor unplugged -> default position)
+    # Saved: @{ X; Y; W; H }; Screens: @(@{ X; Y; W; H }) working areas
+    param($Saved, $Screens, [int]$MinW = 200, [int]$MinH = 120)
+    if ($null -eq $Saved) { return $null }
+    $x = [int]$Saved.X; $y = [int]$Saved.Y; $w = [int]$Saved.W; $h = [int]$Saved.H
+    if ($w -lt $MinW -or $h -lt $MinH) { return $null }
+    foreach ($sc in @($Screens)) {
+        if ($null -eq $sc) { continue }
+        $ix = [math]::Min($x + $w, [int]$sc.X + [int]$sc.W) - [math]::Max($x, [int]$sc.X)
+        $topIn = ($y -ge [int]$sc.Y - 4) -and ($y -le [int]$sc.Y + [int]$sc.H - 60)
+        if ($ix -ge 120 -and $topIn) {
+            # not larger than that screen
+            $w2 = [math]::Min($w, [int]$sc.W); $h2 = [math]::Min($h, [int]$sc.H)
+            return [PSCustomObject]@{ X = $x; Y = $y; W = $w2; H = $h2 }
+        }
+    }
+    return $null
+}
+
+# ---- v5.5: chart - percent axis, drag zoom, zones; daily history cache ----
+function Format-PctAxisLabel {
+    # price -> change since the first visible bar ("+3.2%")
+    param([double]$Value, [double]$Base)
+    if ($Base -le 0 -or [double]::IsNaN($Value)) { return "" }
+    $pc = ($Value / $Base - 1) * 100
+    if ([math]::Abs($pc) -lt 0.05) { return "0%" }
+    $fmt = if ([math]::Abs($pc) -ge 100) { "{0:+0;-0}%" } else { "{0:+0.0;-0.0}%" }
+    return ($fmt -f $pc)
+}
+
+function Get-ZoomWindow {
+    # Ctrl + drag from bar A to bar B (absolute indices) -> @{ Count; Offset }
+    # for the chart view (Offset = bars hidden on the right); $null if too small
+    param([int]$A, [int]$B, [int]$Total, [int]$MinBars = 10)
+    if ($Total -lt 2) { return $null }
+    $lo = [math]::Max(0, [math]::Min($A, $B)); $hi = [math]::Min($Total - 1, [math]::Max($A, $B))
+    if ($hi - $lo + 1 -lt 3) { return $null }
+    $cnt = $hi - $lo + 1
+    if ($cnt -lt $MinBars) {
+        $mid = ($lo + $hi) / 2.0
+        $cnt = [math]::Min($Total, $MinBars)
+        $lo = [int][math]::Round($mid - ($cnt - 1) / 2.0)
+        $lo = [math]::Max(0, [math]::Min($Total - $cnt, $lo))
+        $hi = $lo + $cnt - 1
+    }
+    if ($cnt -ge $Total) { return [PSCustomObject]@{ Count = 0; Offset = 0 } }
+    return [PSCustomObject]@{ Count = $cnt; Offset = ($Total - 1 - $hi) }
+}
+
+function Test-PointInZone {
+    # zone drawing: inside the rectangle, or within Tol of its border
+    param([double]$X, [double]$Y, [double]$X1, [double]$Y1, [double]$X2, [double]$Y2, [double]$Tol = 4)
+    $l = [math]::Min($X1, $X2) - $Tol; $r = [math]::Max($X1, $X2) + $Tol
+    $t = [math]::Min($Y1, $Y2) - $Tol; $b = [math]::Max($Y1, $Y2) + $Tol
+    return ($X -ge $l -and $X -le $r -and $Y -ge $t -and $Y -le $b)
+}
+
+function ConvertTo-DailyCacheEntry {
+    # daily bars + signals of one ticker, as stored in daily_cache.json
+    param($Bars, $Sig, [string]$Day)
+    if ($null -eq $Bars) { return $null }
+    $r2 = { param($a) @(@($a) | ForEach-Object { [math]::Round([double]$_, 4) }) }
+    $sup = [double]::NaN; $res = [double]::NaN
+    if ($null -ne $Sig -and $null -ne $Sig.Support) { $sup = [double]$Sig.Support.Support; $res = [double]$Sig.Support.Resistance }
+    return [PSCustomObject]@{
+        Day = $Day; Currency = [string]$Bars.Currency
+        Dates = @($Bars.Dates); Close = (& $r2 $Bars.Close); High = (& $r2 $Bars.High); Low = (& $r2 $Bars.Low); Volume = @(@($Bars.Volume) | ForEach-Object { [math]::Round([double]$_) })
+        Score = $(if ($null -ne $Sig) { [int]$Sig.Score } else { 0 }); Summary = $(if ($null -ne $Sig) { [string]$Sig.Summary } else { "" })
+        Positive = $(if ($null -ne $Sig) { [int]$Sig.Positive } else { 0 }); Negative = $(if ($null -ne $Sig) { [int]$Sig.Negative } else { 0 })
+        Support = $(if ([double]::IsNaN($sup)) { $null } else { [math]::Round($sup, 4) }); Resistance = $(if ([double]::IsNaN($res)) { $null } else { [math]::Round($res, 4) })
+    }
+}
+
+function Test-DailyCacheFresh {
+    param($Entry, [string]$Day)
+    return ($null -ne $Entry -and [string]$Entry.Day -eq $Day -and @($Entry.Close).Count -ge 30)
+}
+
+function Format-SignalCell {
+    # watchlist column: "+4" / "-2" / "0" with a sign for the colour
+    param($Entry)
+    if ($null -eq $Entry -or @($Entry.Close).Count -lt 30) { return [PSCustomObject]@{ Text = "-"; Sign = 0; Tip = "" } }
+    $s = [int]$Entry.Score
+    $t = if ($s -gt 0) { "+$s" } else { "$s" }
+    $tip = "{0} ({1} positiv, {2} negativ) - Stand {3}" -f [string]$Entry.Summary, [int]$Entry.Positive, [int]$Entry.Negative, [string]$Entry.Day
+    return [PSCustomObject]@{ Text = $t; Sign = [math]::Sign($s); Tip = $tip }
+}
+
+
+# ---- v5.5: savings plans - yearly increase, pause months ----
+function ConvertTo-PauseMonths {
+    # "7, 8" / "Jul Aug" / "juli,dez" -> @(7, 8) / @(7, 12); unknown parts are ignored
+    param([string]$Text)
+    $names = @{ "jan" = 1; "feb" = 2; "mar" = 3; "mrz" = 3; "apr" = 4; "mai" = 5; "may" = 5; "jun" = 6; "jul" = 7; "aug" = 8; "sep" = 9; "okt" = 10; "oct" = 10; "nov" = 11; "dez" = 12; "dec" = 12 }
+    $out = New-Object System.Collections.Generic.List[int]
+    foreach ($part in (([string]$Text) -split '[\s,;/]+')) {
+        $t = (ConvertTo-SearchKey $part).Trim('.')
+        if (-not $t) { continue }
+        $n = 0
+        if ([int]::TryParse($t, [ref]$n)) { if ($n -ge 1 -and $n -le 12 -and -not $out.Contains($n)) { $out.Add($n) }; continue }
+        if ($t.Length -ge 3 -and $names.ContainsKey($t.Substring(0, 3)) -and -not $out.Contains($names[$t.Substring(0, 3)])) { $out.Add($names[$t.Substring(0, 3)]) }
+    }
+    return @($out | Sort-Object)
+}
+
+function Format-PauseMonths {
+    param([int[]]$Months)
+    $n = @("", "Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez")
+    return (@(@($Months) | Where-Object { $_ -ge 1 -and $_ -le 12 } | Sort-Object -Unique | ForEach-Object { $n[$_] }) -join ", ")
+}
+
+function Get-SavingsPlanAmount {
+    # amount for one booking date: + Increase % for every full year since Start
+    param($Plan, [string]$Date)
+    $amt = [double]$Plan.Amount
+    $inc = if ($null -ne $Plan.PSObject.Properties["Increase"]) { [double]$Plan.Increase } else { 0.0 }
+    if ($inc -eq 0 -or -not $Plan.Start -or -not $Date) { return $amt }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $st = [DateTime]::ParseExact([string]$Plan.Start, "yyyy-MM-dd", $inv)
+    $d = [DateTime]::ParseExact($Date, "yyyy-MM-dd", $inv)
+    $years = $d.Year - $st.Year
+    if ($d.Month -lt $st.Month -or ($d.Month -eq $st.Month -and $d.Day -lt $st.Day)) { $years-- }
+    if ($years -le 0) { return $amt }
+    return [math]::Round($amt * [math]::Pow(1 + $inc / 100.0, $years), 2)
+}
+
+function Get-GroupScenarioImpact {
+    # v5.5: what-if for one sector or one currency: positions of that group
+    # move by Pct, the rest stays. Same shape as Get-ScenarioImpact
+    # (Beta = 1 for the group, 0 otherwise).
+    param([array]$Positions, [string]$Group, [double]$Pct)
+    $rows = @()
+    $tot = 0.0; $val = 0.0
+    foreach ($p in @($Positions)) {
+        if ($null -eq $p) { continue }
+        $hit = ([string]$p.Group -eq $Group)
+        $chg = if ($hit) { [double]$p.Value * $Pct / 100.0 } else { 0.0 }
+        $rows += [PSCustomObject]@{ Sym = [string]$p.Sym; Value = [double]$p.Value; Beta = $(if ($hit) { 1.0 } else { 0.0 }); BetaAssumed = $false; Change = $chg; Group = [string]$p.Group }
+        $tot += $chg; $val += [double]$p.Value
+    }
+    return [PSCustomObject]@{ Rows = @($rows | Sort-Object -Property @{ Expression = { [double]$_.Change }; Descending = $false }, @{ Expression = { [double]$_.Value }; Descending = $true }); Change = $tot; Value = $val; Pct = $(if ($val -gt 0) { $tot / $val * 100.0 } else { 0.0 }) }
+}
+
+function Get-DividendIncomeTable {
+    # v5.5: received dividends (Items: @{ Date yyyy-MM-dd; Amount } in the base
+    # currency) -> one row per year (newest first) with 12 months, total and
+    # change to the year before; Max = largest month (for the colour scale)
+    param($Items)
+    $years = @{}
+    foreach ($it in @($Items)) {
+        if ($null -eq $it -or -not $it.Date -or [string]$it.Date -notmatch '^(\d{4})-(\d{2})') { continue }
+        $y = [int]$Matches[1]; $m = [int]$Matches[2]
+        if ($m -lt 1 -or $m -gt 12) { continue }
+        if (-not $years.ContainsKey($y)) { $years[$y] = New-Object double[] 12 }
+        $years[$y][$m - 1] += [double]$it.Amount
+    }
+    $rows = @(); $max = 0.0
+    foreach ($y in @($years.Keys | Sort-Object -Descending)) {
+        $ms = $years[$y]
+        $tot = ($ms | Measure-Object -Sum).Sum
+        foreach ($v in $ms) { if ($v -gt $max) { $max = $v } }
+        $prev = if ($years.ContainsKey($y - 1)) { ($years[$y - 1] | Measure-Object -Sum).Sum } else { [double]::NaN }
+        $chg = if (-not [double]::IsNaN($prev) -and $prev -gt 0) { ($tot / $prev - 1) * 100 } else { [double]::NaN }
+        $rows += [PSCustomObject]@{ Year = $y; Months = [double[]]$ms; Total = [double]$tot; ChangePct = $chg; MonthlyAvg = [double]$tot / 12.0 }
+    }
+    return [PSCustomObject]@{ Rows = $rows; Max = $max; Total = [double](@($rows | ForEach-Object { $_.Total }) | Measure-Object -Sum).Sum }
 }

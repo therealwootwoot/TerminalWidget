@@ -1338,7 +1338,9 @@ Describe "CSV import (v4.5)" {
     It "treats empty text as NaN" { [double]::IsNaN((ConvertFrom-CsvNumber "")) | Should -BeTrue; [double]::IsNaN((ConvertFrom-CsvNumber "abc")) | Should -BeTrue }
     It "maps broker wording <Raw> -> <T>" -TestCases @(
         @{ Raw = "Kauf"; T = "Kauf" }, @{ Raw = "BUY"; T = "Kauf" }, @{ Raw = "Sparplanausführung"; T = "Kauf" }, @{ Raw = "Verkauf"; T = "Verkauf" },
-        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "" }
+        @{ Raw = "SELL"; T = "Verkauf" }, @{ Raw = "Dividende"; T = "Dividende" }, @{ Raw = "Ausschüttung"; T = "Dividende" }, @{ Raw = "Einzahlung"; T = "Einzahlung" },
+        @{ Raw = "Market buy"; T = "Kauf" }, @{ Raw = "Limit sell"; T = "Verkauf" }, @{ Raw = "Dividend (Ordinary)"; T = "Dividende" }, @{ Raw = "Interest on cash"; T = "Zinsen" },
+        @{ Raw = "Withdrawal"; T = "Auszahlung" }, @{ Raw = "Currency conversion"; T = "" }
     ) {
         param($Raw, $T)
         ConvertFrom-CsvType $Raw | Should -Be $T
@@ -1356,8 +1358,8 @@ Describe "CSV import (v4.5)" {
         $b[0].Date | Should -Be "2025-01-15"; $b[0].Type | Should -Be "Kauf"; $b[0].Shares | Should -Be 10; $b[0].Price | Should -Be 120.5; $b[0].Fee | Should -Be 1; $b[0].Currency | Should -Be "USD"; $b[0].Ok | Should -BeTrue
         $b[1].Date | Should -Be "2025-02-03"; $b[1].Shares | Should -Be 4; $b[1].Price | Should -Be 150; $b[1].Currency | Should -Be "EUR"
         $b[2].Type | Should -Be "Dividende"; $b[2].Price | Should -Be 0.4
-        $b[3].Ok | Should -BeFalse
-        $b[3].Note | Should -Match "Art unbekannt"
+        # v5.5: deposits are cash rows now (for the cash account)
+        $b[3].Type | Should -Be "Einzahlung"; $b[3].Cash | Should -BeTrue; $b[3].Amount | Should -Be 1000; $b[3].Ok | Should -BeTrue
     }
     It "infers buy/sell from the sign without a type column" {
         $map = @{ Date = 0; Type = -1; Ident = 1; Shares = 2; Price = 3; Amount = -1; Fee = -1; Tax = -1; Currency = -1; Name = -1 }
@@ -2249,6 +2251,212 @@ Describe "Settings pages (v5.3)" {
         @(Get-CommandSuggestions -Text "NVDA G" -Extra $extra | ForEach-Object { $_.Text }) | Should -Contain "NVDA GP"
         (ConvertFrom-TerminalCommand "SET STIL").Func | Should -Be "SET"
         (ConvertFrom-TerminalCommand "MENU BEENDEN").Kind | Should -Be "Global"
+    }
+}
+
+Describe "Notes, health, diagnostics (v5.5)" {
+    It "stores notes trimmed with Windows line breaks and a length limit" {
+        ConvertTo-NoteText "  Kaufgrund`nKI-Rechenzentren  " | Should -Be "Kaufgrund`r`nKI-Rechenzentren"
+        (ConvertTo-NoteText ("x" * 5000)).Length | Should -Be 4000
+        ConvertTo-NoteText "   " | Should -Be ""
+    }
+    It "shortens a note to one line" {
+        Get-NoteSnippet "a`r`n  b" | Should -Be "a b"
+        $s = Get-NoteSnippet ("wort " * 50) -Max 20
+        $s.Length | Should -BeLessOrEqual 20
+        $s | Should -Match ([string][char]0x2026 + '$')
+    }
+    It "rates the newest backup by age" {
+        $now = [DateTime]"2026-11-24 12:00"
+        (Get-BackupHealth -Newest $now.AddHours(-30) -Now $now).State | Should -Be "OK"
+        (Get-BackupHealth -Newest $now.AddDays(-5) -Now $now).State | Should -Be "WARN"
+        (Get-BackupHealth -Newest $now.AddDays(-20) -Now $now).State | Should -Be "ERR"
+        (Get-BackupHealth -Newest $null -Now $now).State | Should -Be "ERR"
+    }
+    It "summarises the health checks" {
+        $ok = Format-HealthReport -Checks @([PSCustomObject]@{ Name = "Daten"; State = "OK"; Detail = "7" })
+        $ok | Should -Match "alles in Ordnung"
+        $bad = Format-HealthReport -Checks @([PSCustomObject]@{ Name = "A"; State = "ERR"; Detail = "x" }, [PSCustomObject]@{ Name = "B"; State = "WARN"; Detail = "y" })
+        $bad | Should -Match "1 Fehler, 1 Warnung"
+        $bad | Should -Match "XX  A"
+    }
+    It "removes secrets and personal lists from the diagnostic config" {
+        $c = [PSCustomObject]@{ Theme = "Dark"; PushTokenEnc = "geheim"; PushTopic = ""; Watchlist = @("NVDA"); Depots = @() }
+        $d = Get-DiagnosticConfig $c
+        $d.Theme | Should -Be "Dark"
+        $d.PushTokenEnc | Should -Be "(entfernt)"
+        $d.PushTopic | Should -Be ""
+        $d.Watchlist | Should -Be "(entfernt)"
+        $c.PushTokenEnc | Should -Be "geheim"
+    }
+    It "exports notes, cash, savings plans and drawings with the data" {
+        foreach ($f in @("notes.json", "cash.json", "savingsplans.json", "drawings.json")) { @(Get-DataFileNames) | Should -Contain $f }
+    }
+    It "knows NOTE, HEALTH and DIAG" {
+        (ConvertFrom-TerminalCommand "NVDA NOTE").Func | Should -Be "NOTE"
+        (ConvertFrom-TerminalCommand "HEALTH").Kind | Should -Be "Global"
+        (ConvertFrom-TerminalCommand "DIAG").Kind | Should -Be "Global"
+    }
+}
+
+Describe "Privacy, export, dialog places (v5.5)" {
+    It "knows which columns show amounts" {
+        foreach ($h in @("Wert", "Betrag", "Stück", "Dividende", "Summe Jahr", "Beitrag heute", "Value", "Shares", "Kauf / Verkauf")) { Test-AmountColumn $h | Should -BeTrue }
+        foreach ($h in @("Ticker", "Anteil", "Ist %", "Rendite", "Datum", "Kennzahl", "Signal", "")) { Test-AmountColumn $h | Should -BeFalse }
+    }
+    It "hides amounts with a currency but keeps percentages" {
+        Hide-AmountsInText "Summe: 1.234,56 EUR (+3,2 %)" | Should -Be ("Summe: " + ([string][char]0x2022 * 3) + " EUR (+3,2 %)")
+        Hide-AmountsInText "Dividende USD 120" | Should -Be ("Dividende USD " + ([string][char]0x2022 * 3))
+        Hide-AmountsInText "Rendite 12,5 % p.a., Beta 1,2" | Should -Be "Rendite 12,5 % p.a., Beta 1,2"
+        Hide-AmountsInText "" | Should -Be ""
+    }
+    It "writes CSV with quotes only where needed" {
+        $csv = ConvertTo-CsvText -Headers @("Ticker", "Notiz") -Rows @(, @("NVDA", 'sagt "ja"; gut'))
+        $csv | Should -Be ("Ticker;Notiz`r`nNVDA;" + '"sagt ""ja""; gut"')
+    }
+    It "builds an escaped HTML report" {
+        $h = ConvertTo-HtmlReport -Title "A & B" -Sections @([PSCustomObject]@{ Title = "Seite"; Headers = @("x", "y"); Rows = @(, @("<b>", "1.234,50 EUR")); Note = "" }) -Footer "f"
+        $h | Should -Match "<title>A &amp; B</title>"
+        $h | Should -Match "&lt;b&gt;"
+        $h | Should -Match '<td class="n">1.234,50 EUR</td>'
+        $h | Should -Match "<footer>"
+    }
+    It "puts a dialog back only where a screen still is" {
+        $scr = @([PSCustomObject]@{ X = 0; Y = 0; W = 1920; H = 1040 })
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 100; Y = 50; W = 700; H = 500 }) -Screens $scr).X | Should -Be 100
+        Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 2500; Y = 50; W = 700; H = 500 }) -Screens $scr | Should -BeNullOrEmpty
+        Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 100; Y = 1020; W = 700; H = 500 }) -Screens $scr | Should -BeNullOrEmpty
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 0; Y = 0; W = 3000; H = 2000 }) -Screens $scr).W | Should -Be 1920
+        $two = $scr + @([PSCustomObject]@{ X = 1920; Y = 0; W = 1280; H = 1000 })
+        (Get-DialogPlacement -Saved ([PSCustomObject]@{ X = 2500; Y = 50; W = 700; H = 500 }) -Screens $two).X | Should -Be 2500
+        Get-DialogPlacement -Saved $null -Screens $scr | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Chart and signal cache (v5.5)" {
+    It "labels the percent axis from the first visible bar" {
+        Format-PctAxisLabel -Value 110 -Base 100 | Should -Be ("{0:+0.0;-0.0}%" -f 10.0)
+        Format-PctAxisLabel -Value 100.01 -Base 100 | Should -Be "0%"
+        Format-PctAxisLabel -Value 350 -Base 100 | Should -Be "+250%"
+        Format-PctAxisLabel -Value 10 -Base 0 | Should -Be ""
+    }
+    It "turns a Ctrl-drag into a zoom window" {
+        $z = Get-ZoomWindow -A 40 -B 80 -Total 100
+        $z.Count | Should -Be 41
+        $z.Offset | Should -Be 19
+        (Get-ZoomWindow -A 80 -B 40 -Total 100).Offset | Should -Be 19
+        (Get-ZoomWindow -A 95 -B 99 -Total 100 -MinBars 10).Count | Should -Be 10
+        (Get-ZoomWindow -A 95 -B 99 -Total 100 -MinBars 10).Offset | Should -Be 0
+        Get-ZoomWindow -A 5 -B 6 -Total 100 | Should -BeNullOrEmpty
+        (Get-ZoomWindow -A 0 -B 99 -Total 100).Count | Should -Be 0
+    }
+    It "hits a zone inside and on its border" {
+        Test-PointInZone -X 50 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeTrue
+        Test-PointInZone -X 103 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeTrue
+        Test-PointInZone -X 120 -Y 50 -X1 10 -Y1 10 -X2 100 -Y2 80 | Should -BeFalse
+    }
+    It "stores daily bars and signals and knows when they are stale" {
+        $bars = [PSCustomObject]@{ Currency = "USD"; Dates = @(1..40 | ForEach-Object { "2026-01-{0:00}" -f ($_ % 28 + 1) }); Close = @(1..40 | ForEach-Object { 100.123456 + $_ }); High = @(1..40 | ForEach-Object { 102 + $_ }); Low = @(1..40 | ForEach-Object { 99 + $_ }); Volume = @(1..40 | ForEach-Object { 1000.4 }) }
+        $sig = Get-TechnicalSignals -Closes ([double[]]$bars.Close) -Highs ([double[]]$bars.High) -Lows ([double[]]$bars.Low)
+        $e = ConvertTo-DailyCacheEntry -Bars $bars -Sig $sig -Day "2026-11-24"
+        $e.Close[0] | Should -Be 101.1235
+        $e.Volume[0] | Should -Be 1000
+        $e.Score | Should -Be $sig.Score
+        Test-DailyCacheFresh -Entry $e -Day "2026-11-24" | Should -BeTrue
+        Test-DailyCacheFresh -Entry $e -Day "2026-11-25" | Should -BeFalse
+        Test-DailyCacheFresh -Entry $null -Day "2026-11-24" | Should -BeFalse
+        ($e | ConvertTo-Json -Depth 4 | ConvertFrom-Json).Day | Should -Be "2026-11-24"
+    }
+    It "formats the signal column" {
+        (Format-SignalCell ([PSCustomObject]@{ Close = @(1..30); Score = 3; Summary = "überwiegend positiv"; Positive = 4; Negative = 1; Day = "2026-11-24" })).Text | Should -Be "+3"
+        (Format-SignalCell ([PSCustomObject]@{ Close = @(1..30); Score = -2; Summary = "gemischt"; Positive = 1; Negative = 3; Day = "x" })).Sign | Should -Be -1
+        (Format-SignalCell $null).Text | Should -Be "-"
+    }
+}
+
+Describe "Depot extras (v5.5)" {
+    It "reads pause months in numbers and names" {
+        (ConvertTo-PauseMonths "7, 8") -join "," | Should -Be "7,8"
+        (ConvertTo-PauseMonths "Jul; Aug / dez 13 x") -join "," | Should -Be "7,8,12"
+        (ConvertTo-PauseMonths "März") -join "," | Should -Be "3"
+        @(ConvertTo-PauseMonths "").Count | Should -Be 0
+        Format-PauseMonths @(12, 7, 7) | Should -Be "Jul, Dez"
+    }
+    It "skips pause months when booking a savings plan" {
+        $pl = [PSCustomObject]@{ Day = 1; Start = "2026-05-01"; LastBooked = ""; Pause = "Jul, Aug" }
+        (Get-DueSavingsDates -Plan $pl -Today "2026-10-15") -join "," | Should -Be "2026-05-01,2026-06-01,2026-09-01,2026-10-01"
+        $old = [PSCustomObject]@{ Day = 1; Start = "2026-05-01"; LastBooked = "" }
+        @(Get-DueSavingsDates -Plan $old -Today "2026-10-15").Count | Should -Be 6
+    }
+    It "raises the savings plan amount every full year" {
+        $pl = [PSCustomObject]@{ Amount = 100; Increase = 5; Start = "2024-03-01" }
+        Get-SavingsPlanAmount -Plan $pl -Date "2025-02-28" | Should -Be 100
+        Get-SavingsPlanAmount -Plan $pl -Date "2025-03-01" | Should -Be 105
+        Get-SavingsPlanAmount -Plan $pl -Date "2026-03-01" | Should -Be 110.25
+        Get-SavingsPlanAmount -Plan ([PSCustomObject]@{ Amount = 50; Start = "2020-01-01" }) -Date "2026-01-01" | Should -Be 50
+    }
+    It "moves only the chosen sector or currency in a scenario" {
+        $pos = @([PSCustomObject]@{ Sym = "NVDA"; Value = 1000; Group = "USD" }, [PSCustomObject]@{ Sym = "SAP.DE"; Value = 1000; Group = "EUR" })
+        $sc = Get-GroupScenarioImpact -Positions $pos -Group "USD" -Pct -10
+        $sc.Change | Should -Be -100
+        $sc.Pct | Should -Be -5
+        @($sc.Rows | Where-Object { $_.Sym -eq "SAP.DE" })[0].Change | Should -Be 0
+        @($sc.Rows | Where-Object { $_.Sym -eq "NVDA" })[0].Beta | Should -Be 1
+    }
+    It "builds the dividend calendar per year and month" {
+        $t = Get-DividendIncomeTable -Items @(@{ Date = "2025-03-10"; Amount = 10 }, @{ Date = "2026-03-02"; Amount = 12 }, @{ Date = "2026-03-20"; Amount = 3 }, @{ Date = "2026-11-01"; Amount = 5 }, @{ Date = "kaputt"; Amount = 99 })
+        @($t.Rows).Count | Should -Be 2
+        $t.Rows[0].Year | Should -Be 2026
+        $t.Rows[0].Months[2] | Should -Be 15
+        $t.Rows[0].Total | Should -Be 20
+        $t.Rows[0].ChangePct | Should -Be 100
+        [double]::IsNaN($t.Rows[1].ChangePct) | Should -BeTrue
+        $t.Max | Should -Be 15
+        $t.Total | Should -Be 30
+        @((Get-DividendIncomeTable -Items @()).Rows).Count | Should -Be 0
+    }
+}
+
+Describe "Trading212 import (v5.5)" {
+    BeforeAll {
+        $f = Join-Path $PSScriptRoot "testdata/trading212-history-sample.csv"
+        $script:T212 = if (Test-Path $f) { ConvertFrom-CsvText ([IO.File]::ReadAllText($f)) } else { $null }
+    }
+    It "detects every Trading212 column" {
+        if ($null -eq $script:T212) { Set-ItResult -Skipped -Because "testdata not next to the tests"; return }
+        $m = Get-CsvColumnGuess -Headers $script:T212.Headers
+        $m.Type | Should -Be 0; $m.Date | Should -Be 1; $m.Ident | Should -Be 2; $m.Name | Should -Be 4
+        $m.Shares | Should -Be 7; $m.Price | Should -Be 8; $m.Currency | Should -Be 9; $m.Rate | Should -Be 10
+        $m.Amount | Should -Be 13; $m.AmountCurrency | Should -Be 14; $m.Tax | Should -Be 15; $m.TaxCurrency | Should -Be 16
+        @($m.FeeExtra) -join "," | Should -Be "17"
+    }
+    It "reads buys, sells, dividends and cash rows" {
+        if ($null -eq $script:T212) { Set-ItResult -Skipped -Because "testdata not next to the tests"; return }
+        $b = @(ConvertFrom-BrokerRows -Rows $script:T212.Rows -Map (Get-CsvColumnGuess -Headers $script:T212.Headers) -DefaultCurrency "EUR")
+        $b.Count | Should -Be 8
+        # deposit -> cash account
+        $b[0].Cash | Should -BeTrue; $b[0].Type | Should -Be "Einzahlung"; $b[0].Amount | Should -Be 1000; $b[0].Currency | Should -Be "EUR"
+        # fractional buy in USD, conversion fee from EUR into USD with the row's rate
+        $b[1].Type | Should -Be "Kauf"; $b[1].Shares | Should -Be 0.5123456; $b[1].Price | Should -Be 180.2; $b[1].Currency | Should -Be "USD"
+        [math]::Round($b[1].Fee, 4) | Should -Be ([math]::Round(0.13 * 1.0835, 4))
+        $b[1].Ok | Should -BeTrue
+        # EUR buy without fee
+        $b[2].Currency | Should -Be "EUR"; $b[2].Fee | Should -Be 0
+        # dividend: gross in USD from shares x per share, withholding tax as fee
+        $b[3].Type | Should -Be "Dividende"; $b[3].Currency | Should -Be "USD"
+        [math]::Round($b[3].Price, 5) | Should -Be ([math]::Round(0.5123456 * 0.24, 5)); $b[3].Fee | Should -Be 0.02
+        # interest -> cash, currency conversion skipped, sell, withdrawal negative
+        $b[4].Type | Should -Be "Zinsen"; $b[4].Amount | Should -Be 0.45
+        $b[5].Ok | Should -BeFalse
+        $b[6].Type | Should -Be "Verkauf"; $b[6].Shares | Should -Be 0.2; [math]::Round($b[6].Fee, 3) | Should -Be 0.054
+        $b[7].Type | Should -Be "Auszahlung"; $b[7].Amount | Should -Be -200
+    }
+    It "does not guess a fee currency when the numbers do not agree" {
+        $map = @{ Date = 0; Type = 1; Ident = 2; Shares = 3; Price = 4; Amount = 5; Fee = -1; Tax = -1; Currency = 6; Name = -1; AmountCurrency = 7; TaxCurrency = -1; Rate = 8; FeeExtra = @(9) }
+        $b = @(ConvertFrom-BrokerRows -Rows @(, @("2024-01-02", "Market buy", "TSTA", "1", "100", "50", "USD", "EUR", "1.1", "0.5")) -Map $map)
+        $b[0].Fee | Should -Be 0
+        $b[0].Note | Should -Match "nicht umgerechnet"
+        $b[0].Ok | Should -BeTrue
     }
 }
 
