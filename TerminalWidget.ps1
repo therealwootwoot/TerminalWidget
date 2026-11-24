@@ -2160,6 +2160,8 @@ $script:ActiveCompare = @()
 $script:CompareSig    = ""
 $script:ActiveCompareMore = @{}
 $script:CompareMoreSig = ""
+$script:ChartRenderErrors = 0
+$script:LastRenderError = ""
 
 function Get-CompareAligned {
     # v5.0: closes of a comparison chart aligned to the active bars, or $null
@@ -3275,11 +3277,12 @@ function Render-ChartAndRsi {
                     $ty0 = [math]::Max($priceRect.Top + (S 8), [math]::Min($priceRect.Bottom - (S 8), $ty0))
                     $isBuy = ([string]$tx.Type -eq "Kauf")
                     $sz = S 6
-                    $tri = if ($isBuy) {
-                        [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF([float]$tx0, [float]($ty0 + 2))), (New-Object System.Drawing.PointF([float]($tx0 + $sz), [float]($ty0 + 2 + $sz * 1.4))), (New-Object System.Drawing.PointF([float]($tx0 - $sz), [float]($ty0 + 2 + $sz * 1.4))))
-                    } else {
-                        [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF([float]$tx0, [float]($ty0 - 2))), (New-Object System.Drawing.PointF([float]($tx0 + $sz), [float]($ty0 - 2 - $sz * 1.4))), (New-Object System.Drawing.PointF([float]($tx0 - $sz), [float]($ty0 - 2 - $sz * 1.4))))
-                    }
+                    # (assigned inside the branches: an if-expression would unroll the PointF[] into object[])
+                    $dir = if ($isBuy) { 1.0 } else { -1.0 }
+                    $tri = New-Object System.Drawing.PointF[] 3
+                    $tri[0] = New-Object System.Drawing.PointF([float]$tx0, [float]($ty0 + 2 * $dir))
+                    $tri[1] = New-Object System.Drawing.PointF([float]($tx0 + $sz), [float]($ty0 + (2 + $sz * 1.4) * $dir))
+                    $tri[2] = New-Object System.Drawing.PointF([float]($tx0 - $sz), [float]($ty0 + (2 + $sz * 1.4) * $dir))
                     $g.FillPolygon($(if ($isBuy) { $buyBr } else { $sellBr }), $tri)
                     $g.DrawPolygon($outPen, $tri)
                     $tTip = "{0} {1}: {2:N4} Stk @ {3:N2} {4}{5}" -f $(if ($isBuy) { "Kauf" } else { "Verkauf" }), (Format-IsoDateDe ([string]$tx.Date)), [double]$tx.Shares, [double]$tx.Price, [string]$tx.Currency, $(if ($tx.Note) { " - " + [string]$tx.Note } else { "" })
@@ -3832,6 +3835,8 @@ function Paint-ChartCanvas {
             $layout = $script:LastChartLayout
         } catch {
             Write-WidgetLog "Chart render failed: $($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)" "ERROR"
+            $script:ChartRenderErrors++   # v5.0: the smoke test fails on these
+            $script:LastRenderError = "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"
         } finally {
             $bg.Dispose()
         }
@@ -14652,7 +14657,9 @@ function Invoke-SmokeStep {
     $script:SmokeCloser.Start()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $ok = $true; $err = ""
+    $rendErr0 = [int]$script:ChartRenderErrors
     try { & $Action } catch { $ok = $false; $err = "{0} @ line {1}" -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber }
+    if ([int]$script:ChartRenderErrors -gt $rendErr0 -and -not $err) { $ok = $false; $err = "chart render failed: " + [string]$script:LastRenderError }
     $script:SmokeCloser.Stop()
     foreach ($f in @(Get-SmokeErrors -Step $Name)) { $ok = $false; $script:SmokeFailures.Add($f) }
     if ($err) { $script:SmokeFailures.Add("$Name : $err") }
@@ -14823,7 +14830,13 @@ function Invoke-SmokeTest {
     Invoke-SmokeStep "Chart types + trades" {
         Set-ActiveTab -TabName "Chart"; Set-Timeframe -Tf "1d"; & $pump
         [void](Invoke-Transaction -Type "Kauf" -Ticker "NVDA" -Shares 1 -Price 100 -Fee 0 -Currency "USD" -Date (Get-Date).ToString("yyyy-MM-dd") -Note "smoke")
-        foreach ($ct in @("HA", "Candle", "Line")) { $script:Config.ChartType = $ct; Update-AllUiViews; $pnlChartCanvas.Refresh(); & $pump }
+        foreach ($ct in @("HA", "Candle", "Line")) {
+            $script:Config.ChartType = $ct; $script:LastChartLayout = $null
+            Update-AllUiViews; $script:ChartSignature = ""; Update-ChartCacheSignature; $pnlChartCanvas.Refresh(); & $pump
+            if ($null -eq $script:LastChartLayout -and @($script:ActiveSeries).Count -ge 2) { throw "chart did not render as $ct (see widget.log)" }
+        }
+        $tradeTips = @($script:LastChartLayout.Legends | Where-Object { [string]$_.Tip -like "Kauf*" })
+        if (@($script:ActiveSeries).Count -ge 2 -and $tradeTips.Count -eq 0) { throw "today's buy is not drawn as a marker" }
         & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs([System.Windows.Forms.Keys]::K)); & $pump
         if ([string]$script:Config.ChartType -ne "Candle") { throw "K did not cycle the chart type ($($script:Config.ChartType))" }
         $script:Config.ChartType = "Line"; Update-AllUiViews
@@ -14855,6 +14868,7 @@ function Invoke-SmokeTest {
         Set-DrawMode "F"; & $click ($pr.Left + 60) ($pr.Bottom - 20); & $click ($pr.Left + 200) ($pr.Top + 20)
         if ($script:Drawings[$u].Count -ne ($n0 + 3)) { throw "expected 3 new drawings, got $($script:Drawings[$u].Count - $n0)" }
         $pnlChartCanvas.Refresh(); & $pump
+        $L = Get-CanvasLayout -Canvas $pnlChartCanvas
         $hit = Find-DrawingAt -L $L -X ($pr.Left + 10) -Y ($pr.Top + [int]($pr.Height / 3) + [int]$L.OffsetY)
         if ($null -eq $hit -or $hit.Kind -ne "H") { throw "right-click hit test did not find the horizontal line" }
         $na = $script:Alerts.Count
