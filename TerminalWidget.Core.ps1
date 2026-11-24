@@ -3979,9 +3979,12 @@ function Get-DueSavingsDates {
     $after = if ($Plan.LastBooked) { [DateTime]::ParseExact([string]$Plan.LastBooked, "yyyy-MM-dd", $inv) } else { $start.AddDays(-1) }
     $today = [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv)
     $m = New-Object DateTime($start.Year, $start.Month, 1)
+    # v5.5: pause months (e.g. "7,8" or "Jul, Aug") are skipped, not caught up later
+    $pause = @()
+    if ($null -ne $Plan.PSObject.Properties["Pause"]) { $pause = @(ConvertTo-PauseMonths ([string]$Plan.Pause)) }
     while ($m -le $today -and $out.Count -lt 24) {
         $d = New-Object DateTime($m.Year, $m.Month, $day)
-        if ($d -ge $start -and $d -gt $after -and $d -le $today) { $out.Add($d.ToString("yyyy-MM-dd", $inv)) }
+        if ($d -ge $start -and $d -gt $after -and $d -le $today -and $pause -notcontains $d.Month) { $out.Add($d.ToString("yyyy-MM-dd", $inv)) }
         $m = $m.AddMonths(1)
     }
     return @($out)
@@ -5026,4 +5029,84 @@ function Format-SignalCell {
     $t = if ($s -gt 0) { "+$s" } else { "$s" }
     $tip = "{0} ({1} positiv, {2} negativ) - Stand {3}" -f [string]$Entry.Summary, [int]$Entry.Positive, [int]$Entry.Negative, [string]$Entry.Day
     return [PSCustomObject]@{ Text = $t; Sign = [math]::Sign($s); Tip = $tip }
+}
+
+
+# ---- v5.5: savings plans - yearly increase, pause months ----
+function ConvertTo-PauseMonths {
+    # "7, 8" / "Jul Aug" / "juli,dez" -> @(7, 8) / @(7, 12); unknown parts are ignored
+    param([string]$Text)
+    $names = @{ "jan" = 1; "feb" = 2; "mar" = 3; "mrz" = 3; "apr" = 4; "mai" = 5; "may" = 5; "jun" = 6; "jul" = 7; "aug" = 8; "sep" = 9; "okt" = 10; "oct" = 10; "nov" = 11; "dez" = 12; "dec" = 12 }
+    $out = New-Object System.Collections.Generic.List[int]
+    foreach ($part in (([string]$Text) -split '[\s,;/]+')) {
+        $t = (ConvertTo-SearchKey $part).Trim('.')
+        if (-not $t) { continue }
+        $n = 0
+        if ([int]::TryParse($t, [ref]$n)) { if ($n -ge 1 -and $n -le 12 -and -not $out.Contains($n)) { $out.Add($n) }; continue }
+        if ($t.Length -ge 3 -and $names.ContainsKey($t.Substring(0, 3)) -and -not $out.Contains($names[$t.Substring(0, 3)])) { $out.Add($names[$t.Substring(0, 3)]) }
+    }
+    return @($out | Sort-Object)
+}
+
+function Format-PauseMonths {
+    param([int[]]$Months)
+    $n = @("", "Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez")
+    return (@(@($Months) | Where-Object { $_ -ge 1 -and $_ -le 12 } | Sort-Object -Unique | ForEach-Object { $n[$_] }) -join ", ")
+}
+
+function Get-SavingsPlanAmount {
+    # amount for one booking date: + Increase % for every full year since Start
+    param($Plan, [string]$Date)
+    $amt = [double]$Plan.Amount
+    $inc = if ($null -ne $Plan.PSObject.Properties["Increase"]) { [double]$Plan.Increase } else { 0.0 }
+    if ($inc -eq 0 -or -not $Plan.Start -or -not $Date) { return $amt }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $st = [DateTime]::ParseExact([string]$Plan.Start, "yyyy-MM-dd", $inv)
+    $d = [DateTime]::ParseExact($Date, "yyyy-MM-dd", $inv)
+    $years = $d.Year - $st.Year
+    if ($d.Month -lt $st.Month -or ($d.Month -eq $st.Month -and $d.Day -lt $st.Day)) { $years-- }
+    if ($years -le 0) { return $amt }
+    return [math]::Round($amt * [math]::Pow(1 + $inc / 100.0, $years), 2)
+}
+
+function Get-GroupScenarioImpact {
+    # v5.5: what-if for one sector or one currency: positions of that group
+    # move by Pct, the rest stays. Same shape as Get-ScenarioImpact
+    # (Beta = 1 for the group, 0 otherwise).
+    param([array]$Positions, [string]$Group, [double]$Pct)
+    $rows = @()
+    $tot = 0.0; $val = 0.0
+    foreach ($p in @($Positions)) {
+        if ($null -eq $p) { continue }
+        $hit = ([string]$p.Group -eq $Group)
+        $chg = if ($hit) { [double]$p.Value * $Pct / 100.0 } else { 0.0 }
+        $rows += [PSCustomObject]@{ Sym = [string]$p.Sym; Value = [double]$p.Value; Beta = $(if ($hit) { 1.0 } else { 0.0 }); BetaAssumed = $false; Change = $chg; Group = [string]$p.Group }
+        $tot += $chg; $val += [double]$p.Value
+    }
+    return [PSCustomObject]@{ Rows = @($rows | Sort-Object -Property @{ Expression = { [double]$_.Change }; Descending = $false }, @{ Expression = { [double]$_.Value }; Descending = $true }); Change = $tot; Value = $val; Pct = $(if ($val -gt 0) { $tot / $val * 100.0 } else { 0.0 }) }
+}
+
+function Get-DividendIncomeTable {
+    # v5.5: received dividends (Items: @{ Date yyyy-MM-dd; Amount } in the base
+    # currency) -> one row per year (newest first) with 12 months, total and
+    # change to the year before; Max = largest month (for the colour scale)
+    param($Items)
+    $years = @{}
+    foreach ($it in @($Items)) {
+        if ($null -eq $it -or -not $it.Date -or [string]$it.Date -notmatch '^(\d{4})-(\d{2})') { continue }
+        $y = [int]$Matches[1]; $m = [int]$Matches[2]
+        if ($m -lt 1 -or $m -gt 12) { continue }
+        if (-not $years.ContainsKey($y)) { $years[$y] = New-Object double[] 12 }
+        $years[$y][$m - 1] += [double]$it.Amount
+    }
+    $rows = @(); $max = 0.0
+    foreach ($y in @($years.Keys | Sort-Object -Descending)) {
+        $ms = $years[$y]
+        $tot = ($ms | Measure-Object -Sum).Sum
+        foreach ($v in $ms) { if ($v -gt $max) { $max = $v } }
+        $prev = if ($years.ContainsKey($y - 1)) { ($years[$y - 1] | Measure-Object -Sum).Sum } else { [double]::NaN }
+        $chg = if (-not [double]::IsNaN($prev) -and $prev -gt 0) { ($tot / $prev - 1) * 100 } else { [double]::NaN }
+        $rows += [PSCustomObject]@{ Year = $y; Months = [double[]]$ms; Total = [double]$tot; ChangePct = $chg; MonthlyAvg = [double]$tot / 12.0 }
+    }
+    return [PSCustomObject]@{ Rows = $rows; Max = $max; Total = [double](@($rows | ForEach-Object { $_.Total }) | Measure-Object -Sum).Sum }
 }

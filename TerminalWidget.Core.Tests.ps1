@@ -2372,6 +2372,49 @@ Describe "Chart and signal cache (v5.5)" {
     }
 }
 
+Describe "Depot extras (v5.5)" {
+    It "reads pause months in numbers and names" {
+        (ConvertTo-PauseMonths "7, 8") -join "," | Should -Be "7,8"
+        (ConvertTo-PauseMonths "Jul; Aug / dez 13 x") -join "," | Should -Be "7,8,12"
+        (ConvertTo-PauseMonths "März") -join "," | Should -Be "3"
+        @(ConvertTo-PauseMonths "").Count | Should -Be 0
+        Format-PauseMonths @(12, 7, 7) | Should -Be "Jul, Dez"
+    }
+    It "skips pause months when booking a savings plan" {
+        $pl = [PSCustomObject]@{ Day = 1; Start = "2026-05-01"; LastBooked = ""; Pause = "Jul, Aug" }
+        (Get-DueSavingsDates -Plan $pl -Today "2026-10-15") -join "," | Should -Be "2026-05-01,2026-06-01,2026-09-01,2026-10-01"
+        $old = [PSCustomObject]@{ Day = 1; Start = "2026-05-01"; LastBooked = "" }
+        @(Get-DueSavingsDates -Plan $old -Today "2026-10-15").Count | Should -Be 6
+    }
+    It "raises the savings plan amount every full year" {
+        $pl = [PSCustomObject]@{ Amount = 100; Increase = 5; Start = "2024-03-01" }
+        Get-SavingsPlanAmount -Plan $pl -Date "2025-02-28" | Should -Be 100
+        Get-SavingsPlanAmount -Plan $pl -Date "2025-03-01" | Should -Be 105
+        Get-SavingsPlanAmount -Plan $pl -Date "2026-03-01" | Should -Be 110.25
+        Get-SavingsPlanAmount -Plan ([PSCustomObject]@{ Amount = 50; Start = "2020-01-01" }) -Date "2026-01-01" | Should -Be 50
+    }
+    It "moves only the chosen sector or currency in a scenario" {
+        $pos = @([PSCustomObject]@{ Sym = "NVDA"; Value = 1000; Group = "USD" }, [PSCustomObject]@{ Sym = "SAP.DE"; Value = 1000; Group = "EUR" })
+        $sc = Get-GroupScenarioImpact -Positions $pos -Group "USD" -Pct -10
+        $sc.Change | Should -Be -100
+        $sc.Pct | Should -Be -5
+        @($sc.Rows | Where-Object { $_.Sym -eq "SAP.DE" })[0].Change | Should -Be 0
+        @($sc.Rows | Where-Object { $_.Sym -eq "NVDA" })[0].Beta | Should -Be 1
+    }
+    It "builds the dividend calendar per year and month" {
+        $t = Get-DividendIncomeTable -Items @(@{ Date = "2025-03-10"; Amount = 10 }, @{ Date = "2026-03-02"; Amount = 12 }, @{ Date = "2026-03-20"; Amount = 3 }, @{ Date = "2026-11-01"; Amount = 5 }, @{ Date = "kaputt"; Amount = 99 })
+        @($t.Rows).Count | Should -Be 2
+        $t.Rows[0].Year | Should -Be 2026
+        $t.Rows[0].Months[2] | Should -Be 15
+        $t.Rows[0].Total | Should -Be 20
+        $t.Rows[0].ChangePct | Should -Be 100
+        [double]::IsNaN($t.Rows[1].ChangePct) | Should -BeTrue
+        $t.Max | Should -Be 15
+        $t.Total | Should -Be 30
+        @((Get-DividendIncomeTable -Items @()).Rows).Count | Should -Be 0
+    }
+}
+
 Describe "Release files (v4.8)" {
     It "has version.json matching the widget version" {
         $ui = Join-Path $PSScriptRoot "TerminalWidget.ps1"

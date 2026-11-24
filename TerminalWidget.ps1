@@ -863,6 +863,7 @@ function Read-SavingsPlans {
             Id = [string]$p.Id; Ticker = ([string]$p.Ticker).ToUpper(); Amount = [double]$p.Amount; Fee = [double]$p.Fee
             Currency = ([string]$p.Currency).ToUpper(); Day = [int]$p.Day; Start = [string]$p.Start; LastBooked = [string]$p.LastBooked
             Active = $(if ($null -eq $p.Active) { $true } else { [bool]$p.Active })
+            Increase = [double]$p.Increase; Pause = [string]$p.Pause   # v5.5
         })
     }
     $script:SavingsPlans = $list
@@ -10670,19 +10671,92 @@ function Update-AnalysisScenario {
     $mkt = [double]$ac.SNum.Value
     $pos = @()
     $src = @{}
+    # v5.5: market (beta) or one sector / one currency
+    $kind = [string]$ac.SKind.SelectedItem
+    $grpKind = if ($kind -like "Sektor:*" -or $kind -like "Sector:*") { "Sector" } elseif ($kind -like "Währung:*" -or $kind -like "Currency:*") { "Currency" } else { "" }
+    $grpName = if ($grpKind) { $kind.Substring($kind.IndexOf(":") + 1).Trim() } else { "" }
     foreach ($r in @($ac.Model.Rows | Where-Object { $_.Shares -gt 0 -and $_.Value -gt 0 })) {
-        $b = Get-PositionBeta -Sym $r.Ticker
-        $pos += [PSCustomObject]@{ Sym = $r.Ticker; Value = [double]$r.Value; Beta = [double]$b.Beta }
-        $src[$r.Ticker] = $b.Source
+        if ($grpKind) {
+            $prof = Get-EffectiveProfile $script:Profiles[$r.Ticker]
+            $grp = if ($grpKind -eq "Sector") { [string]$prof.Sector } else { [string](Get-InstrumentCurrency $r.Ticker) }
+            $pos += [PSCustomObject]@{ Sym = $r.Ticker; Value = [double]$r.Value; Group = $grp }
+            $src[$r.Ticker] = $grp
+        } else {
+            $b = Get-PositionBeta -Sym $r.Ticker
+            $pos += [PSCustomObject]@{ Sym = $r.Ticker; Value = [double]$r.Value; Beta = [double]$b.Beta }
+            $src[$r.Ticker] = $b.Source
+        }
     }
-    $sc = Get-ScenarioImpact -Positions $pos -MarketPct $mkt
+    $g.Columns["Beta"].HeaderText = if ($grpKind) { Tr "Betroffen" } else { "Beta" }
+    $g.Columns["Src"].HeaderText = if ($grpKind -eq "Sector") { Tr "Sektor" } elseif ($grpKind) { Tr "Währung" } else { Tr "Beta aus" }
+    $sc = if ($grpKind) { Get-GroupScenarioImpact -Positions $pos -Group $grpName -Pct $mkt } else { Get-ScenarioImpact -Positions $pos -MarketPct $mkt }
     foreach ($r in $sc.Rows) {
         $i = $g.Rows.Add($r.Sym, $(if ($priv) { (Protect-Amount "0" $true) } else { "{0:N2}" -f $r.Value }), ("{0:N2}" -f $r.Beta), $(if ($r.BetaAssumed) { Tr "angenommen 1,0" } else { $src[$r.Sym] }), $(if ($priv) { (Protect-Amount "0" $true) } else { Format-Signed $r.Change }), ("{0:+0.0;-0.0}%" -f ($r.Beta * $mkt)))
         $g.Rows[$i].Cells["Chg"].Style.ForeColor = Get-SignColor ([double]$r.Change)
-        if ($r.BetaAssumed) { $g.Rows[$i].Cells["Src"].Style.ForeColor = $script:Pal.Muted }
+        if ($r.BetaAssumed -or ($grpKind -and [double]$r.Beta -eq 0)) { $g.Rows[$i].Cells["Src"].Style.ForeColor = $script:Pal.Muted }
     }
     $ac.SRes.ForeColor = Get-SignColor ([double]$sc.Change)
-    $ac.SRes.Text = "{0} {1} {2} ({3:+0.0;-0.0}%)  -  {4}" -f (Tr "Depot ca."), $(if ($priv) { (Protect-Amount "0" $true) } else { Format-Signed $sc.Change }), [string]$ac.Model.Base, $sc.Pct, (Tr "grobe Schätzung über das Beta, ohne Cash")
+    $why = if ($grpKind -eq "Sector") { Tr "nur Positionen dieses Sektors, ohne Cash" } elseif ($grpKind) { Tr "nur Positionen in dieser Währung (Kursänderung in der Basiswährung), ohne Cash" } else { Tr "grobe Schätzung über das Beta, ohne Cash" }
+    $ac.SRes.Text = "{0} {1} {2} ({3:+0.0;-0.0}%)  -  {4}" -f (Tr "Depot ca."), $(if ($priv) { (Protect-Amount "0" $true) } else { Format-Signed $sc.Change }), [string]$ac.Model.Base, $sc.Pct, $why
+}
+
+function Update-AnalysisIncome {
+    # v5.5: received dividends per month and year (calendar)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.IGrid) { return }
+    $base = Get-AnalysisBase
+    $priv = [bool]$script:Config.PrivacyMode
+    $items = @(foreach ($t in $script:Transactions) {
+        if ([string]$t.Type -ne "Dividende") { continue }
+        [PSCustomObject]@{ Date = [string]$t.Date; Amount = (Convert-CurrencyValue -Amount ([double]$t.Realized) -FromCurrency ([string]$t.Currency) -ToCurrency $base) }
+    })
+    $tab = Get-DividendIncomeTable -Items $items
+    $g = $ac.IGrid
+    $g.Rows.Clear()
+    $acc = $script:Pal.Accent; $card = $script:Pal.Card
+    foreach ($r in $tab.Rows) {
+        $vals = @([string]$r.Year)
+        foreach ($v in $r.Months) { $vals += $(if ($v -eq 0) { "" } elseif ($priv) { [string][char]0x2022 * 3 } else { "{0:N0}" -f $v }) }
+        $vals += $(if ($priv) { [string][char]0x2022 * 3 } else { "{0:N2}" -f $r.Total })
+        $vals += $(if ([double]::IsNaN($r.ChangePct)) { "" } else { "{0:+0;-0}%" -f $r.ChangePct })
+        $i = $g.Rows.Add($vals)
+        for ($mi = 0; $mi -lt 12; $mi++) {
+            $v = [double]$r.Months[$mi]
+            if ($v -le 0 -or $tab.Max -le 0) { continue }
+            # colour scale: stronger accent = more income in that month
+            $a = [math]::Min(1.0, [math]::Sqrt($v / $tab.Max))
+            $mix = { param($x, $y) [int]($x + ($y - $x) * (0.15 + 0.6 * $a)) }
+            $g.Rows[$i].Cells[$mi + 1].Style.BackColor = [System.Drawing.Color]::FromArgb((& $mix $card.R $acc.R), (& $mix $card.G $acc.G), (& $mix $card.B $acc.B))
+            $g.Rows[$i].Cells[$mi + 1].ToolTipText = "{0:N2} {1}" -f $v, $base
+        }
+        if (-not [double]::IsNaN($r.ChangePct)) { $g.Rows[$i].Cells["Chg"].Style.ForeColor = Get-SignColor ([double]$r.ChangePct) }
+    }
+    if ($tab.Rows.Count -eq 0) { $ac.ISum.Text = Tr "Noch keine Dividenden gebucht (Transaktion 'Dividende' oder Broker-CSV-Import)."; return }
+    $y0 = $tab.Rows[0]
+    $ac.ISum.Text = $(if ($priv) { "{0} {1}: {2}   {3}: {4}" -f (Tr "Dividenden"), $y0.Year, ([string][char]0x2022 * 3), (Tr "seit Beginn"), ([string][char]0x2022 * 3) } else {
+        "{0} {1}: {2:N2} {3} ({4:N2} {3} {5})   {6}: {7:N2} {3}" -f (Tr "Dividenden"), $y0.Year, $y0.Total, $base, $y0.MonthlyAvg, (Tr "pro Monat"), (Tr "seit Beginn"), $tab.Total })
+}
+
+function Update-ScenarioChoices {
+    # sectors and currencies of the current positions
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.SKind -or $null -eq $ac.Model) { return }
+    $cur = [string]$ac.SKind.SelectedItem
+    $sec = New-Object System.Collections.Generic.SortedSet[string]
+    $ccy = New-Object System.Collections.Generic.SortedSet[string]
+    foreach ($r in @($ac.Model.Rows | Where-Object { $_.Shares -gt 0 -and $_.Value -gt 0 })) {
+        $prof = Get-EffectiveProfile $script:Profiles[$r.Ticker]
+        if ([string]$prof.Sector) { [void]$sec.Add([string]$prof.Sector) }
+        $c0 = [string](Get-InstrumentCurrency $r.Ticker); if ($c0) { [void]$ccy.Add($c0) }
+    }
+    $ac.SKind.BeginUpdate()
+    $ac.SKind.Items.Clear()
+    [void]$ac.SKind.Items.Add((Tr "Markt (Beta)"))
+    foreach ($x in $sec) { [void]$ac.SKind.Items.Add(("{0}: {1}" -f (Tr "Sektor"), $x)) }
+    foreach ($x in $ccy) { if ($x -ne [string]$ac.Model.Base) { [void]$ac.SKind.Items.Add(("{0}: {1}" -f (Tr "Währung"), $x)) } }
+    $ac.SKind.EndUpdate()
+    $ix = $ac.SKind.Items.IndexOf($cur)
+    $ac.SKind.SelectedIndex = [math]::Max(0, $ix)
 }
 
 function Update-AnalysisBench {
@@ -10824,6 +10898,7 @@ function Show-AnalysisPage {
     foreach ($k in $ac.Pages.Keys) { $ac.Pages[$k].Visible = ($k -eq $Page) }
     if ($Page -eq "Heat") { Update-AnalysisHeat }
     if ($Page -eq "Bench") { Update-AnalysisBench }
+    if ($Page -eq "Income") { Update-AnalysisIncome }
     foreach ($k in $ac.PageButtons.Keys) {
         $bt = $ac.PageButtons[$k]
         if ($k -eq $Page) { Style-FlatButton -Btn $bt -BgColor $script:Pal.Accent -FgColor $script:Pal.HeaderBg -BorderColor $script:Pal.Accent }
@@ -10870,6 +10945,9 @@ function Show-AnalysisDialog {
     # v5.1
     $pageBtns["Contrib"] = & $mkBtn "Beitrag" (S 686) (S 10) (S 76) $dlg
     $pageBtns["Bench"]   = & $mkBtn "Vergleich" (S 766) (S 10) (S 86) $dlg
+    # v5.5
+    $pageBtns["Income"]  = & $mkBtn "Einkommen" (S 856) (S 10) (S 92) $dlg
+    Set-DynTip $pageBtns["Income"] "Erhaltene Dividenden je Monat und Jahr (aus den Buchungen), als Kalender"
     Set-DynTip $pageBtns["Contrib"] "Was jede Position zum Ergebnis beigetragen hat, Dividenden-Prognose und Szenario 'Markt -20 %'"
     Set-DynTip $pageBtns["Bench"] "Depot gegen mehrere Indizes, rollierende 12-Monats-Rendite und Sektoren gegen den MSCI World"
     Set-DynTip $pageBtns["Risk"] "Volatilität, maximaler Rückgang, Sharpe, Beta und Korrelation der Positionen"
@@ -10908,7 +10986,7 @@ function Show-AnalysisDialog {
     $dlg.Controls.Add($lblStatus)
 
     $pages = [ordered]@{}
-    foreach ($k in @("Perf", "Ret", "Alloc", "Div", "Risk", "Target", "Heat", "Contrib", "Bench")) {
+    foreach ($k in @("Perf", "Ret", "Alloc", "Div", "Risk", "Target", "Heat", "Contrib", "Bench", "Income")) {
         $pn = New-Object System.Windows.Forms.Panel
         $pn.SetBounds((S 12), (S 64), (S 976), (S 564))
         $pn.Anchor = $aAll
@@ -11312,19 +11390,28 @@ function Show-AnalysisDialog {
     $lblCDiv.SetBounds(0, (S 328), (S 976), (S 20)); $lblCDiv.Anchor = $aT -bor $aL -bor $aR; $lblCDiv.Font = $fontUiBold; $lblCDiv.AutoEllipsis = $true
     $pcn.Controls.Add($lblCDiv)
     $lblScn = New-Object System.Windows.Forms.Label
-    $lblScn.SetBounds(0, (S 358), (S 116), (S 20)); $lblScn.Text = "Szenario: Markt"
+    $lblScn.SetBounds(0, (S 358), (S 62), (S 20)); $lblScn.Text = "Szenario:"
     $pcn.Controls.Add($lblScn)
+    # v5.5: market, one sector or one currency
+    $cbScn = New-Object System.Windows.Forms.ComboBox
+    $cbScn.SetBounds((S 64), (S 355), (S 180), (S 24)); $cbScn.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbScn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbScn.BackColor = $p.Input; $cbScn.ForeColor = $p.Text
+    [void]$cbScn.Items.Add((Tr "Markt (Beta)")); $cbScn.SelectedIndex = 0
+    $pcn.Controls.Add($cbScn)
+    Set-DynTip $cbScn "Markt: jede Position bewegt sich um Beta x Wert. Sektor / Währung: nur diese Positionen bewegen sich um den Wert (z. B. 'USD -10 %' = Dollar verliert 10 % zur Basiswährung)."
+    $cbScn.Add_DropDown({ Update-ScenarioChoices })
+    $cbScn.Add_SelectionChangeCommitted({ Update-AnalysisScenario })
     $nScn = New-Object System.Windows.Forms.NumericUpDown
-    $nScn.SetBounds((S 118), (S 355), (S 64), (S 24)); $nScn.Minimum = -60; $nScn.Maximum = 60; $nScn.Increment = 5
+    $nScn.SetBounds((S 250), (S 355), (S 64), (S 24)); $nScn.Minimum = -60; $nScn.Maximum = 60; $nScn.Increment = 5
     $nScn.Value = [decimal][math]::Max(-60, [math]::Min(60, [int]$script:Config.ScenarioPct))
     $nScn.BackColor = $p.Input; $nScn.ForeColor = $p.Text; $nScn.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $pcn.Controls.Add($nScn)
     Set-DynTip $nScn "Wie stark sich der Markt (die Benchmark) bewegt. Jede Position bewegt sich um Beta x diesen Wert." "BETA"
     $lblScnPct = New-Object System.Windows.Forms.Label
-    $lblScnPct.SetBounds((S 186), (S 358), (S 24), (S 20)); $lblScnPct.Text = "%"
+    $lblScnPct.SetBounds((S 318), (S 358), (S 24), (S 20)); $lblScnPct.Text = "%"
     $pcn.Controls.Add($lblScnPct)
     $lblSRes = New-Object System.Windows.Forms.Label
-    $lblSRes.SetBounds((S 214), (S 358), (S 760), (S 20)); $lblSRes.Anchor = $aT -bor $aL -bor $aR; $lblSRes.Font = $fontUiBold; $lblSRes.AutoEllipsis = $true
+    $lblSRes.SetBounds((S 346), (S 358), (S 628), (S 20)); $lblSRes.Anchor = $aT -bor $aL -bor $aR; $lblSRes.Font = $fontUiBold; $lblSRes.AutoEllipsis = $true
     $pcn.Controls.Add($lblSRes)
     $gS = New-Object System.Windows.Forms.DataGridView
     $gS.SetBounds(0, (S 384), (S 976), (S 178)); $gS.Anchor = $aAll
@@ -11336,7 +11423,28 @@ function Show-AnalysisDialog {
     $gS.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $pcn.Controls.Add($gS)
     $nScn.Add_ValueChanged({ param($sender, $e) $script:Config.ScenarioPct = [int]$sender.Value; Update-AnalysisScenario })
-    $script:AnaCtl.CGrid = $gC; $script:AnaCtl.CInfo = $lblCInfo; $script:AnaCtl.CDiv = $lblCDiv; $script:AnaCtl.SGrid = $gS; $script:AnaCtl.SNum = $nScn; $script:AnaCtl.SRes = $lblSRes
+    # --- v5.5: Einkommen (received dividends as a calendar) ---
+    $pin = $pages["Income"]
+    $lblInc = New-Object System.Windows.Forms.Label
+    $lblInc.SetBounds(0, 0, (S 976), (S 40)); $lblInc.Anchor = $aT -bor $aL -bor $aR; $lblInc.Font = $fontMono
+    $pin.Controls.Add($lblInc)
+    $gI = New-Object System.Windows.Forms.DataGridView
+    $gI.SetBounds(0, (S 44), (S 976), (S 470)); $gI.Anchor = $aAll
+    Style-DataGrid -Grid $gI
+    $mn = @("Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez")
+    $ci = $gI.Columns.Add("Year", "Jahr"); $gI.Columns[$ci].FillWeight = [float](S 56)
+    for ($mi = 0; $mi -lt 12; $mi++) { $ci = $gI.Columns.Add(("M{0}" -f ($mi + 1)), $mn[$mi]); $gI.Columns[$ci].FillWeight = [float](S 60); $gI.Columns[$ci].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
+    $ci = $gI.Columns.Add("Sum", "Summe Dividende"); $gI.Columns[$ci].FillWeight = [float](S 92); $gI.Columns[$ci].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
+    $ci = $gI.Columns.Add("Chg", "zum Vorjahr"); $gI.Columns[$ci].FillWeight = [float](S 70); $gI.Columns[$ci].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
+    foreach ($col in $gI.Columns) { $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
+    $gI.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $pin.Controls.Add($gI)
+    $lblIncNote = New-Object System.Windows.Forms.Label
+    $lblIncNote.SetBounds(0, (S 520), (S 976), (S 36)); $lblIncNote.Anchor = $aB -bor $aL -bor $aR; $lblIncNote.ForeColor = $p.Muted
+    $lblIncNote.Text = "Aus den Dividenden-Buchungen dieses Depots (netto nach Gebühr / Quellensteuer, wie gebucht), umgerechnet mit heutigen Wechselkursen. Je kräftiger die Farbe, desto mehr kam in dem Monat."
+    $pin.Controls.Add($lblIncNote)
+    $script:AnaCtl.IGrid = $gI; $script:AnaCtl.ISum = $lblInc
+    $script:AnaCtl.CGrid = $gC; $script:AnaCtl.CInfo = $lblCInfo; $script:AnaCtl.CDiv = $lblCDiv; $script:AnaCtl.SGrid = $gS; $script:AnaCtl.SNum = $nScn; $script:AnaCtl.SRes = $lblSRes; $script:AnaCtl.SKind = $cbScn
 
     # --- v5.1: Vergleich ---
     $pbn = $pages["Bench"]
@@ -13600,24 +13708,29 @@ function Show-SavingsPlansDialog {
     $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.SetBounds((S 14), (S 10), (S 730), (S 36)); $lbl.Anchor = $aT -bor $aL -bor $aR; $lbl.ForeColor = $p.Muted
-    $lbl.Text = "Jeden Monat am Stichtag wird ein Kauf zum Schlusskurs dieses Tages gebucht (am Wochenende: letzter Handelstag davor). Verpasste Monate werden beim nächsten Start nachgebucht."
+    $lbl.Text = "Jeden Monat am Stichtag wird ein Kauf zum Schlusskurs dieses Tages gebucht (am Wochenende: letzter Handelstag davor). Verpasste Monate werden beim nächsten Start nachgebucht. Dynamik = Betrag steigt jedes volle Jahr um x %, Pause = diese Monate auslassen (z. B. 7, 8)."
     $dlg.Controls.Add($lbl)
     $g = New-Object System.Windows.Forms.DataGridView
     $g.SetBounds((S 14), (S 50), (S 730), (S 280)); $g.Anchor = $aT -bor $aB -bor $aL -bor $aR
     Style-DataGrid -Grid $g
     $g.ReadOnly = $false
-    foreach ($cn in @("Ticker", "Betrag", "Währung", "Gebühr", "Tag", "Start", "Zuletzt", "Aktiv")) {
+    foreach ($cn in @("Ticker", "Betrag", "Währung", "Gebühr", "Tag", "Start", "Dynamik %", "Pause", "Jetzt", "Zuletzt", "Aktiv")) {
         if ($cn -eq "Aktiv") { $col = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn; $col.Name = $cn; $col.HeaderText = $cn; [void]$g.Columns.Add($col) }
         else { [void]$g.Columns.Add($cn, $cn) }
     }
     $g.Columns["Zuletzt"].ReadOnly = $true
+    $g.Columns["Jetzt"].ReadOnly = $true
+    $g.Columns["Dynamik %"].ToolTipText = "Betrag steigt jedes volle Jahr ab Start um diesen Prozentsatz (0 = gleich bleibend)"
+    $g.Columns["Pause"].ToolTipText = "Monate ohne Kauf, z. B. 7, 8 oder Jul, Aug (werden nicht nachgebucht)"
+    $g.Columns["Jetzt"].ToolTipText = "Betrag des nächsten Kaufs mit Dynamik"
     $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $g.Columns["Ticker"].ToolTipText = "Yahoo-Symbol, z. B. EUNL.DE"
     $g.Columns["Tag"].ToolTipText = "Tag im Monat (1-28)"
     $g.Columns["Start"].ToolTipText = "Erster Monat, JJJJ-MM-TT"
     $dlg.Controls.Add($g)
     foreach ($pl in $script:SavingsPlans) {
-        $i = $g.Rows.Add($pl.Ticker, ("{0:0.00}" -f $pl.Amount), $pl.Currency, ("{0:0.00}" -f $pl.Fee), $pl.Day, $pl.Start, $pl.LastBooked, [bool]$pl.Active)
+        $nowAmt = Get-SavingsPlanAmount -Plan $pl -Date ((Get-Date).ToString("yyyy-MM-dd"))
+        $i = $g.Rows.Add($pl.Ticker, ("{0:0.00}" -f $pl.Amount), $pl.Currency, ("{0:0.00}" -f $pl.Fee), $pl.Day, $pl.Start, ("{0:0.##}" -f [double]$pl.Increase), (Format-PauseMonths (ConvertTo-PauseMonths ([string]$pl.Pause))), ("{0:N2}" -f $nowAmt), $pl.LastBooked, [bool]$pl.Active)
         $g.Rows[$i].Tag = $pl.Id
     }
     $mk = {
@@ -13640,7 +13753,7 @@ function Show-SavingsPlansDialog {
         $sym = ([string]$script:Config.ActiveTicker).ToUpper()
         $cur = if ($script:QuoteStore.ContainsKey($sym)) { [string]$script:QuoteStore[$sym].Currency } else { "EUR" }
         $nextM = (Get-Date).AddMonths(1)
-        $i = $g.Rows.Add($sym, "100.00", $cur, "0.00", 1, (New-Object DateTime($nextM.Year, $nextM.Month, 1)).ToString("yyyy-MM-dd"), "", $true)
+        $i = $g.Rows.Add($sym, "100.00", $cur, "0.00", 1, (New-Object DateTime($nextM.Year, $nextM.Month, 1)).ToString("yyyy-MM-dd"), "0", "", "", "", $true)
         $g.Rows[$i].Tag = [Guid]::NewGuid().ToString("N")
         $g.CurrentCell = $g.Rows[$i].Cells["Ticker"]
     })
@@ -13662,6 +13775,8 @@ function Show-SavingsPlansDialog {
                 Id = [string]$r.Tag; Ticker = $sym; Amount = (Parse-DecimalInput ([string]$r.Cells["Betrag"].Value)); Fee = (Parse-DecimalInput ([string]$r.Cells["Gebühr"].Value))
                 Currency = $cur; Day = [math]::Max(1, [math]::Min(28, [int](Parse-DecimalInput ([string]$r.Cells["Tag"].Value)))); Start = $st
                 LastBooked = [string]$r.Cells["Zuletzt"].Value; Active = [bool]$r.Cells["Aktiv"].Value
+                Increase = [math]::Max(-50, [math]::Min(100, (Parse-DecimalInput ([string]$r.Cells["Dynamik %"].Value))))
+                Pause = (Format-PauseMonths (ConvertTo-PauseMonths ([string]$r.Cells["Pause"].Value)))
             })
         }
         $script:SavingsPlans = $list
@@ -13711,9 +13826,10 @@ function Invoke-SavingsPlans {
                 # amount and fee in the plan currency, price in the instrument currency
                 $px = Convert-CurrencyValue -Amount $c.Close -FromCurrency ([string]$h.Currency) -ToCurrency ([string]$pl.Currency)
                 if ($px -le 0) { continue }
-                $sh = ([double]$pl.Amount - [double]$pl.Fee) / $px
+                $amt = Get-SavingsPlanAmount -Plan $pl -Date $d   # v5.5: yearly increase
+                $sh = ($amt - [double]$pl.Fee) / $px
                 if ($sh -le 0) { continue }
-                $err = Invoke-Transaction -Type "Kauf" -Ticker $pl.Ticker -Shares $sh -Price $px -Fee ([double]$pl.Fee) -Currency ([string]$pl.Currency) -Date $d -Note ("Sparplan {0:N2} {1}" -f [double]$pl.Amount, $pl.Currency)
+                $err = Invoke-Transaction -Type "Kauf" -Ticker $pl.Ticker -Shares $sh -Price $px -Fee ([double]$pl.Fee) -Currency ([string]$pl.Currency) -Date $d -Note ("Sparplan {0:N2} {1}" -f $amt, $pl.Currency)
                 if ($err) { Write-WidgetLog "Savings plan $($pl.Ticker) $d : $err" "WARN"; break }
                 $pl.LastBooked = $d
                 $booked++
@@ -17904,6 +18020,44 @@ function Invoke-SmokeTest {
         & $script:SmokeShot "16-fullscreen-toolbar" $script:FsForm
         Close-ChartFullscreen; & $pump
     }
+    # v5.5 D: sector / currency scenario, dividend calendar, savings plan dynamics
+    Invoke-SmokeStep "Scenario by sector / currency" {
+        & $probeRun { Show-AnalysisDialog -Page "Contrib" } {
+            $ac = $script:AnaCtl
+            if ($null -eq $ac -or $null -eq $ac.Model) { return "model not loaded" }
+            Update-ScenarioChoices
+            if ($ac.SKind.Items.Count -lt 2) { return "no sector / currency to choose ($($ac.SKind.Items.Count))" }
+            $ac.SKind.SelectedIndex = $ac.SKind.Items.Count - 1
+            Update-AnalysisScenario
+            if ([string]$ac.SGrid.Columns["Beta"].HeaderText -eq "Beta") { return "group scenario not applied" }
+            if (-not $ac.SRes.Text) { return "no scenario result" }
+            return ""
+        } 9000
+    } 11000
+    Invoke-SmokeStep "Dividend calendar" {
+        & $probeRun { Show-AnalysisDialog -Page "Income" } {
+            $ac = $script:AnaCtl
+            if ($null -eq $ac) { return "window not open" }
+            if ($ac.IGrid.Rows.Count -lt 1) { return "no year in the dividend calendar" }
+            & $script:SmokeShot "17-analyse-income" $ac.Dlg
+            return ""
+        } 3000
+    } 5000
+    Invoke-SmokeStep "Savings plan dynamics" {
+        $script:SavingsPlans.Add([PSCustomObject]@{ Id = "smk"; Ticker = "MSFT"; Amount = 100.0; Fee = 0.0; Currency = "USD"; Day = 1; Start = "2099-01-01"; LastBooked = ""; Active = $true; Increase = 5.0; Pause = "Jul, Aug" })
+        & $probeRun { Show-SavingsPlansDialog } {
+            $g = $script:PlanCtl.Grid
+            $r = @($g.Rows | Where-Object { [string]$_.Tag -eq "smk" })[0]
+            if ($null -eq $r -or [string]$r.Cells["Pause"].Value -ne "Jul, Aug") { return "pause months not shown" }
+            & $script:PlanCtl.Save
+            return ""
+        } 800
+        Read-SavingsPlans
+        $pl = @($script:SavingsPlans | Where-Object { $_.Id -eq "smk" })[0]
+        if ($null -eq $pl -or [double]$pl.Increase -ne 5 -or [string]$pl.Pause -ne "Jul, Aug") { throw "dynamics / pause not saved" }
+        $script:SavingsPlans.Remove($pl) | Out-Null; Save-SavingsPlans
+    } 2500
+
     Invoke-SmokeStep "Dialog places" {
         Show-CashDialog
         if ($null -eq $script:Config.DialogPlacement.PSObject.Properties["Cash"]) { throw "cash window place not saved" }
