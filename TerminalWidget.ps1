@@ -17114,8 +17114,11 @@ function Invoke-SmokeTest {
         if (@($sug | Where-Object { $_ -like "SET ZEBRA*" }).Count -eq 0) { throw "'zebra' finds no setting: $($sug -join ', ')" }
         $m = Invoke-MenuEntry "Stil: Fresh"; & $pump
         if ($m -or -not $script:UiSpec.Fresh) { throw "MENU Stil: Fresh failed ($m)" }
-        $m = Invoke-MenuEntry "Stil > Refined"; & $pump
-        if ($m -or $script:UiSpec.Fresh) { throw "MENU Stil > Refined (tray) failed ($m)" }
+        # (the English step before has translated the tray menu: "Stil" may read "Style")
+        $trayRef = @(Get-MenuPaletteEntries | Where-Object { $_.Where -eq "Tray" -and [string]$_.Search -like "* > Refined" })
+        if ($trayRef.Count -eq 0) { throw "tray menu has no style entry" }
+        $m = Invoke-MenuEntry ([string]$trayRef[0].Search); & $pump
+        if ($m -or $script:UiSpec.Fresh) { throw "MENU $($trayRef[0].Search) (tray) failed ($m)" }
     }
     Invoke-SmokeStep "Settings file" {
         $tmp = Join-Path $env:TEMP ("tw-settings-{0}.json" -f $PID)

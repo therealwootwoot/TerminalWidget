@@ -4653,7 +4653,8 @@ function Find-SettingsHits {
     foreach ($pg in (Get-SettingsPages)) { $res.Counts[$pg.Id] = 0 }
     if (-not ([string]$Query).Trim()) { return $res }
     $idx = New-Object System.Collections.Generic.List[int]
-    $all = @($Entries)
+    # (foreach, not @(): @() on a List[object] throws "Argument types do not match")
+    $all = @(foreach ($x in $Entries) { $x })
     for ($i = 0; $i -lt $all.Count; $i++) {
         $e = $all[$i]
         if ($null -eq $e) { continue }

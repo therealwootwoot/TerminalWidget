@@ -2149,6 +2149,13 @@ Describe "Settings pages (v5.3)" {
         @($none.Entries).Count | Should -Be 0
         Select-SettingsPage -Current "Layout" -Hits $none | Should -Be "Layout"
     }
+    It "takes the entries as a generic list, too (the settings window keeps them in one)" {
+        $list = New-Object System.Collections.Generic.List[object]
+        foreach ($x in $script:SetEntries) { $list.Add($x) }
+        $h = Find-SettingsHits -Entries $list -Query "fresh"
+        @($h.Entries) | Should -Contain 0
+        $h.Counts["Design"] | Should -Be 1
+    }
     It "jumps to a page whose title matches" {
         $h = Find-SettingsHits -Entries $script:SetEntries -Query "tastatur"
         Select-SettingsPage -Current "Display" -Hits $h | Should -Be "Keyboard"
