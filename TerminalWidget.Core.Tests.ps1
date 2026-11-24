@@ -1775,7 +1775,16 @@ Describe "Polish (v4.9.5)" {
         ($t2 -split "`r`n")[1] | Should -Be "x y`t1"
         ($t2 -split "`r`n")[2] | Should -Be "z`t2 3"
     }
-    It "knows the privacy command" {
+    It "shows one list as a full page in the Terminal layout" {
+        $r = Get-TerminalLayoutRects -X 10 -Y 90 -W 1600 -H 900 -Full "Portfolio"
+        $r.Portfolio | Should -Be @(10, 90, 1600, 900)
+        $r.Chart | Should -BeNullOrEmpty
+        $r.Watchlist | Should -BeNullOrEmpty
+        (Get-TerminalLayoutRects -X 0 -Y 0 -W 900 -H 800 -Full "Watchlist" -ShowWatch $false).Watchlist | Should -Be @(0, 0, 900, 800)
+        (Get-TerminalLayoutRects -X 0 -Y 0 -W 900 -H 800 -Full "Chart").Chart | Should -Not -BeNullOrEmpty
+    }
+    It "knows the privacy and full-page commands" {
+        (ConvertFrom-TerminalCommand "FULL").Kind | Should -Be "Global"
         (ConvertFrom-TerminalCommand "PRIV").Kind | Should -Be "Global"
     }
 }

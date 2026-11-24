@@ -917,10 +917,16 @@ function Get-TerminalLayoutRects {
         [int]$PanelMinW = 756,
         [int]$Gap = 8,
         [int]$MinBottomH = 300,
-        [int]$MinChartH = 160
+        [int]$MinChartH = 160,
+        [string]$Full = ""
     )
     # v4.9: ActiveBottom "News" puts the news tab below the chart, full width
     $out = [PSCustomObject]@{ Chart = $null; Watchlist = $null; Portfolio = $null; News = $null; SideBySide = $false }
+    # v4.9.5: one list as a full page (the chart and the other lists hidden)
+    if ($Full -in @("Watchlist", "Portfolio", "News")) {
+        $out.$Full = @($X, $Y, $W, $H)
+        return $out
+    }
     $bottom = New-Object System.Collections.Generic.List[string]
     if ($ShowWatch) { $bottom.Add("Watchlist") }
     if ($ShowPortfolio) { $bottom.Add("Portfolio") }
@@ -2675,6 +2681,7 @@ function Get-TerminalFunctions {
         "IND"    = @{ Scope = "G";  Desc = "Indikatoren: IND MACD / RSI / EMA / SMA" }
         "CT"     = @{ Scope = "G";  Desc = "Durchklicken an/aus (Maus geht durchs Fenster)" }
         "PRIV"   = @{ Scope = "G";  Desc = "Privat-Modus: Beträge ausblenden (PRIV ON / OFF, Taste F9)" }
+        "FULL"   = @{ Scope = "G";  Desc = "Liste als ganze Seite (Terminal): FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }
         "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
         "SCALE"  = @{ Scope = "G";  Desc = "Preisachse: SCALE LOG / SCALE LIN" }
         "BAR"    = @{ Scope = "G";  Desc = "Was die Compact-/Ticker-Leiste zeigt" }

@@ -8,6 +8,7 @@
 - News requests wait for the same rate-limit pause as the price refresh, and a rate limit on the news pauses both.
 
 ## Main window
+- **Lists as a full page (Terminal layout)**: click the tab of a list that is already shown (Portfolio, Watch & Alarm, News), press Shift+F2 / F3 / F4 or type `FULL PORT` / `FULL WATCH` / `FULL NEWS`: the list fills the window. Chart (F1), the same tab again or Esc bring the split view back. Another list tab switches the full page to that list.
 - **Status dot** left of the status line: green = data OK, amber = pause or a bit old, red = no connection. Hover explains it. While all markets are closed, older data still counts as OK.
 - **Ctrl+Y** redoes the last undo (30 seconds); Ctrl+Z works again after it.
 - **Price flash fades** out over about half a second instead of switching off.
@@ -16,7 +17,7 @@
 
 ## Portfolio
 - **Beitrag heute**: new column with how much each position added to or took from today's depot result (sortable; hide it via right-click on a column header).
-- **Privacy mode (F9 or `PRIV`)**: shares, values, P/L amounts and today's contribution become dots; percentages stay. Also the summary line, the Compact depot line and the tray tooltip. The Portfolio tab shows "Portfolio ••" while it is on; editing is blocked until F9 again.
+- **Privacy mode (F9, the eye button next to the depot summary, the tray menu, or `PRIV`)**: on many laptops F9 needs Fn. shares, values, P/L amounts and today's contribution become dots; percentages stay. Also the summary line, the Compact depot line and the tray tooltip. The Portfolio tab shows "Portfolio ••" while it is on; editing is blocked until F9 again.
 - **Summary line**: realized result of this year, with the dividend part shown separately ("2026: +120,00 real. (Div. +35,00)").
 
 ## Watchlist and data

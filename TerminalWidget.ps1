@@ -3678,6 +3678,7 @@ $script:EnText = @{
     "> Befehl" = "> Command"; "> Befehl     Strg+K" = "> Command    Ctrl+K"; "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße Listen + Chart (ab Neustart)" = "List + chart font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
     # v4.9.5
     "Rechtsklick: Quelle ausblenden" = "Right-click: mute source"; "Artikel öffnen" = "Open article"; "Link kopieren" = "Copy link"; "Quelle ausblenden" = "Mute source"; "Link kopiert" = "Link copied"; "Quelle ausgeblendet:" = "Source muted:"; "zurück in den Einstellungen" = "undo in Settings"; "Alarm-Wörter" = "Alert words"; "Alarm-Wörter auch für Watchlist-Ticker" = "Alert words for watchlist tickers too"; "Ausgeblendete Quellen zeigen" = "Show muted sources"; "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" = "Tray icon in the colour of the depot's day (not the ticker)"; "Beitrag heute" = "Today's contribution"; "Privat (F9)" = "Private (F9)"; "Privat-Modus: Beträge und Stückzahlen ausgeblendet. F9 = wieder zeigen." = "Privacy mode: amounts and shares hidden. F9 = show again."; "Privat-Modus: erst F9 drücken, dann bearbeiten" = "Privacy mode: press F9 first, then edit"; "Weitere Positionen: unten Ticker, Stück und EK eintragen - oder:" = "More positions: enter ticker, shares and cost below - or:"; "+ Kauf buchen ..." = "+ Book a buy ..."; "Broker-CSV importieren ..." = "Import broker CSV ..."; "Analysten" = "Analysts"; "1 Stunde pausieren" = "Pause for 1 hour"; "4 Stunden pausieren" = "Pause for 4 hours"; "Bis morgen 08:00 pausieren" = "Pause until tomorrow 08:00"; "Pause beenden" = "End pause"; "Löschen (Entf)" = "Delete (Del)"; "Chart öffnen" = "Open chart"; "Alarm anlegen ..." = "Create alert ..."; "Kauf / Verkauf buchen ..." = "Book buy / sell ..."; "Nachrichten (News-Tab)" = "News (news tab)"; "Im Chart vergleichen" = "Compare in chart"; "Beschreibung (DES)" = "Description (DES)"; "Aus der Watchlist entfernen" = "Remove from watchlist"; "Vortag" = "Prev. close"; "Vortages-Schluss als Linie (1D / 5D)" = "Previous close as a line (1D / 5D)"
+    "Ganze Seite" = "Full page"; "Tab nochmal klicken, F1 oder Esc = zurück" = "click the tab again, F1 or Esc = back"; "Privat-Modus: Beträge ausblenden (F9)" = "Privacy mode: hide amounts (F9)"
 }
 
 function Tr {
@@ -3836,6 +3837,10 @@ $miRefresh = $trayMenu.Items.Add("Jetzt aktualisieren (F5)")
 $miClickThrough = New-Object System.Windows.Forms.ToolStripMenuItem("Durchklicken (Maus geht durch)")
 [void]$trayMenu.Items.Add($miClickThrough)
 $miClickThrough.Add_Click({ Set-ClickThrough (-not $script:ClickThrough) })
+# v4.9.5: privacy mode also from the tray (F9 needs Fn on many laptops)
+$miPrivacy = New-Object System.Windows.Forms.ToolStripMenuItem("Privat-Modus: Beträge ausblenden (F9)")
+[void]$trayMenu.Items.Add($miPrivacy)
+$miPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) })
 [void]$trayMenu.Items.Add("-")
 $miExit    = $trayMenu.Items.Add("Beenden")
 $trayIcon.ContextMenuStrip = $trayMenu
@@ -4260,6 +4265,7 @@ foreach ($td in $tabDefs) {
     $b.Tag = $td.Key
     $pnlNav.Controls.Add($b)
     $tabButtons[$td.Key] = $b
+    if ($td.Key -ne "Chart") { Set-Tip $b ("{0} - {1}" -f $td.Label, "Terminal-Layout: nochmal klicken = als ganze Seite (Shift+F-Taste), Esc = zurück") }
     $tabX += (S ($td.W + 5))
 }
 
@@ -4760,12 +4766,21 @@ $form.Controls.Add($viewPortfolio)
 
 $lblPortSummary = New-Object System.Windows.Forms.Label
 $lblPortSummary.Location = New-Object System.Drawing.Point((S 10), (S 8))
-$lblPortSummary.Size = New-Object System.Drawing.Size((S 456), (S 22))
+$lblPortSummary.Size = New-Object System.Drawing.Size((S 424), (S 22))
 $lblPortSummary.AutoEllipsis = $true
 $lblPortSummary.Font = $fontMono
 $lblPortSummary.ForeColor = $script:Pal.Text
 $lblPortSummary.Text = "Depotwert: 0.00 $($script:Config.Currency) | Gesamt G/V: +0.00 $($script:Config.Currency) (+0.00%)"
 $viewPortfolio.Controls.Add($lblPortSummary)
+
+# v4.9.5: privacy toggle next to the summary (same as F9)
+$script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+$btnPrivacy = New-Object System.Windows.Forms.Button
+$btnPrivacy.SetBounds((S 438), (S 6), (S 28), (S 24))
+Style-FlatButton -Btn $btnPrivacy -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
+if ($script:IconFont) { $btnPrivacy.Font = New-Object System.Drawing.Font($script:IconFont, 9) } else { $btnPrivacy.Font = $fontUiBold }
+$btnPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) })
+$viewPortfolio.Controls.Add($btnPrivacy)
 
 # v4.5: depot selector
 $cmbDepot = New-Object System.Windows.Forms.ComboBox
@@ -5732,6 +5747,7 @@ $pnlChartControls.Anchor = $aB -bor $aL -bor $aR
 $lblPortSummary.Anchor = $aT -bor $aL -bor $aR
 $cmbPortSort.Anchor    = $aT -bor $aR
 $cmbDepot.Anchor       = $aT -bor $aR
+$btnPrivacy.Anchor     = $aT -bor $aR
 $dgvPortfolio.Anchor   = $anchorAll
 $pnlPortBottom.Anchor  = $aB -bor $aL -bor $aR
 $lblNachkaufOut.Anchor = $aT -bor $aL -bor $aR
@@ -5825,7 +5841,7 @@ function Update-MainLayout {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
             -ShowWatch ([bool]$script:Config.TerminalShowWatch) -ShowPortfolio ([bool]$script:Config.TerminalShowPortfolio) `
-            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160)
+            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull)
         $on = @{}
         foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio), @("News", $viewNews))) {
             $rect = $r.($pair[0])
@@ -5939,6 +5955,9 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnPortHist -BgColor $p.Input -FgColor $p.Muted  -BorderColor $p.Border
     Style-FlatButton -Btn $btnPortAna  -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     $lblNachkaufOut.ForeColor = $p.Text
+    $btnPrivacy.BackColor = $p.Input
+    $btnPrivacy.FlatAppearance.BorderColor = $p.Border
+    if ($script:StartupDone) { Update-PrivacyIndicator }
     $pnlPortHint.BackColor = $p.Card
     $lblPortHint.ForeColor = $p.Muted
     Style-FlatButton -Btn $btnHintTx  -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
@@ -6069,6 +6088,8 @@ function Populate-TickerDropdown {
 function Set-ActiveTab {
     param([string]$TabName)
     if ($TabName -notin @("Chart", "Portfolio", "Watchlist", "News")) { $TabName = "Chart" }
+    # v4.9.5: another tab while a list is shown as a full page: that one full page, Chart = split view
+    if ($script:TerminalFull -and $TabName -ne $script:TerminalFull) { $script:TerminalFull = if ($TabName -eq "Chart") { "" } else { $TabName } }
     $script:Config.ActiveTab = $TabName
     # Terminal: the Portfolio / Watch / News tabs pick the lower panel
     if ($TabName -in @("Portfolio", "Watchlist", "News")) { $script:Config.TerminalBottom = $TabName }
@@ -6084,6 +6105,46 @@ function Set-ActiveTab {
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     # the tab that just became visible may have missed refreshes while hidden
     if ($form.Visible -and $script:StartupDone) { Update-VisibleTabContent }
+}
+
+# v4.9.5: Terminal layout - a list as a full page. Clicking the tab of a list
+# that is already shown (or Shift+F2/F3/F4, FULL) fills the window with it;
+# Chart, the same tab again or Esc bring the split view back.
+$script:TerminalFull = ""
+function Set-TerminalFull {
+    param([string]$Panel)
+    if ($Panel -and $Panel -notin @("Portfolio", "Watchlist", "News")) { $Panel = "" }
+    if ([string]$script:Config.Layout -ne "Terminal") {
+        # Standard already shows one tab per page
+        $script:TerminalFull = ""
+        if ($Panel) { Set-ActiveTab -TabName $Panel }
+        return
+    }
+    $script:TerminalFull = $Panel
+    if ($Panel) {
+        $script:Config.TerminalBottom = $Panel
+        $script:Config.ActiveTab = $Panel
+        Set-TransientStatus ("{0}: {1} - {2}" -f (Tr "Ganze Seite"), (Tr ([string]$tabButtons[$Panel].Text)), (Tr "Tab nochmal klicken, F1 oder Esc = zurück")) 5
+    }
+    Update-MainLayout
+    if ($form.Visible -and $script:StartupDone) { Update-VisibleTabContent }
+}
+
+function Invoke-TabClick {
+    # tab button / F1-F4: in the Terminal layout a second click on a shown list = full page
+    param([string]$TabName, [bool]$ForceFull = $false)
+    if ([string]$script:Config.Layout -eq "Terminal" -and -not [bool]$script:Config.CompactMode) {
+        if ($TabName -eq "Chart") {
+            if ($script:TerminalFull) { Set-TerminalFull "" ; return }
+        } elseif ($script:TerminalFull -eq $TabName) {
+            Set-TerminalFull ""; return
+        } elseif ($script:TerminalFull -or $ForceFull -or [bool]$script:ViewOn[$TabName]) {
+            Set-TerminalFull $TabName; return
+        }
+    } elseif ($ForceFull -and $TabName -ne "Chart") {
+        Set-ActiveTab -TabName $TabName; return
+    }
+    Set-ActiveTab -TabName $TabName
 }
 
 function Update-VisibleTabContent {
@@ -6167,6 +6228,7 @@ function Apply-Layout {
     param([string]$Layout)
     if ($Layout -notin @(Get-LayoutNames)) { $Layout = "Standard" }
     if ($script:StartupDone) { Save-WindowSize }
+    $script:TerminalFull = ""
     $script:Config.Layout = $Layout
     $isCompact = Test-CompactLayout $Layout
     $isTicker  = ($Layout -eq "Ticker")
@@ -7597,7 +7659,7 @@ function Switch-ActiveTicker {
 foreach ($k in $tabButtons.Keys) {
     $tabButtons[$k].Add_Click({
         param($sender, $e)
-        Set-ActiveTab -TabName ([string]$sender.Tag)
+        Invoke-TabClick -TabName ([string]$sender.Tag)
     })
 }
 
@@ -10015,6 +10077,12 @@ function Invoke-TerminalCommand {
                 Update-AllUiViews
             }
             "CT"     { Set-ClickThrough (-not $script:ClickThrough) }
+            "FULL"   {
+                $fp = switch ($arg0) { "PORT" { "Portfolio" } "PORTFOLIO" { "Portfolio" } "WATCH" { "Watchlist" } "WL" { "Watchlist" } "NEWS" { "News" } default { "" } }
+                if ($arg0 -and -not $fp) { return "FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }
+                if ([string]$script:Config.Layout -ne "Terminal" -and $fp) { Set-ActiveTab -TabName $fp; return "" }
+                Set-TerminalFull $fp
+            }
             "PRIV"   { if ($arg0 -eq "ON") { Set-PrivacyMode $true } elseif ($arg0 -eq "OFF") { Set-PrivacyMode $false } else { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) } }
             "SCALE"  {
                 if ($arg0 -eq "LOG") { Set-LogScale $true } elseif ($arg0 -eq "LIN") { Set-LogScale $false } else { Set-LogScale (-not [bool]$script:Config.LogScale) }
@@ -11025,6 +11093,16 @@ function Set-PrivacyMode {
 }
 
 function Update-PrivacyIndicator {
+    # eye = amounts shown (click hides), crossed eye = hidden; tray menu tick
+    $on = [bool]$script:Config.PrivacyMode
+    if ($script:IconFont) {
+        $btnPrivacy.Text = if ($on) { [string][char]0xED1A } else { [string][char]0xE7B3 }
+    } else {
+        $btnPrivacy.Text = if ($on) { [string][char]0x2022 } else { "P" }
+    }
+    $btnPrivacy.ForeColor = if ($on) { $script:Pal.Accent } else { $script:Pal.Muted }
+    Set-DynTip $btnPrivacy $(if ($on) { "Privat-Modus an: Beträge ausgeblendet. Klick oder F9 = wieder zeigen." } else { "Beträge ausblenden (Privat-Modus, F9 / Fn+F9), z. B. beim Bildschirm teilen" })
+    $miPrivacy.Checked = $on
     $b = $tabButtons["Portfolio"]
     if ($null -eq $b) { return }
     $want = if ([bool]$script:Config.PrivacyMode) { "Portfolio " + [string][char]0x2022 + [string][char]0x2022 } else { "Portfolio (F2)" }
@@ -11863,7 +11941,8 @@ Ctrl+K          Command line (also numpad /)
 Ctrl+Z          Undo the last deletion (10 seconds)
 Ctrl+Y          Redo (30 seconds)
 Ctrl+C          Copy the whole list as a table
-F9              Privacy mode (hide amounts)
+F9              Privacy mode (hide amounts; Fn+F9 on many laptops)
+Shift+F2/F3/F4  Terminal layout: list as a full page (Esc = back)
 Ctrl+Alt+W      Show / hide the widget from anywhere
 Left / Right    Previous / next watchlist ticker
 1 - 6           Range 1D / 5D / 1M / 3M / 6M / 1Y
@@ -11922,8 +12001,12 @@ Compact   Leiste mit Marktstatus und Laufband
 Standard  Fenster mit Tabs
 Terminal  Chart oben, Watchlist + Portfolio darunter
           (oder die News: F4 / NEWS)
+          Tab einer sichtbaren Liste nochmal klicken
+          (oder Shift+F2/F3/F4) = Liste als ganze Seite,
+          F1 / Esc = zurück
 
-F9: Privat-Modus (Beträge aus), Ctrl+Y: wiederholen,
+F9 (am Laptop oft Fn+F9) oder Augen-Knopf im Portfolio:
+Privat-Modus (Beträge aus), Ctrl+Y: wiederholen,
 Ctrl+C in einer Liste: ganze Tabelle kopieren.
 Rechtsklick auf einen Ticker (Watchlist / Portfolio):
 Chart, Alarm, Kauf buchen, News, Vergleich, DES.
@@ -12945,6 +13028,12 @@ $script:GlobalKeyHandler = {
         Close-ChartFullscreen
         return
     }
+    # v4.9.5: Esc leaves the full-page list (not while a drop-down is open)
+    if (-not $isFs -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:TerminalFull -and -not $lstTickerDropdown.Visible -and -not $lstWlSearchDropdown.Visible) {
+        $e.Handled = $true
+        Set-TerminalFull ""
+        return
+    }
     # Ctrl+F: jump to the ticker search (main window only)
     if (-not $isFs -and $e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
         $e.Handled = $true
@@ -13000,10 +13089,10 @@ $script:GlobalKeyHandler = {
     }
 
     switch ($e.KeyCode) {
-        ([System.Windows.Forms.Keys]::F1) { Set-ActiveTab -TabName "Chart"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F2) { Set-ActiveTab -TabName "Portfolio"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F3) { Set-ActiveTab -TabName "Watchlist"; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::F4) { Set-ActiveTab -TabName "News"; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F1) { Invoke-TabClick -TabName "Chart"; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F2) { Invoke-TabClick -TabName "Portfolio" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F3) { Invoke-TabClick -TabName "Watchlist" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F4) { Invoke-TabClick -TabName "News" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F9) { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F5) {
             Refresh-AllMarketData -Force; Evaluate-GlobalAlerts; Update-AllUiViews; $e.Handled = $true
@@ -13421,6 +13510,31 @@ function Invoke-SmokeTest {
         Set-ActiveTab -TabName "Portfolio"; & $pump
         [void](Copy-GridAsTable -Grid $dgvPortfolio)
         Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "Keys F9 + full page" {
+        $key = { param([System.Windows.Forms.Keys]$K) & $script:GlobalKeyHandler $form (New-Object System.Windows.Forms.KeyEventArgs($K)); & $pump }
+        $was = [bool]$script:Config.PrivacyMode
+        & $key ([System.Windows.Forms.Keys]::F9)
+        if ([bool]$script:Config.PrivacyMode -eq $was) { throw "F9 did not toggle the privacy mode" }
+        & $key ([System.Windows.Forms.Keys]::F9)
+        $btnPrivacy.PerformClick(); & $pump
+        if (-not [bool]$script:Config.PrivacyMode) { throw "privacy button did not switch it on" }
+        Set-PrivacyMode $false
+        Apply-Layout "Terminal"; & $pump
+        & $key ([System.Windows.Forms.Keys]::F2 -bor [System.Windows.Forms.Keys]::Shift)
+        if ($script:TerminalFull -ne "Portfolio" -or [bool]$script:ViewOn["Chart"]) { throw "Shift+F2 did not show the portfolio as a full page" }
+        & $key ([System.Windows.Forms.Keys]::Escape)
+        if ($script:TerminalFull -or -not [bool]$script:ViewOn["Chart"]) { throw "Esc did not return to the split view" }
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        $tabButtons["Watchlist"].PerformClick(); & $pump
+        if ($script:TerminalFull -ne "Watchlist") { throw "second click on a shown tab did not open the full page" }
+        $tabButtons["News"].PerformClick(); & $pump
+        if ($script:TerminalFull -ne "News") { throw "full page did not follow the tab" }
+        $tabButtons["Chart"].PerformClick(); & $pump
+        if ($script:TerminalFull) { throw "Chart did not leave the full page" }
+        [void](Invoke-TerminalCommand "FULL PORT"); & $pump
+        [void](Invoke-TerminalCommand "FULL"); & $pump
+        Apply-Layout "Standard"; & $pump
     }
     Invoke-SmokeStep "Prev close + health" {
         Set-Timeframe -Tf "1d"; & $pump
