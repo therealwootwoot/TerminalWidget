@@ -172,6 +172,8 @@
 # ==============================================================================
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+# v5.5: start time is measured from here (HEALTH, log)
+$script:StartWatch = [System.Diagnostics.Stopwatch]::StartNew()
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Net.Http
@@ -246,7 +248,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.3"
+$script:AppVersion    = "5.5"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1468,6 +1470,7 @@ $script:FetchWorkerScript = {
 
 $script:WorkerShared = [hashtable]::Synchronized(@{ Cancel = $false; PreferQ2 = $false })
 $script:FetchJobs    = New-Object System.Collections.Generic.List[PSObject]
+$script:FetchLog     = New-Object System.Collections.Generic.Queue[DateTime]
 $script:WorkerPool   = $null
 try {
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -1528,6 +1531,10 @@ function Start-FetchJob {
         [int]$MaxConcurrency = 4
     )
     if ($script:IsClosing) { return }
+    # v5.5: polling load for HEALTH (requests in the last hour)
+    $nowR = Get-Date
+    foreach ($u0 in @($Urls)) { $script:FetchLog.Enqueue($nowR) }
+    while ($script:FetchLog.Count -gt 0 -and ($nowR - $script:FetchLog.Peek()).TotalMinutes -gt 60) { [void]$script:FetchLog.Dequeue() }
     $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = $Context; OnComplete = $OnComplete }
 
@@ -4263,6 +4270,22 @@ foreach ($kv in @{
     "Stil: Refined" = "Style: Refined"; "Stil: Fresh" = "Style: Fresh"; "Compact / Ticker zeigt ..." = "Compact / ticker shows ..."; "Theme" = "Theme"
     "Menüeintrag ausführen (MENU <Name>)" = "Run a menu entry (MENU <name>)"; "Einstellungen (SET <Suchwort> springt zur Einstellung)" = "Settings (SET <word> jumps to the setting)"
 }.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
+# v5.5
+foreach ($kv in @{
+    "Fehlersuche" = "Troubleshooting"; "Zustand prüfen (HEALTH)" = "Check health (HEALTH)"; "Diagnose exportieren ..." = "Export diagnostics ..."; "Zustand" = "Health"
+    "OK = in Ordnung, !! = Warnung, XX = Fehler. DIAG exportiert eine Diagnose für Fehlerberichte." = "OK = fine, !! = warning, XX = error. DIAG exports diagnostics for bug reports."
+    "Notiz ..." = "Note ..."; "Löschen" = "Delete"; "These, Kaufgrund, Ziele - nur für dich" = "Thesis, reason for buying, goals - just for you"
+    "HTML-Bericht speichern ..." = "Save HTML report ..."; "CSV für Excel speichern ..." = "Save CSV for Excel ..."; "Als Bild kopieren" = "Copy as image"; "Als Bild speichern ..." = "Save as image ..."
+    "Portfolio-Analyse" = "Portfolio analysis"; "keine Anlageberatung" = "not investment advice"; "Privat-Modus: Beträge ausgeblendet" = "Privacy mode: amounts hidden"
+    "Chart als Bild kopieren" = "Copy chart as image"; "Chart als Bild speichern ..." = "Save chart as image ..."; "Ganzes Fenster als Bild kopieren" = "Copy whole window as image"
+    "Prozent-Achse (ab Beginn des Ausschnitts)" = "Percent axis (from the start of the view)"; "Unterstützung / Widerstand (Tageskurse)" = "Support / resistance (daily)"
+    "Zone (Rechteck)" = "Zone (rectangle)"; "Textnotiz" = "Text note"; "Textnotiz im Chart" = "Text note in the chart"; "Unterstützung" = "Support"; "Widerstand" = "Resistance"
+    "Einkommen" = "Income"; "Jahr" = "Year"; "Summe Dividende" = "Dividend total"; "zum Vorjahr" = "vs. prior year"; "Szenario:" = "Scenario:"; "Markt (Beta)" = "Market (beta)"
+    "Betroffen" = "Affected"; "Beta aus" = "Beta from"; "seit Beginn" = "since start"; "pro Monat" = "per month"; "Dividenden" = "Dividends"
+    "Noch keine Dividenden gebucht (Transaktion 'Dividende' oder Broker-CSV-Import)." = "No dividends booked yet (transaction 'Dividend' or broker CSV import)."
+    "nur Positionen dieses Sektors, ohne Cash" = "only positions of this sector, without cash"; "nur Positionen in dieser Währung (Kursänderung in der Basiswährung), ohne Cash" = "only positions in this currency (change in the base currency), without cash"
+    "Dynamik %" = "Increase %"; "Pause" = "Pause"; "Jetzt" = "Now"; "Signal" = "Signal"
+}.GetEnumerator()) { $script:EnText[$kv.Key] = $kv.Value }
 
 function Tr {
     param([string]$Text)
@@ -4943,6 +4966,14 @@ foreach ($td in $tabDefs) {
     $b.Tag = $td.Key
     $pnlNav.Controls.Add($b)
     $tabButtons[$td.Key] = $b
+    # v5.5 Fresh: accent underline under the active tab
+    $b.Add_Paint({
+        param($sender, $e)
+        if ($null -eq $script:UiSpec -or -not [bool]$script:UiSpec.Fresh -or -not [bool]$script:ViewOn[[string]$sender.Tag]) { return }
+        $ub = New-Object System.Drawing.SolidBrush($script:Pal.Accent)
+        $e.Graphics.FillRectangle($ub, (S 12), ($sender.Height - (S 3)), ($sender.Width - (S 24)), (S 2))
+        $ub.Dispose()
+    })
     if ($td.Key -ne "Chart") { Set-Tip $b ("{0} - {1}" -f $td.Label, "Terminal-Layout: nochmal klicken = als ganze Seite (Shift+F-Taste), Esc = zurück") }
     $tabX += (S ($td.W + 5))
 }
@@ -6690,6 +6721,22 @@ $script:ViewOn = @{}
 
 function Update-TabHighlight {
     $p = $script:Pal
+    # v5.5 Fresh: tabs as soft pills, the active one with an accent underline
+    if ($null -ne $script:UiSpec -and [bool]$script:UiSpec.Fresh) {
+        foreach ($k in $tabButtons.Keys) {
+            $b = $tabButtons[$k]
+            if ([bool]$script:ViewOn[$k]) {
+                $pill = Get-BlendColor -A $p.Accent -B $p.BodyBg -T 0.20
+                Style-FlatButton -Btn $b -BgColor $pill -FgColor $p.Accent -BorderColor $pill
+            } else {
+                Style-FlatButton -Btn $b -BgColor $p.BodyBg -FgColor $p.Muted -BorderColor $p.BodyBg
+            }
+            $b.FlatAppearance.BorderSize = 0
+            $b.FlatAppearance.MouseOverBackColor = Get-BlendColor -A $p.Accent -B $p.BodyBg -T 0.12
+            $b.Invalidate()
+        }
+        return
+    }
     foreach ($k in $tabButtons.Keys) {
         $b = $tabButtons[$k]
         if ([bool]$script:ViewOn[$k]) {
@@ -6990,6 +7037,7 @@ function Apply-ThemeToAllControls {
     foreach ($b in @($script:RoundBtns)) { if ($null -ne $b -and -not $b.IsDisposed) { $b.Invalidate() } }
     $script:ChartSignature = ""
     $pnlChartCanvas.Invalidate()
+    Update-TabHighlight   # v5.5: Fresh pill tabs follow the style
 }
 
 # v5.2: icon font glyphs on buttons and menus (text fallback without the font)
@@ -7762,6 +7810,14 @@ function Refresh-WatchlistAndAlerts {
             if ([bool]$q.FromCache) {
                 $row.Cells["Price"].Style.ForeColor = $script:Pal.Muted
                 $row.Cells["Price"].ToolTipText = "Kurs aus dem Cache (Stand {0}) - wird gerade aktualisiert" -f $q.UpdatedAt.ToString("dd.MM. HH:mm")
+            } elseif ($null -ne $ms -and [string]$ms.State -eq "REGULAR" -and $null -ne $q.UpdatedAt) {
+                # v5.5: stale while the market is open -> clock in front of the price
+                $ageS = ((Get-Date) - [DateTime]$q.UpdatedAt).TotalSeconds
+                if ((Get-StalenessLevel -AgeSec $ageS -RefreshSec ([int]$script:Config.SlowRefreshSeconds)) -ne "OK") {
+                    $row.Cells["Price"].Value = [string][char]0x25F7 + " " + [string]$row.Cells["Price"].Value
+                    $row.Cells["Price"].Style.ForeColor = $script:Pal.Warn
+                    $row.Cells["Price"].ToolTipText = "Kurs seit {0:N0} Min. nicht aktualisiert (Stand {1}) - Börse ist offen" -f ($ageS / 60), ([DateTime]$q.UpdatedAt).ToString("HH:mm")
+                }
             }
             if ($q.ExtPrice -gt 0) {
                 $row.Cells["Ext"].Style.ForeColor = if ($q.ExtPct -ge 0) { $colGreen } else { $colRed }
@@ -7779,7 +7835,10 @@ function Refresh-WatchlistAndAlerts {
                 $row.Cells[0].Style.ForeColor = $script:Pal.Accent
             }
         } else {
-            [void]$dgvWatchlist.Rows.Add($uSym, "", "...", "-", "-", "-", "-", "-", "-")
+            # v5.5: loading skeleton (grey bars) instead of "..." until the first quote
+            $skI = $dgvWatchlist.Rows.Add($uSym, "", "", "", "", "", "", "", "", "")
+            $dgvWatchlist.Rows[$skI].Tag = "skel"
+            $dgvWatchlist.Rows[$skI].Cells[0].ToolTipText = "Kurs wird geladen ..."
         }
     }
     Restore-GridState -Grid $dgvWatchlist -State $gridState
@@ -15229,6 +15288,15 @@ function Get-HealthChecks {
     & $add "Symbol-Schrift" $(if ($script:IconFont) { "OK" } else { "WARN" }) $(if ($script:IconFont) { [string]$script:IconFont } else { "nicht gefunden - Knöpfe zeigen Text" })
     $monoOk = ([string]$script:Config.MonoFont -eq "Consolas" -or $script:InstalledFonts -contains [string]$script:Config.MonoFont)
     & $add "Zahlen-Schrift" $(if ($monoOk) { "OK" } else { "WARN" }) ([string]$script:Config.MonoFont)
+    # v5.5: start time, memory, polling load
+    if ($null -ne $script:StartupMs) { & $add "Startzeit" $(if ([int]$script:StartupMs -gt 15000) { "WARN" } else { "INFO" }) ("{0:N1} s bis zum Fenster" -f ([int]$script:StartupMs / 1000.0)) }
+    try {
+        $pr0 = [System.Diagnostics.Process]::GetCurrentProcess()
+        $mb = $pr0.WorkingSet64 / 1MB
+        & $add "Speicher" $(if ($mb -gt 900) { "WARN" } else { "INFO" }) ("{0:N0} MB (Arbeitsspeicher), {1:N0} MB privat" -f $mb, ($pr0.PrivateMemorySize64 / 1MB))
+    } catch { }
+    $nReq = $script:FetchLog.Count
+    & $add "Abfragen" $(if ($nReq -gt 2000) { "WARN" } else { "INFO" }) ("{0} Anfragen in der letzten Stunde, Intervall {1} s / {2} s" -f $nReq, [int]$script:Config.RefreshSeconds, [int]$script:Config.SlowRefreshSeconds)
     # log
     if (Test-Path $script:LogPath) {
         $lf = Get-Item $script:LogPath
@@ -15447,6 +15515,18 @@ Search          finds settings on every page ("style", "push", ...);
                 a dot = changed from default, "Reset page" button
 Ctrl+K          also finds every setting (SET ...) and menu entry (MENU ...)
 Other           export / import the settings as a file (new PC)
+
+New in 5.5
+NVDA NOTE       note per ticker (also right-click, hover card, TA window)
+HEALTH / DIAG   health check / diagnostics ZIP for bug reports
+IMG             chart as image (IMG SAVE, IMG WIN = whole window)
+SCALE PCT       percent axis from the first visible bar
+Ctrl+drag       zoom into the marked range (Z = reset)
+DRAW R / N      zone (rectangle) / text note; fullscreen chart toolbar
+P > Einkommen   received dividends as a month calendar; Export button
+Scenario        per sector or currency (Beitrag page)
+Savings plans   yearly increase (%) and pause months
+Watchlist       column "Signal" (header right-click), clock = stale price
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -15574,6 +15654,18 @@ Suchen          findet Einstellungen auf allen Seiten ("stil", "push" ...);
 Strg+K          findet auch jede Einstellung (SET ...) und jeden
                 Menüeintrag (MENU ...)
 Sonstiges       Einstellungen als Datei exportieren / importieren (neuer PC)
+
+Neu in 5.5
+NVDA NOTE       Notiz zum Ticker (auch Rechtsklick, Infokarte, TA-Fenster)
+HEALTH / DIAG   Zustand prüfen / Diagnose als ZIP für Fehlerberichte
+IMG             Chart als Bild (IMG SAVE, IMG WIN = ganzes Fenster)
+SCALE PCT       Prozent-Achse ab dem ersten sichtbaren Balken
+Strg+Ziehen     in den markierten Bereich zoomen (Z = zurück)
+DRAW R / N      Zone (Rechteck) / Textnotiz; Werkzeugleiste im Vollbild
+P > Einkommen   erhaltene Dividenden als Monatskalender; Knopf Export
+Szenario        je Sektor oder Währung (Seite Beitrag)
+Sparpläne       Dynamik (% pro Jahr) und Pausenmonate
+Watchlist       Spalte "Signal" (Rechtsklick auf Kopf), Uhr = alter Kurs
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
@@ -16418,6 +16510,24 @@ $btnWlAddSearch.Add_Click({
         $script:SuppressWlSearchEvent = $false
         [void](Add-SymbolToWatchlist -RawSymbol $symToAdd)
     }
+})
+
+# ---- v5.5: loading skeleton: rows without data show soft grey bars ----
+$dgvWatchlist.Add_CellPainting({
+    param($sender, $e)
+    if ($e.RowIndex -lt 0 -or $e.ColumnIndex -le 0) { return }
+    $row = $sender.Rows[$e.RowIndex]
+    if ([string]$row.Tag -ne "skel") { return }
+    $e.PaintBackground($e.CellBounds, $false)
+    $b = $e.CellBounds
+    $w = [int]($b.Width * $(if ($e.ColumnIndex % 2 -eq 0) { 0.55 } else { 0.7 }))
+    $h = [math]::Max(4, [int]($b.Height * 0.34))
+    $x = if ([bool]$script:Config.AlignNumbersRight) { $b.Right - $w - (S 6) } else { $b.Left + (S 6) }
+    $c0 = Get-BlendColor -A $script:Pal.Border -B $script:Pal.Card -T 0.55
+    $br = New-Object System.Drawing.SolidBrush($c0)
+    $e.Graphics.FillRectangle($br, $x, ($b.Top + [int](($b.Height - $h) / 2)), $w, $h)
+    $br.Dispose()
+    $e.Handled = $true
 })
 
 # ---- v5.0: hover card (mouse rests on a ticker in the watchlist / portfolio) ----
@@ -17279,7 +17389,8 @@ Register-ArrowKeysAsInput -Root $form
 
 $form.Add_Shown({
     Flush-ErrorsToLog
-    Write-WidgetLog "Widget v$($script:AppVersion) window shown"
+    $script:StartupMs = [int]$script:StartWatch.ElapsedMilliseconds
+    Write-WidgetLog ("Widget v{0} window shown after {1} ms" -f $script:AppVersion, $script:StartupMs)
     $txtPortTicker.Text = $script:Config.ActiveTicker
     Apply-ThemeToAllControls
     $wasMax = [bool]$script:Config.WindowMaximized
@@ -18082,6 +18193,19 @@ function Invoke-SmokeTest {
         $script:SavingsPlans.Remove($pl) | Out-Null; Save-SavingsPlans
     } 2500
 
+    # v5.5 E: Fresh tabs, loading skeleton, health numbers
+    Invoke-SmokeStep "Fresh tabs + skeleton" {
+        [void](Invoke-TerminalCommand "STYLE FRESH"); & $pump
+        $script:Config.Watchlist = @($script:Config.Watchlist) + @("SMOKEX.XX")
+        Set-ActiveTab -TabName "Watchlist"; Refresh-WatchlistAndAlerts; & $pump; $dgvWatchlist.Refresh()
+        $sk = @($dgvWatchlist.Rows | Where-Object { [string]$_.Tag -eq "skel" })
+        if ($sk.Count -lt 1) { throw "no skeleton row for a ticker without a quote" }
+        & $script:SmokeShot "18-fresh-tabs-skeleton"
+        $script:Config.Watchlist = @($script:Config.Watchlist | Where-Object { $_ -ne "SMOKEX.XX" })
+        Refresh-WatchlistAndAlerts
+        [void](Invoke-TerminalCommand "STYLE REFINED"); Set-ActiveTab -TabName "Chart"; & $pump
+        if (@(Get-HealthChecks | Where-Object { $_.Name -in @("Startzeit", "Speicher", "Abfragen") }).Count -lt 2) { throw "health has no start / memory / load lines" }
+    }
     Invoke-SmokeStep "Dialog places" {
         Show-CashDialog
         if ($null -eq $script:Config.DialogPlacement.PSObject.Properties["Cash"]) { throw "cash window place not saved" }
