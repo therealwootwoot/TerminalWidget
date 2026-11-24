@@ -1498,6 +1498,15 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         }
         $log = Join-Path $dir "widget.log"
         if (Test-Path $log) { Write-Host "---- widget.log (last 60 lines) ----"; Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
+        # v5.2: screenshots also into the log (base64), for reviews without artifact access
+        if ($env:TW_SMOKE_SHOTS -and (Test-Path $env:TW_SMOKE_SHOTS)) {
+            foreach ($png in Get-ChildItem -Path $env:TW_SMOKE_SHOTS -Filter *.png) {
+                $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($png.FullName))
+                Write-Host ("SHOT-BEGIN " + $png.Name)
+                for ($i = 0; $i -lt $b64.Length; $i += 3000) { Write-Host ("SHOT|" + $b64.Substring($i, [math]::Min(3000, $b64.Length - $i))) }
+                Write-Host ("SHOT-END " + $png.Name)
+            }
+        }
         $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
         Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
         $rep = Get-Content $report -Raw | ConvertFrom-Json
