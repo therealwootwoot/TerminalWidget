@@ -9296,7 +9296,9 @@ function Update-AnalysisRisk {
             if ($i -eq $j -or [double]::IsNaN($x)) { $cg.Rows[$ri].Cells[$j].Style.ForeColor = $script:Pal.Muted; continue }
             $tint = if ($x -ge 0) { $colRed } else { [System.Drawing.Color]::FromArgb(59, 130, 246) }
             $cg.Rows[$ri].Cells[$j].Style.BackColor = Get-BlendColor -A $tint -B $script:Pal.Card -T ([math]::Min(0.6, [math]::Abs($x) * 0.6))
-            $cg.Rows[$ri].Cells[$j].ToolTipText = "{0} / {1}: {2:0.00} ({3} {4})" -f $cm.Syms[$i], $cm.Syms[$j], $x, $cm.Counts[$i, $j], (Tr "gemeinsame Tage")
+            $cnts = $cm.Counts
+            $nCommon = $cnts[$i, $j]
+            $cg.Rows[$ri].Cells[$j].ToolTipText = "{0} / {1}: {2:0.00} ({3} {4})" -f $cm.Syms[$i], $cm.Syms[$j], $x, $nCommon, (Tr "gemeinsame Tage")
         }
     }
     $cg.RowHeadersDefaultCellStyle.BackColor = $script:Pal.Input

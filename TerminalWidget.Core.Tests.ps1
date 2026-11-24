@@ -1837,7 +1837,9 @@ Describe "Depot tools (v5.0)" {
         [math]::Round($h["c"], 4) | Should -Be -0.1
         $m = Get-CorrelationMatrix -BySym @{ A = @{ d1 = 0.1; d2 = -0.1; d3 = 0.2 }; B = @{ d1 = 0.2; d2 = -0.2; d3 = 0.4 } } -MinCommon 3
         ($m.Syms -join ",") | Should -Be "A,B"
-        [math]::Round($m.M[0, 1], 6) | Should -Be 1
+        $mm = $m.M
+        $c01 = $mm[0, 1]
+        [math]::Round($c01, 6) | Should -Be 1
     }
     It "plans a rebalancing with and without sales" {
         $pos = @(@{ Sym = "A"; Value = 600; Price = 10 }, @{ Sym = "B"; Value = 400; Price = 20 }, @{ Sym = "C"; Value = 50; Price = 5 })
