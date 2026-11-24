@@ -13793,6 +13793,7 @@ function Show-SettingsDialog {
         $reg.Add([PSCustomObject]@{
             Ctl = $Ctl; Lbl = $Lbl; Page = $lay.Page; Key = $Key; Default = $Default; Marker = $mk; Changed = $false; Orig = $tgt.ForeColor
             Label = $txt; Search = ("{0} {1} {2} {3} {4}" -f $txt, (Tr $txt), $script:SetTipText, $items, $Words)
+            Strong = ("{0} {1} {2} {3}" -f $txt, (Tr $txt), $items, $Words)
         })
         $script:SetTipText = ""
     }

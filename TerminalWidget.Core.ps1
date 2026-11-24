@@ -4645,12 +4645,14 @@ function Get-SettingsPageTitle {
 }
 
 function Find-SettingsHits {
-    # Entries: @(@{ Page; Search }) - Search = label, tooltip, items, extra words.
+    # Entries: @(@{ Page; Search; Strong }) - Search = label, tooltip, items,
+    # extra words; Strong (optional) = the same without the tooltip.
     # Returns @{ Entries = indices of matching entries; Counts = page -> hits;
-    # TitlePages = pages whose title matches (German or English) }
+    # StrongCounts = page -> hits in label / keywords; TitlePages = pages whose
+    # title matches (German or English) }
     param($Entries, [string]$Query)
-    $res = [PSCustomObject]@{ Entries = @(); Counts = [ordered]@{}; TitlePages = @() }
-    foreach ($pg in (Get-SettingsPages)) { $res.Counts[$pg.Id] = 0 }
+    $res = [PSCustomObject]@{ Entries = @(); Counts = [ordered]@{}; StrongCounts = [ordered]@{}; TitlePages = @() }
+    foreach ($pg in (Get-SettingsPages)) { $res.Counts[$pg.Id] = 0; $res.StrongCounts[$pg.Id] = 0 }
     if (-not ([string]$Query).Trim()) { return $res }
     $idx = New-Object System.Collections.Generic.List[int]
     # (foreach, not @(): @() on a List[object] throws "Argument types do not match")
@@ -4660,7 +4662,11 @@ function Find-SettingsHits {
         if ($null -eq $e) { continue }
         if (Test-SettingMatch -Text ([string]$e.Search) -Query $Query) {
             $idx.Add($i)
-            if ($res.Counts.Contains([string]$e.Page)) { $res.Counts[[string]$e.Page]++ }
+            if ($res.Counts.Contains([string]$e.Page)) {
+                $res.Counts[[string]$e.Page]++
+                $st = if ($null -ne $e.PSObject.Properties["Strong"] -and $null -ne $e.Strong) { [string]$e.Strong } else { [string]$e.Search }
+                if (Test-SettingMatch -Text $st -Query $Query) { $res.StrongCounts[[string]$e.Page]++ }
+            }
         }
     }
     $res.Entries = $idx.ToArray()
@@ -4677,13 +4683,18 @@ function Find-SettingsHits {
 }
 
 function Select-SettingsPage {
-    # Which page to show for a search: a matching page title wins, then the
-    # current page if it has hits, then the first page with hits
+    # Which page to show for a search: a matching page title wins; then hits in
+    # a label or keyword (current page first), then hits only in a tooltip
     param([string]$Current, $Hits)
     if ($null -eq $Hits) { return $Current }
     if (@($Hits.TitlePages).Count -gt 0) { return [string]@($Hits.TitlePages)[0] }
-    if ($Hits.Counts.Contains($Current) -and [int]$Hits.Counts[$Current] -gt 0) { return $Current }
-    foreach ($k in @($Hits.Counts.get_Keys())) { if ([int]$Hits.Counts[$k] -gt 0) { return [string]$k } }
+    $tables = @()
+    if ($null -ne $Hits.PSObject.Properties["StrongCounts"] -and $null -ne $Hits.StrongCounts) { $tables += , $Hits.StrongCounts }
+    $tables += , $Hits.Counts
+    foreach ($t in $tables) {
+        if ($t.Contains($Current) -and [int]$t[$Current] -gt 0) { return $Current }
+        foreach ($k in @($t.get_Keys())) { if ([int]$t[$k] -gt 0) { return [string]$k } }
+    }
     return $Current
 }
 

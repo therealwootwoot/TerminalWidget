@@ -2149,6 +2149,19 @@ Describe "Settings pages (v5.3)" {
         @($none.Entries).Count | Should -Be 0
         Select-SettingsPage -Current "Layout" -Hits $none | Should -Be "Layout"
     }
+    It "prefers a label hit to a tooltip hit" {
+        $e = @(
+            [PSCustomObject]@{ Page = "Misc";   Search = "Einstellungen exportieren ... ohne Push-Zugang"; Strong = "Einstellungen exportieren ..." }
+            [PSCustomObject]@{ Page = "Alerts"; Search = "Handy-Push einrichten ... Push ntfy"; Strong = "Handy-Push einrichten ... Push ntfy" }
+        )
+        $h = Find-SettingsHits -Entries $e -Query "push"
+        $h.Counts["Misc"] | Should -Be 1
+        $h.StrongCounts["Misc"] | Should -Be 0
+        Select-SettingsPage -Current "Misc" -Hits $h | Should -Be "Alerts"
+        # only a tooltip hit anywhere: still found
+        $h2 = Find-SettingsHits -Entries $e -Query "zugang"
+        Select-SettingsPage -Current "Design" -Hits $h2 | Should -Be "Misc"
+    }
     It "takes the entries as a generic list, too (the settings window keeps them in one)" {
         $list = New-Object System.Collections.Generic.List[object]
         foreach ($x in $script:SetEntries) { $list.Add($x) }
