@@ -246,7 +246,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "5.1"
+$script:AppVersion    = "5.2"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -466,6 +466,11 @@ $defaultConfig = [PSCustomObject]@{
     ActiveTab             = "Chart"
     Currency              = "EUR"
     AutoCurrency          = $true             # v5.1: price + chart in the ticker's own currency (depot stays in Currency)
+    UiStyle               = "Refined"         # v5.2: Refined (same layout, cleaner) / Fresh (rounded cards, more space)
+    RowDensity            = "Normal"          # v5.2: Compact / Normal / Comfortable list rows
+    ZebraRows             = $false            # v5.2: every second list row slightly lighter
+    UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
+    TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast
     ChartType             = "Line"
     ShowVolume            = $true
     CompactMode           = $false
@@ -648,7 +653,10 @@ $script:Config.NewsMoveThreshold  = [math]::Max(0, [math]::Min(50, [int]$script:
 if ([int]$script:Config.FontScale -notin @(Get-FontScaleSteps)) { $script:Config.FontScale = 100 }
 if ([string]$script:Config.MonoFont -notin @(Get-MonoFontNames)) { $script:Config.MonoFont = "Consolas" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
-if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene")) { $script:Config.AccentColor = "Sky" }
+if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene", "Windows")) { $script:Config.AccentColor = "Sky" }
+if ([string]$script:Config.UiStyle -notin @(Get-UiStyles)) { $script:Config.UiStyle = "Refined" }
+if ([string]$script:Config.RowDensity -notin @(Get-RowDensities)) { $script:Config.RowDensity = "Normal" }
+if ([string]$script:Config.TapeSpeed -notin @(Get-TapeSpeeds)) { $script:Config.TapeSpeed = "Normal" }
 if ([string]$script:Config.MaType -notin @("SMA", "EMA")) { $script:Config.MaType = "SMA" }
 if ([string]$script:Config.LowerPanel -notin @("RSI", "MACD")) { $script:Config.LowerPanel = "RSI" }
 if ([int]$script:Config.RefreshSeconds -lt 5) { $script:Config.RefreshSeconds = 15 }
@@ -925,21 +933,6 @@ if ($null -ne $rawEvents) {
     foreach ($prop in $rawEvents.PSObject.Properties) {
         if ($null -ne $prop.Value) { $script:Events[$prop.Name.ToUpper()] = New-EventEntry $prop.Value }
     }
-}
-
-function ConvertTo-StoredFund {
-    # v5.1: fundamentals as plain numbers (NaN -> null, so the JSON stays valid)
-    param($F)
-    if ($null -eq $F) { return $null }
-    $o = [ordered]@{}
-    foreach ($f in (Get-FundamentalFields)) {
-        $pp = $F.PSObject.Properties[$f[0]]
-        $x = [double]::NaN
-        if ($null -ne $pp -and $null -ne $pp.Value -and [string]$pp.Value -ne "") { try { $x = [double]$pp.Value } catch { } }
-        $o[$f[0]] = if ([double]::IsNaN($x) -or [double]::IsInfinity($x)) { $null } else { $x }
-    }
-    $o["Currency"] = [string]$F.Currency
-    return [PSCustomObject]$o
 }
 
 function Save-Events {
@@ -2648,8 +2641,16 @@ function Get-ThemeColors {
         }
         "Amber"  { [System.Drawing.Color]::FromArgb(245, 158, 11) }
         "Violet" { [System.Drawing.Color]::FromArgb(168, 85, 247) }
+        # v5.2: the accent colour chosen in Windows (Settings > Personalisation > Colours)
+        "Windows" {
+            $wc = $null
+            try { $wv = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\DWM" -Name AccentColor -ErrorAction Stop).AccentColor; $wc = ConvertFrom-AbgrDword -Value ([long]$wv) } catch { }
+            if ($null -ne $wc) { [System.Drawing.Color]::FromArgb($wc[0], $wc[1], $wc[2]) } else { [System.Drawing.Color]::FromArgb(0, 120, 215) }
+        }
         default  { [System.Drawing.Color]::FromArgb(56, 189, 248) }
     }
+    # v5.2: warning colour per theme (amber, darker on light backgrounds)
+    $warn = [System.Drawing.Color]::FromArgb(245, 158, 11)
 
     switch ($script:Config.Theme) {
         "Terminal" {
@@ -2667,6 +2668,7 @@ function Get-ThemeColors {
                 Text     = [System.Drawing.Color]::FromArgb(255, 196, 82)
                 Muted    = [System.Drawing.Color]::FromArgb(176, 128, 52)
                 Accent   = $amberAcc
+                Warn     = [System.Drawing.Color]::FromArgb(250, 204, 21)
                 DwmCap   = 0x00000000
                 DwmBdr   = 0x00123C54
                 DwmDark  = 1
@@ -2685,6 +2687,7 @@ function Get-ThemeColors {
                 Text     = [System.Drawing.Color]::FromArgb(244, 247, 252)
                 Muted    = [System.Drawing.Color]::FromArgb(140, 155, 175)
                 Accent   = $accent
+                Warn     = $warn
                 DwmCap   = 0x00000000
                 DwmBdr   = 0x00403026
                 DwmDark  = 1
@@ -2703,9 +2706,30 @@ function Get-ThemeColors {
                 Text     = [System.Drawing.Color]::FromArgb(15, 23, 42)
                 Muted    = [System.Drawing.Color]::FromArgb(100, 116, 139)
                 Accent   = if ($script:Config.AccentColor -eq "Sky") { [System.Drawing.Color]::FromArgb(2, 132, 199) } else { $accent }
+                Warn     = [System.Drawing.Color]::FromArgb(217, 119, 6)
                 DwmCap   = 0x00F9F5F1
                 DwmBdr   = 0x00E1D5CB
                 DwmDark  = 0
+            }
+        }
+        "Graphite" {
+            # v5.2: neutral grey (no blue tint), close to the Windows 11 dark look
+            return @{
+                HeaderBg = [System.Drawing.Color]::FromArgb(18, 18, 20)
+                BodyBg   = [System.Drawing.Color]::FromArgb(24, 24, 27)
+                PanelBg  = [System.Drawing.Color]::FromArgb(20, 20, 23)
+                Card     = [System.Drawing.Color]::FromArgb(32, 32, 36)
+                Input    = [System.Drawing.Color]::FromArgb(40, 40, 45)
+                Hover    = [System.Drawing.Color]::FromArgb(54, 54, 61)
+                Grid     = [System.Drawing.Color]::FromArgb(42, 42, 48)
+                Border   = [System.Drawing.Color]::FromArgb(60, 60, 68)
+                Text     = [System.Drawing.Color]::FromArgb(244, 244, 245)
+                Muted    = [System.Drawing.Color]::FromArgb(161, 161, 170)
+                Accent   = $accent
+                Warn     = $warn
+                DwmCap   = 0x00141212
+                DwmBdr   = 0x00443C3C
+                DwmDark  = 1
             }
         }
         default {
@@ -2721,6 +2745,7 @@ function Get-ThemeColors {
                 Text     = [System.Drawing.Color]::FromArgb(238, 243, 249)
                 Muted    = [System.Drawing.Color]::FromArgb(148, 163, 184)
                 Accent   = $accent
+                Warn     = $warn
                 DwmCap   = 0x00160F0B
                 DwmBdr   = 0x004E3B2E
                 DwmDark  = 1
@@ -2730,6 +2755,49 @@ function Get-ThemeColors {
 }
 
 $script:Pal = Get-ThemeColors
+# v5.2: design numbers of the chosen style (radii, gaps, row height ...)
+$script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
+$script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+
+function Get-MixColor {
+    # v5.2: T = share of A (0..1), alpha kept opaque
+    param([System.Drawing.Color]$A, [System.Drawing.Color]$B, [double]$T)
+    return [System.Drawing.Color]::FromArgb([int]($B.R + ($A.R - $B.R) * $T), [int]($B.G + ($A.G - $B.G) * $T), [int]($B.B + ($A.B - $B.B) * $T))
+}
+
+function New-RoundedPath {
+    param([System.Drawing.RectangleF]$R, [float]$Radius)
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = [float][math]::Min(2.0 * $Radius, [math]::Min($R.Width, $R.Height))
+    if ($d -le 1) { $path.AddRectangle($R); return $path }
+    $path.AddArc($R.X, $R.Y, $d, $d, 180, 90)
+    $path.AddArc(($R.Right - $d), $R.Y, $d, $d, 270, 90)
+    $path.AddArc(($R.Right - $d), ($R.Bottom - $d), $d, $d, 0, 90)
+    $path.AddArc($R.X, ($R.Bottom - $d), $d, $d, 90, 90)
+    $path.CloseFigure()
+    return $path
+}
+
+function Fill-RoundedRect {
+    # Rectangle or RectangleF, anti-aliased, optional border pen and drop shadow
+    param($g, $Brush, $Rect, [float]$Radius, $Pen = $null, [int]$Shadow = 0)
+    $rf = New-Object System.Drawing.RectangleF([float]$Rect.X, [float]$Rect.Y, [float]$Rect.Width, [float]$Rect.Height)
+    $old = $g.SmoothingMode
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    if ($Shadow -gt 0) {
+        for ($k = $Shadow; $k -ge 1; $k--) {
+            $sr = New-Object System.Drawing.RectangleF(($rf.X + $k * 0.6), ($rf.Y + $k), $rf.Width, $rf.Height)
+            $sp = New-RoundedPath $sr ($Radius + $k * 0.5)
+            $sb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb([int](70 / $Shadow), 0, 0, 0))
+            $g.FillPath($sb, $sp); $sb.Dispose(); $sp.Dispose()
+        }
+    }
+    $path = New-RoundedPath $rf $Radius
+    $g.FillPath($Brush, $path)
+    if ($null -ne $Pen) { $g.DrawPath($Pen, $path) }
+    $path.Dispose()
+    $g.SmoothingMode = $old
+}
 
 function Rebuild-GdiCache {
     foreach ($val in $script:GdiCache.Values) {
@@ -2740,7 +2808,13 @@ function Rebuild-GdiCache {
 
     $script:GdiCache["bgBrush"]       = New-Object System.Drawing.SolidBrush($p.BodyBg)
     $script:GdiCache["panelBrush"]    = New-Object System.Drawing.SolidBrush($p.PanelBg)
-    $script:GdiCache["gridPen"]       = New-Object System.Drawing.Pen($p.Grid, 1)
+    # v5.2: softer grid (dotted in the Fresh style), frame and card colours
+    $gp0 = New-Object System.Drawing.Pen((Get-MixColor -A $p.Grid -B $p.PanelBg -T 0.75), 1)
+    if ($script:UiSpec.Fresh) { $gp0.DashPattern = [float[]]@(1, 3) }
+    $script:GdiCache["gridPen"]       = $gp0
+    $script:GdiCache["framePen"]      = New-Object System.Drawing.Pen((Get-MixColor -A $p.Border -B $p.PanelBg -T 0.6), 1)
+    $script:GdiCache["cardBrush"]     = New-Object System.Drawing.SolidBrush($p.Card)
+    $script:GdiCache["cardPen"]       = New-Object System.Drawing.Pen((Get-MixColor -A $p.Border -B $p.Card -T 0.55), 1)
     $script:GdiCache["sepPen"]        = New-Object System.Drawing.Pen($p.Border, 1)
     $script:GdiCache["axisTextBrush"] = New-Object System.Drawing.SolidBrush($p.Muted)
     $script:GdiCache["msgBrush"]      = New-Object System.Drawing.SolidBrush($p.Text)
@@ -2759,8 +2833,13 @@ function Rebuild-GdiCache {
     $script:GdiCache["penDown"]    = New-Object System.Drawing.Pen($colRed, 1.1)
     $script:GdiCache["brUp"]       = New-Object System.Drawing.SolidBrush($colGreen)
     $script:GdiCache["brDown"]     = New-Object System.Drawing.SolidBrush($colRed)
-    $script:GdiCache["lineUp"]     = New-Object System.Drawing.Pen($colGreen, 1.9)
-    $script:GdiCache["lineDown"]   = New-Object System.Drawing.Pen($colRed, 1.9)
+    $script:GdiCache["lineUp"]     = New-Object System.Drawing.Pen($colGreen, [float]$script:UiSpec.LineWidth)
+    $script:GdiCache["lineDown"]   = New-Object System.Drawing.Pen($colRed, [float]$script:UiSpec.LineWidth)
+    foreach ($lk in @("lineUp", "lineDown")) {
+        $script:GdiCache[$lk].LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $script:GdiCache[$lk].StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $script:GdiCache[$lk].EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    }
     $script:GdiCache["sparkUp"]    = New-Object System.Drawing.Pen($colGreen, 1.4)
     $script:GdiCache["sparkDown"]  = New-Object System.Drawing.Pen($colRed, 1.4)
 
@@ -2861,6 +2940,11 @@ function Render-ChartAndRsi {
 
     $c = $script:GdiCache
     $g.FillRectangle($c["bgBrush"], $Bounds)
+    # v5.2 Fresh: the whole chart sits on a rounded card
+    $fresh = [bool]$script:UiSpec.Fresh
+    if ($fresh -and $Bounds.Width -gt 20 -and $Bounds.Height -gt 20) {
+        Fill-RoundedRect -g $g -Brush $c["cardBrush"] -Rect (New-Object System.Drawing.RectangleF(([float]$Bounds.X + 1), ([float]$Bounds.Y + 1), ([float]$Bounds.Width - 2), ([float]$Bounds.Height - 2))) -Radius ([float](S $script:UiSpec.CardRadius)) -Pen $c["cardPen"]
+    }
 
     # v4.0: hit areas of legend texts for the hover explanations
     $legends = New-Object System.Collections.Generic.List[PSObject]
@@ -2886,8 +2970,10 @@ function Render-ChartAndRsi {
     $rsiH   = $totalH - $priceH
 
     $priceRect = New-Object System.Drawing.Rectangle($padLeft, $padTop, $plotWidth, $priceH)
-    $g.FillRectangle($c["panelBrush"], $priceRect)
-    $g.DrawRectangle($c["sepPen"], $priceRect)
+    if (-not $fresh) {
+        $g.FillRectangle($c["panelBrush"], $priceRect)
+        $g.DrawRectangle($c["framePen"], $priceRect)
+    }
 
     $series = $script:ActiveSeries
     # Never draw a series that belongs to a different ticker/timeframe/currency
@@ -3138,8 +3224,10 @@ function Render-ChartAndRsi {
             $g.FillRectangle($bBr, ($cx - [int]($bodyW / 2)), $topY, $bodyW, $rectH)
         }
     } else {
-        $fillTop = if ($isPositive) { [System.Drawing.Color]::FromArgb(55, 16, 185, 129) } else { [System.Drawing.Color]::FromArgb(55, 244, 63, 94) }
-        $fillBot = [System.Drawing.Color]::FromArgb(4, $script:Pal.PanelBg.R, $script:Pal.PanelBg.G, $script:Pal.PanelBg.B)
+        # v5.2: three-stop fade in the line colour (stronger in the Fresh style)
+        $fa = [int]$script:UiSpec.FillAlpha
+        $fillTop = [System.Drawing.Color]::FromArgb($fa, $lineColor.R, $lineColor.G, $lineColor.B)
+        $fillBot = [System.Drawing.Color]::FromArgb(0, $lineColor.R, $lineColor.G, $lineColor.B)
 
         $polyPts = New-Object System.Drawing.PointF[] ($n + 2)
         for ($i = 0; $i -lt $n; $i++) { $polyPts[$i] = $pts[$i] }
@@ -3152,6 +3240,12 @@ function Render-ChartAndRsi {
             $fillTop,
             $fillBot
         )
+        $cbl = New-Object System.Drawing.Drawing2D.ColorBlend(3)
+        $cbl.Colors = [System.Drawing.Color[]]@($fillTop, [System.Drawing.Color]::FromArgb([int]($fa * 0.3), $lineColor.R, $lineColor.G, $lineColor.B), $fillBot)
+        $cbl.Positions = [float[]]@(0.0, 0.55, 1.0)
+        $gradBrush.InterpolationColors = $cbl
+        $minY = $priceRect.Bottom
+        foreach ($pp0 in $pts) { if ($pp0.Y -lt $minY) { $minY = $pp0.Y } }
         $g.FillPolygon($gradBrush, $polyPts)
         $gradBrush.Dispose()
 
@@ -3293,8 +3387,20 @@ function Render-ChartAndRsi {
     $tagH  = S 18
     $tagRect = New-Object System.Drawing.Rectangle(($priceRect.Right + 2), ($lastY - [int]($tagH / 2)), ($rightAxisWidth - 4), $tagH)
     $tagBrush = New-Object System.Drawing.SolidBrush($lineColor)
-    $g.FillRectangle($tagBrush, $tagRect)
-    $g.DrawString(("{0:N2}" -f $series[$n - 1].Close), $fontBadge, $c["tagTextBr"], ($tagRect.Left + 3), ($tagRect.Top + 2))
+    # v5.2: dotted guide from the last point to the axis, a dot with a halo, rounded tag
+    $guide = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(140, $lineColor.R, $lineColor.G, $lineColor.B), 1)
+    $guide.DashPattern = [float[]]@(2, 3)
+    $g.DrawLine($guide, [float]$pts[$n - 1].X, [float]$lastY, [float]$priceRect.Right, [float]$lastY)
+    $guide.Dispose()
+    if (-not $isCandle) {
+        $halo = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, $lineColor.R, $lineColor.G, $lineColor.B))
+        $hr = [float](S 6); $dr = [float](S 3)
+        $g.FillEllipse($halo, ([float]$pts[$n - 1].X - $hr), ([float]$pts[$n - 1].Y - $hr), (2 * $hr), (2 * $hr))
+        $g.FillEllipse($tagBrush, ([float]$pts[$n - 1].X - $dr), ([float]$pts[$n - 1].Y - $dr), (2 * $dr), (2 * $dr))
+        $halo.Dispose()
+    }
+    Fill-RoundedRect -g $g -Brush $tagBrush -Rect $tagRect -Radius ([float](S 5))
+    $g.DrawString(("{0:N2}" -f $series[$n - 1].Close), $fontBadge, $c["tagTextBr"], ($tagRect.Left + (S 4)), ($tagRect.Top + 2))
     $tagBrush.Dispose()
 
     # v4.8: ex-dividend markers (D) at the bottom of the price panel, next earnings date top right
@@ -3362,7 +3468,7 @@ function Render-ChartAndRsi {
         if ($null -ne $ebA) {
             $eTxt = "Zahlen {0} ({1})" -f (Format-IsoDateDe $ebA.Date).Substring(0, 6), $ebA.Text
             $eSz = $g.MeasureString($eTxt, $fontAxis)
-            $eBr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 158, 11))
+            $eBr = New-Object System.Drawing.SolidBrush($script:Pal.Warn)
             $ex = $priceRect.Right - $eSz.Width - (S 6)
             $g.DrawString($eTxt, $fontAxis, $eBr, [float]$ex, [float]($priceRect.Top + (S 4)))
             & $addLeg $eTxt $ex ($priceRect.Top + (S 4)) "EARNINGS"
@@ -3377,8 +3483,7 @@ function Render-ChartAndRsi {
     # Optional RSI Sub-Panel (v4.6: or MACD)
     if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
-        $g.FillRectangle($c["panelBrush"], $rsiRect)
-        $g.DrawRectangle($c["sepPen"], $rsiRect)
+        if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
         $mAll = $script:ActiveMacd
         if ($null -ne $mAll -and @($mAll.Macd).Count -eq $totalN) {
             $vM = Get-ArraySlice $mAll.Macd $s0 $s1
@@ -3410,7 +3515,7 @@ function Render-ChartAndRsi {
                 }
                 if ($mPts.Count -ge 2) { $g.DrawLines($c["rsiPenAcc"], $mPts.ToArray()) }
                 if ($sPts.Count -ge 2) {
-                    $sigPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(245, 158, 11), [float](1.1 * $script:DpiScale))
+                    $sigPen = New-Object System.Drawing.Pen($script:Pal.Warn, [float](1.1 * $script:DpiScale))
                     $g.DrawLines($sigPen, $sPts.ToArray())
                     $sigPen.Dispose()
                 }
@@ -3428,8 +3533,7 @@ function Render-ChartAndRsi {
         $rsiRectL = $rsiRect
     } elseif ($showRsi -and $rsiH -ge (S 42)) {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
-        $g.FillRectangle($c["panelBrush"], $rsiRect)
-        $g.DrawRectangle($c["sepPen"], $rsiRect)
+        if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
 
         $obVal = [double]$script:Config.RsiOverbought
         $osVal = [double]$script:Config.RsiOversold
@@ -3640,7 +3744,7 @@ function Draw-ChartLevels {
     param([System.Drawing.Graphics]$g, [System.Drawing.Rectangle]$PriceRect, [double]$MinP, [double]$SpanP, $Legends = $null, [bool]$IsLog = $false)
     $levels = @(Get-ChartLevels)
     if ($levels.Count -eq 0) { return }
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     $topY = $PriceRect.Top + (S 4)
     $botY = $PriceRect.Bottom - (S 18)
     foreach ($lv in $levels) {
@@ -3739,7 +3843,7 @@ function Render-ChartOverlay {
     $tagW = [int]$L.RightAxisWidth - 4
     $yVal = Get-PriceFromFrac (($pr.Bottom - $hy) / [double]$pr.Height) ([double]$L.MinP) ([double]$L.SpanP) ([bool]$L.LogScale)
     $tagRect = New-Object System.Drawing.Rectangle(($pr.Right + 2), ($hy - [int]($tagH / 2)), $tagW, $tagH)
-    $g.FillRectangle($c["crossTagBg"], $tagRect)
+    Fill-RoundedRect -g $g -Brush $c["crossTagBg"] -Rect $tagRect -Radius ([float](S 4))
     $g.DrawString(("{0:N2}" -f $yVal), $fontBadge, $c["crossTagFg"], ($tagRect.Left + 3), ($tagRect.Top + 2))
 
     # RSI pane: horizontal line + value tag at the mouse
@@ -3747,7 +3851,7 @@ function Render-ChartOverlay {
         $g.DrawLine($c["crossPen"], $rr.Left, $my, $rr.Right, $my)
         $rVal = (($rr.Bottom - $my) / [double]$rr.Height) * 100.0
         $rTag = New-Object System.Drawing.Rectangle(($rr.Right + 2), ($my - [int]($tagH / 2)), $tagW, $tagH)
-        $g.FillRectangle($c["crossTagBg"], $rTag)
+        Fill-RoundedRect -g $g -Brush $c["crossTagBg"] -Rect $rTag -Radius ([float](S 4))
         $g.DrawString(("{0:N1}" -f $rVal), $fontBadge, $c["crossTagFg"], ($rTag.Left + 3), ($rTag.Top + 2))
     }
 
@@ -3759,7 +3863,7 @@ function Render-ChartOverlay {
     $tW = [int]$tSz.Width + (S 8)
     $tX = [math]::Max($pr.Left, [math]::Min(($hx - [int]($tW / 2)), ($pr.Right - $tW)))
     $tRect = New-Object System.Drawing.Rectangle($tX, ($L.BottomAxis + 1), $tW, (S 16))
-    $g.FillRectangle($c["crossTagBg"], $tRect)
+    Fill-RoundedRect -g $g -Brush $c["crossTagBg"] -Rect $tRect -Radius ([float](S 4))
     $g.DrawString($tStr, $fontAxis, $c["crossTagFg"], ($tRect.Left + (S 4)), ($tRect.Top + 1))
 
     # HUD (below the legend row, so legends + range badge stay readable)
@@ -3787,13 +3891,13 @@ function Render-ChartOverlay {
     }
     $hudSz = $g.MeasureString($hudTxt, $fontAxis)
     $hudW = [int][math]::Ceiling($hudSz.Width) + (S 10)
-    $hudH = S 20
-    $hudX = $pr.Right - $hudW - (S 6)
+    $hudH = S 22
+    $hudX = $pr.Right - $hudW - (S 8)
     if ($hudX -lt ($pr.Left + 6)) { $hudX = $pr.Left + 6 }
     $hudRect = New-Object System.Drawing.Rectangle($hudX, ($pr.Top + (S 22)), $hudW, $hudH)
-    $g.FillRectangle($c["hudBg"], $hudRect)
-    $g.DrawRectangle($c["sepPen"], $hudRect)
-    $g.DrawString($hudTxt, $fontAxis, $c["hudFg"], ($hudRect.Left + 5), ($hudRect.Top + 3))
+    # v5.2: rounded HUD with a soft shadow
+    Fill-RoundedRect -g $g -Brush $c["hudBg"] -Rect $hudRect -Radius ([float](S 6)) -Pen $c["framePen"] -Shadow 3
+    $g.DrawString($hudTxt, $fontAxis, $c["hudFg"], ($hudRect.Left + 5), ($hudRect.Top + 4))
 }
 
 function Draw-ChartMeasure {
@@ -3826,7 +3930,7 @@ function Draw-ChartMeasure {
         $x = [math]::Max($pr.Left + 2, [math]::Min($x, $pr.Right - $w - 2))
         $y = [int][math]::Min($pa.Y, $pb.Y) - $h - (S 6)
         if ($y -lt ($pr.Top + (S 44))) { $y = [int][math]::Max($pa.Y, $pb.Y) + (S 6) }
-        $g.FillRectangle($lblBr, $x, $y, $w, $h)
+        Fill-RoundedRect -g $g -Brush $lblBr -Rect (New-Object System.Drawing.Rectangle($x, $y, $w, $h)) -Radius ([float](S 5)) -Shadow 2
         $g.DrawString($txt, $fontBadge, $script:GdiCache["tagTextBr"], ($x + (S 5)), ($y + (S 3)))
     } finally {
         $fill.Dispose(); $pen.Dispose(); $lblBr.Dispose()
@@ -4007,6 +4111,7 @@ $script:EnText = @{
     "Zeichnen" = "Draw"; "Horizontale Linie" = "Horizontal line"; "Trendlinie (D)" = "Trend line (D)"; "Fibonacci" = "Fibonacci"; "Alle Zeichnungen dieses Tickers löschen" = "Delete all drawings of this ticker"; "Alarm auf diese Linie" = "Alert on this line"; "Zeichnung löschen" = "Delete drawing"; "Eigene Käufe / Verkäufe anzeigen" = "Show own buys / sells"
     "+ Neue Gruppe ..." = "+ New group ..."; "Gruppe löschen:" = "Delete group:"; "Zu Gruppe" = "To group"; "Neue Gruppe ..." = "New group ..."; "Tag:" = "Day:"; "Im Depot" = "In depot"; "Zahlen:" = "Earnings:"; "Analysten:" = "Analysts:"; "Infokarte, wenn die Maus auf einem Ticker ruht" = "Info card when the mouse rests on a ticker"
     "Beitrag" = "Contribution"; "Vergleich" = "Compare"; "Ticker-Analyse: Signale + Kennzahlen (TA)" = "Ticker analysis: signals + fundamentals (TA)"; "Technische Signale (Tageskurse)" = "Technical signals (daily)"; "Kennzahlen" = "Fundamentals"; "Signal" = "Signal"; "Einordnung" = "Assessment"; "Szenario: Markt" = "Scenario: market"; "Indizes:" = "Indices:"; "Laden" = "Load"; "Anfang" = "Start"; "Käufe" = "Buys"; "Verkäufe" = "Sales"; "Ende" = "End"; "Beta aus" = "Beta from"; "Veränderung" = "Change"; "Position %" = "Position %"; "Diff." = "Diff."; "12M jetzt" = "12M now"; "12M min" = "12M min"; "12M max" = "12M max"; "Volatilität" = "Volatility"; "Max. DD" = "Max. DD"; "Summe" = "Total"; "Kurs 12 Monate" = "Price 12 months"; "positiv" = "positive"; "negativ" = "negative"; "überwiegend positiv" = "mostly positive"; "überwiegend negativ" = "mostly negative"; "gemischt" = "mixed"; "Signale" = "Signals"; "Zusammenfassung klassischer Indikatoren und Kennzahlen - keine Anlageberatung." = "Summary of classic indicators and ratios - not investment advice."; "Kurse in der Währung des Tickers, Depot in {0}" = "Prices in the ticker's currency, depot in {0}"
+    "Design" = "Design"; "Stil" = "Style"; "Zeilenhöhe der Listen" = "List row height"; "Kompakt" = "Compact"; "Bequem" = "Comfortable"; "Laufleiste Tempo" = "Ticker bar speed"; "Langsam" = "Slow"; "Schnell" = "Fast"; "Zebra-Zeilen (jede zweite Zeile heller)" = "Zebra rows (every second row lighter)"; "Symbole auf Knöpfen und in Menüs" = "Icons on buttons and menus"; "Refined - wie gewohnt, feiner" = "Refined - familiar, cleaner"; "Fresh - Karten, mehr Luft" = "Fresh - cards, more space"
 }
 
 function Tr {
@@ -4117,6 +4222,44 @@ if ($initX -lt $virtBounds.Left -or $initX -gt ($virtBounds.Right - 200)) { $ini
 if ($initY -lt $virtBounds.Top  -or $initY -gt ($virtBounds.Bottom - 120)) { $initY = 80 }
 $form.Location = New-Object System.Drawing.Point($initX, $initY)
 
+# v5.2: rounded buttons, painted over the flat button (radius from the style)
+$script:RoundBtns = New-Object System.Collections.Generic.HashSet[object]
+$script:HotBtn = $null
+$script:RoundBtnPaint = {
+    param($sender, $e)
+    $spec = $script:UiSpec
+    if ($null -eq $spec -or [int]$spec.BtnRadius -le 0) { return }
+    try {
+        $g = $e.Graphics
+        $par = $sender.Parent
+        $bg = if ($null -ne $par) { $par.BackColor } else { $script:Pal.BodyBg }
+        if ($bg.A -lt 255) { $bg = $script:Pal.BodyBg }
+        $g.Clear($bg)
+        $w = $sender.ClientSize.Width; $h = $sender.ClientSize.Height
+        $fill = if (-not $sender.Enabled) { Get-MixColor -A $sender.BackColor -B $bg -T 0.5 }
+                elseif ([object]::ReferenceEquals($script:HotBtn, $sender)) { $sender.FlatAppearance.MouseOverBackColor }
+                else { $sender.BackColor }
+        $br = New-Object System.Drawing.SolidBrush($fill)
+        $pn = $null
+        if ($sender.FlatAppearance.BorderSize -gt 0) { $pn = New-Object System.Drawing.Pen($sender.FlatAppearance.BorderColor, 1) }
+        Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF(0.5, 0.5, ($w - 1.5), ($h - 1.5))) -Radius ([float](S $spec.BtnRadius)) -Pen $pn
+        $br.Dispose(); if ($null -ne $pn) { $pn.Dispose() }
+        $fg = if ($sender.Enabled) { $sender.ForeColor } else { $script:Pal.Muted }
+        $tf = [System.Windows.Forms.TextFormatFlags]
+        # icon buttons (one glyph) get no padding and no ellipsis
+        $short = ([string]$sender.Text).Length -le 2
+        $flags = $tf::VerticalCenter -bor $tf::SingleLine -bor $tf::NoPrefix
+        if (-not $short) { $flags = $flags -bor $tf::EndEllipsis }
+        $ta = [string]$sender.TextAlign
+        $flags = $flags -bor $(if ($ta -like "*Left") { $tf::Left } elseif ($ta -like "*Right") { $tf::Right } else { $tf::HorizontalCenter })
+        $pad = if ($short) { 0 } else { S 4 }
+        $tr = New-Object System.Drawing.Rectangle($pad, 0, [math]::Max(1, $w - 2 * $pad), $h)
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $sender.Text, $sender.Font, $tr, $fg, $flags)
+    } catch { }
+}
+$script:RoundBtnEnter = { param($sender, $e) $script:HotBtn = $sender; $sender.Invalidate() }
+$script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; $sender.Invalidate() }
+
 function Style-FlatButton {
     param(
         [System.Windows.Forms.Button]$Btn,
@@ -4125,7 +4268,15 @@ function Style-FlatButton {
         [System.Drawing.Color]$BorderColor
     )
     $Btn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-    $Btn.FlatAppearance.BorderSize = 1
+    if (-not $script:RoundBtns.Contains($Btn)) {
+        [void]$script:RoundBtns.Add($Btn)
+        $Btn.Add_Paint($script:RoundBtnPaint)
+        $Btn.Add_MouseEnter($script:RoundBtnEnter)
+        $Btn.Add_MouseLeave($script:RoundBtnLeave)
+    }
+    # v5.2: the Fresh style drops plain borders (accent borders stay: they mean something)
+    $Btn.FlatAppearance.BorderSize = if ($script:UiSpec.Fresh -and $BorderColor.ToArgb() -eq $script:Pal.Border.ToArgb()) { 0 } else { 1 }
+    $Btn.Invalidate()
     $Btn.FlatAppearance.BorderColor = $BorderColor
     $Btn.FlatAppearance.MouseOverBackColor = $script:Pal.Hover
     $Btn.BackColor = $BgColor
@@ -4175,9 +4326,12 @@ $trayIcon.ContextMenuStrip = $trayMenu
 
 function Style-DataGrid {
     param([System.Windows.Forms.DataGridView]$Grid)
+    $spec = $script:UiSpec
     $Grid.BackgroundColor = $script:Pal.Card
     $Grid.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-    $Grid.GridColor = $script:Pal.Border
+    # v5.2: only horizontal row lines, softer
+    $Grid.CellBorderStyle = [System.Windows.Forms.DataGridViewCellBorderStyle]::SingleHorizontal
+    $Grid.GridColor = Get-MixColor -A $script:Pal.Border -B $script:Pal.Card -T 0.55
     $Grid.RowHeadersVisible = $false
     $Grid.AllowUserToAddRows = $false
     $Grid.AllowUserToDeleteRows = $false
@@ -4186,14 +4340,18 @@ function Style-DataGrid {
     $Grid.MultiSelect = $false
     $Grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $Grid.EnableHeadersVisualStyles = $false
-    $Grid.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $Grid.ColumnHeadersHeight = S 26
-    $Grid.RowTemplate.Height = S ([math]::Round(25 * $script:GridRowScale))
+    $Grid.ColumnHeadersBorderStyle = if ($spec.Fresh) { [System.Windows.Forms.DataGridViewHeaderBorderStyle]::None } else { [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single }
+    $Grid.ColumnHeadersHeight = S $spec.HeaderH
+    $rowH = S ([math]::Round([int]$spec.RowH * $script:GridRowScale))
+    $Grid.RowTemplate.Height = $rowH
+    if ($Grid.Rows.Count -le 400) { foreach ($rw in $Grid.Rows) { if ($rw.Height -ne $rowH) { $rw.Height = $rowH } } }
 
     $hdrStyle = New-Object System.Windows.Forms.DataGridViewCellStyle
-    $hdrStyle.BackColor = $script:Pal.Input
-    $hdrStyle.ForeColor = $script:Pal.Accent
+    $hdrStyle.BackColor = if ($spec.Fresh) { $script:Pal.Card } else { $script:Pal.Input }
+    $hdrStyle.ForeColor = if ($spec.Fresh) { $script:Pal.Muted } else { $script:Pal.Accent }
+    $hdrStyle.SelectionBackColor = $hdrStyle.BackColor
     $hdrStyle.Font = $fontUiBold
+    $hdrStyle.Padding = New-Object System.Windows.Forms.Padding((S $spec.CellPad), 0, (S $spec.CellPad), 0)
     $Grid.ColumnHeadersDefaultCellStyle = $hdrStyle
 
     $cellStyle = New-Object System.Windows.Forms.DataGridViewCellStyle
@@ -4202,7 +4360,12 @@ function Style-DataGrid {
     $cellStyle.SelectionBackColor = $script:Pal.Hover
     $cellStyle.SelectionForeColor = $script:Pal.Text
     $cellStyle.Font = $fontGrid
+    $cellStyle.Padding = New-Object System.Windows.Forms.Padding((S $spec.CellPad), 0, (S $spec.CellPad), 0)
     $Grid.DefaultCellStyle = $cellStyle
+    # v5.2: zebra rows (optional)
+    $alt = New-Object System.Windows.Forms.DataGridViewCellStyle
+    $alt.BackColor = if ([bool]$script:Config.ZebraRows) { Get-MixColor -A $script:Pal.Text -B $script:Pal.Card -T 0.035 } else { $script:Pal.Card }
+    $Grid.AlternatingRowsDefaultCellStyle = $alt
 }
 
 # ==============================================================================
@@ -4219,6 +4382,11 @@ $pnlHeader.Add_Paint({
         # borderless strip (v4.0): frame it so it stands out from the desktop
         $pen.Color = $script:Pal.Accent
         $e.Graphics.DrawRectangle($pen, 0, 0, ($sender.Width - 1), ($sender.Height - 1))
+    } elseif ($script:UiSpec.Fresh) {
+        # v5.2 Fresh: accent line under the header that fades out to the right
+        $gb = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Point(0, 0)), (New-Object System.Drawing.Point([math]::Max(2, $sender.Width), 0)), $script:Pal.Accent, $script:Pal.HeaderBg)
+        $e.Graphics.FillRectangle($gb, 0, ($sender.Height - 2), $sender.Width, 2)
+        $gb.Dispose()
     } else {
         $e.Graphics.DrawLine($pen, 0, ($sender.Height - 1), $sender.Width, ($sender.Height - 1))
     }
@@ -4443,6 +4611,15 @@ $pnlTape.Add_Paint({
     } else {
         $x = -[int]$script:TapeOffset
         while ($x -lt $pw) { $g.DrawImageUnscaled($bmp, $x, 0); $x += $bmp.Width }
+        # v5.2: soft fade at both ends while it scrolls
+        $fw = S 28
+        $ph = [math]::Max(1, $sender.ClientSize.Height)
+        $hb = $script:Pal.HeaderBg
+        $clear = [System.Drawing.Color]::FromArgb(0, $hb.R, $hb.G, $hb.B)
+        $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, 0, $fw, $ph)), $hb, $clear, [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal)
+        $g.FillRectangle($lg, 0, 0, $fw, $ph); $lg.Dispose()
+        $rg = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(($pw - $fw), 0, $fw, $ph)), $clear, $hb, [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal)
+        $g.FillRectangle($rg, ($pw - $fw), 0, $fw, $ph); $rg.Dispose()
     }
     $g.DrawLine($script:GdiCache["sepPen"], 0, 0, $pw, 0)
 })
@@ -4462,12 +4639,12 @@ $pnlTape.Add_MouseClick({
 })
 
 $tapeTimer = New-Object System.Windows.Forms.Timer
-$tapeTimer.Interval = 30
+$tapeTimer.Interval = 16   # v5.2: ~60 steps a second, speed from TapeSpeed
 $tapeTimer.Add_Tick({
     $bmp = $script:TapeBitmap
     if ($script:TapeHover -or $null -eq $bmp -or -not $pnlTape.Visible -or -not $form.Visible) { return }
     if ($bmp.Width -le $pnlTape.ClientSize.Width) { return }
-    $script:TapeOffset = ($script:TapeOffset + $script:DpiScale) % $bmp.Width
+    $script:TapeOffset = ($script:TapeOffset + $script:DpiScale * 0.55 * (Get-TapeStep ([string]$script:Config.TapeSpeed))) % $bmp.Width
     $pnlTape.Invalidate()
 })
 
@@ -4673,7 +4850,7 @@ $pnlHealth.BackColor = $script:Pal.BodyBg
 Enable-DoubleBuffering -Control $pnlHealth
 $pnlHealth.Add_Paint({
     param($sender, $e)
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     $c = switch ($script:HealthLevel) { "ERR" { $colRed } "WARN" { $amber } "OK" { $colGreen } default { $script:Pal.Muted } }
     $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $br = New-Object System.Drawing.SolidBrush($c)
@@ -4687,6 +4864,27 @@ Set-Tip $lblStatus "Wechselkurse und Stand der letzten Aktualisierung" "STAND"
 # ==============================================================================
 # VIEW 1: CHART VIEW
 # ==============================================================================
+# v5.2 Fresh: list panels as rounded cards (corners painted in the window colour)
+$script:CardPaint = {
+    param($sender, $e)
+    if ($null -eq $script:UiSpec -or -not $script:UiSpec.Fresh) { return }
+    try {
+        $g = $e.Graphics
+        $w = $sender.ClientSize.Width; $h = $sender.ClientSize.Height
+        $rad = [float](S $script:UiSpec.CardRadius)
+        $outer = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $outer.AddRectangle((New-Object System.Drawing.Rectangle(-1, -1, ($w + 2), ($h + 2))))
+        $inner = New-RoundedPath (New-Object System.Drawing.RectangleF(0, 0, [float]$w, [float]$h)) $rad
+        $outer.AddPath($inner, $false)
+        $outer.FillMode = [System.Drawing.Drawing2D.FillMode]::Alternate
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $bb = New-Object System.Drawing.SolidBrush($form.BackColor)
+        $g.FillPath($bb, $outer); $bb.Dispose()
+        $edge = New-RoundedPath (New-Object System.Drawing.RectangleF(0.5, 0.5, [float]($w - 1), [float]($h - 1))) $rad
+        $g.DrawPath($script:GdiCache["cardPen"], $edge)
+        $edge.Dispose(); $inner.Dispose(); $outer.Dispose()
+    } catch { }
+}
 $viewChart = New-Object System.Windows.Forms.Panel
 $viewChart.Location = New-Object System.Drawing.Point((S 12), (S 92))
 $viewChart.Size = New-Object System.Drawing.Size((S 756), (S 456))
@@ -5130,6 +5328,7 @@ $viewPortfolio.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewPortfolio.BackColor = $script:Pal.Card
 $viewPortfolio.Visible = $false
 $form.Controls.Add($viewPortfolio)
+$viewPortfolio.Add_Paint($script:CardPaint)
 
 $lblPortSummary = New-Object System.Windows.Forms.Label
 $lblPortSummary.Location = New-Object System.Drawing.Point((S 10), (S 8))
@@ -5418,6 +5617,7 @@ $viewWatch.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewWatch.BackColor = $script:Pal.Card
 $viewWatch.Visible = $false
 $form.Controls.Add($viewWatch)
+$viewWatch.Add_Paint($script:CardPaint)
 
 $lblWlTitle = New-Object System.Windows.Forms.Label
 $lblWlTitle.Location = New-Object System.Drawing.Point((S 10), (S 8))
@@ -5675,6 +5875,7 @@ $viewNews.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewNews.BackColor = $script:Pal.Card
 $viewNews.Visible = $false
 $form.Controls.Add($viewNews)
+$viewNews.Add_Paint($script:CardPaint)
 
 $lblNewsTitle = New-Object System.Windows.Forms.Label
 $lblNewsTitle.SetBounds((S 10), (S 8), (S 330), (S 20))
@@ -6363,7 +6564,7 @@ function Update-MainLayout {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
             -ShowWatch ([bool]$script:Config.TerminalShowWatch) -ShowPortfolio ([bool]$script:Config.TerminalShowPortfolio) `
-            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S 8) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull) `
+            -ActiveBottom ([string]$script:Config.TerminalBottom) -PanelMinW (S 756) -Gap (S $script:UiSpec.Gap) -MinBottomH (S 300) -MinChartH (S 160) -Full ([string]$script:TerminalFull) `
             -SplitPct ([double]$script:Config.TerminalSplitPct)
         $on = @{}
         foreach ($pair in @(@("Chart", $viewChart), @("Watchlist", $viewWatch), @("Portfolio", $viewPortfolio), @("News", $viewNews))) {
@@ -6419,6 +6620,7 @@ function Apply-TooltipMode {
 function Apply-ThemeToAllControls {
     Update-UpDownColors
     $script:Pal = Get-ThemeColors
+    $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
     Rebuild-GdiCache
     Apply-DwmTitlebarTheme
     $p = $script:Pal
@@ -6538,6 +6740,72 @@ function Apply-ThemeToAllControls {
     Update-AllUiViews
     $pnlHeader.Invalidate()
     $pnlTickerBox.Invalidate()
+    # v5.2: icons, gaps and card corners follow the style
+    Apply-Icons
+    Update-MainLayout
+    foreach ($v in @($viewWatch, $viewPortfolio, $viewNews, $viewChart)) { $v.Invalidate() }
+    foreach ($b in @($script:RoundBtns)) { if ($null -ne $b -and -not $b.IsDisposed) { $b.Invalidate() } }
+    $script:ChartSignature = ""
+    $pnlChartCanvas.Invalidate()
+}
+
+# v5.2: icon font glyphs on buttons and menus (text fallback without the font)
+$script:GlyphCache = @{}
+function Get-GlyphImage {
+    param([int]$Code, [System.Drawing.Color]$Color)
+    if (-not $script:IconFont) { return $null }
+    $key = "{0:X}|{1}" -f $Code, $Color.ToArgb()
+    if ($script:GlyphCache.ContainsKey($key)) { return $script:GlyphCache[$key] }
+    $sz = S 16
+    $bmp = New-Object System.Drawing.Bitmap($sz, $sz, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $f = New-Object System.Drawing.Font($script:IconFont, [float]($sz * 0.8), [System.Drawing.GraphicsUnit]::Pixel)
+        $br = New-Object System.Drawing.SolidBrush($Color)
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.Alignment = [System.Drawing.StringAlignment]::Center; $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $g.DrawString([string][char]$Code, $f, $br, (New-Object System.Drawing.RectangleF(0, 0, [float]$sz, [float]$sz)), $sf)
+        $br.Dispose(); $f.Dispose(); $sf.Dispose()
+    } finally { $g.Dispose() }
+    $script:GlyphCache[$key] = $bmp
+    return $bmp
+}
+
+function Apply-Icons {
+    $on = [bool]$script:Config.UseIcons -and [bool]$script:IconFont
+    if ($null -eq $script:IconBtnFont -and $script:IconFont) { $script:IconBtnFont = New-Object System.Drawing.Font($script:IconFont, 10) }
+    $btns = @(
+        @($btnSettings, 0xE713, ([string][char]0x2699)),
+        @($btnRefreshNow, 0xE72C, ([string][char]0x21BB)),
+        @($btnNewsRefresh, 0xE72C, ([string][char]0x21BB)),
+        @($btnTray, 0xE921, "_"),
+        @($btnPortMore, 0xE70D, ([string][char]0x25BE)),
+        @($btnAddAlert, 0xE710, "+"),
+        @($btnPin, 0xE718, "Pin"),
+        @($btnFullscreen, 0xE740, (Tr "Vollbild"))
+    )
+    foreach ($bd in $btns) {
+        $b = $bd[0]
+        if ($null -eq $b) { continue }
+        if ($on) { $b.Font = $script:IconBtnFont; $b.Text = [string][char][int]$bd[1] }
+        else { $b.Font = $fontUiBold; $b.Text = [string]$bd[2] }
+    }
+    Update-ChartControlsLayout
+    $col = $script:Pal.Accent
+    $menuIcons = @(
+        @($miShow, 0xE8A7), @($miLayout, 0xE8A9), @($miRefresh, 0xE72C), @($miPrivacy, 0xE890), @($miExit, 0xE7E8),
+        @($cmiCopyPrice, 0xE8C8), @($cmiAddWatch, 0xE710), @($cmiExportCsv, 0xE78C), @($cmiFullscreen, 0xE740), @($cmiTa, 0xE9D9),
+        @($cmiCompare, 0xEB11), @($cmiAlertHere, 0xEA8F), @($cmiZoomReset, 0xE72C),
+        @($miRowChart, 0xE9D2), @($miRowAlert, 0xEA8F), @($miRowBuy, 0xE719), @($miRowNews, 0xE8A5), @($miRowCmp, 0xEB11),
+        @($miRowDes, 0xE946), @($miRowTa, 0xE9D9), @($miRowRemove, 0xE74D), @($miRowGroup, 0xE8EC)
+    )
+    foreach ($mi in $menuIcons) {
+        if ($null -eq $mi[0]) { continue }
+        $mi[0].Image = if ($on) { Get-GlyphImage -Code ([int]$mi[1]) -Color $col } else { $null }
+    }
+    foreach ($m in @($trayMenu, $chartContextMenu, $rowMenu)) { if ($null -ne $m) { $m.ImageScalingSize = New-Object System.Drawing.Size((S 16), (S 16)) } }
 }
 
 
@@ -7046,7 +7314,7 @@ function Refresh-PortfolioGrid {
         Set-PriceFlash -Cell $dgvPortfolio.Rows[$idx].Cells["Price"] -Key ("P|" + $r.Ticker) -Price ([double]$r.Price)
         $eb = Get-TickerEarningsBadge $r.Ticker
         if ($null -ne $eb) {
-            $dgvPortfolio.Rows[$idx].Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+            $dgvPortfolio.Rows[$idx].Cells[0].Style.ForeColor = $script:Pal.Warn
             $dgvPortfolio.Rows[$idx].Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
         }
     }
@@ -7235,7 +7503,7 @@ function Refresh-WatchlistAndAlerts {
             if ($q.High52 -gt 0 -and $q.Low52 -gt 0) { $row.Cells["Dist"].ToolTipText = "52 Wochen: {0:N2} - {1:N2} {2}`r`nAbstand zum Hoch: {3}" -f $q.Low52, $q.High52, $q.Currency, $distStr }
             $eb = Get-TickerEarningsBadge $uSym
             if ($null -ne $eb) {
-                $row.Cells[0].Style.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+                $row.Cells[0].Style.ForeColor = $script:Pal.Warn
                 $row.Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
             }
             $row.Cells["Day"].Style.ForeColor = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
@@ -7480,7 +7748,7 @@ function Get-MarketStateColor {
     switch ($State) {
         "REGULAR" { return $colGreen }
         "OPEN24"  { return $colGreen }
-        "PRE"     { return [System.Drawing.Color]::FromArgb(245, 158, 11) }
+        "PRE"     { return $script:Pal.Warn }
         "POST"    { return [System.Drawing.Color]::FromArgb(168, 85, 247) }
         default   { return $script:Pal.Muted }
     }
@@ -7975,7 +8243,7 @@ function Update-StatusLine {
     # expire on time and the "Stand" age colour stays current.
     if ($script:IsClosing -or $form.IsDisposed) { return }
     $p = $script:Pal
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     $fxMissingList = @($script:FxMissing | Where-Object { $_ -and $_ -ne "EUR" -and -not $script:FxLive.Contains($_) } | Sort-Object)
     if ($script:TransientStatus -and (Get-Date) -lt $script:TransientUntil) {
         $txt = $script:TransientStatus; $colr = $amber
@@ -8095,7 +8363,7 @@ function Update-AllUiViews {
         $eb = Get-TickerEarningsBadge ([string]$script:Config.ActiveTicker)
         if ($null -ne $eb) {
             $lblHeaderName.Text = "Zahlen {0} · {1} ({2})" -f $eb.Text, $q.LongName, $q.Currency
-            $lblHeaderName.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+            $lblHeaderName.ForeColor = $script:Pal.Warn
         } else {
             $lblHeaderName.Text = "{0} ({1})" -f $q.LongName, $q.Currency
             $lblHeaderName.ForeColor = $p.Muted
@@ -8865,7 +9133,7 @@ function Show-YearReport {
                          $t.Gains, $t.Losses, $t.SellNet, $t.SellFees, $t.DividendsGross, $t.DividendFees, $b, $t.DividendsNet, $t.Net)
         $rc.Sum.ForeColor = if ($t.Net -ge 0) { $colGreen } else { $colRed }
         $rows = @($Rep.Rows).Count
-        $rc.Info.ForeColor = if (@($Rep.Warnings).Count -gt 0) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Muted }
+        $rc.Info.ForeColor = if (@($Rep.Warnings).Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
         $rc.Info.Text = if (@($Rep.Warnings).Count -gt 0) { (@($Rep.Warnings) -join " | ") } else { "{0} Buchung(en) in {1}" -f $rows, $Rep.Year }
         Set-DynTip $rc.Info (@($Rep.Warnings) -join "`r`n")
         $rc.Csv.Enabled = ($rows -gt 0)
@@ -9265,7 +9533,7 @@ function Update-AnalysisPerf {
         $ac.Sum.ForeColor = if ($res -ge 0) { $colGreen } else { $colRed }
     }
     $ac.Status.Text = if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b }
-    $ac.Status.ForeColor = if ($notes.Count -gt 0) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Muted }
+    $ac.Status.ForeColor = if ($notes.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
     Set-DynTip $ac.Status ($ac.Status.Text)
     $ac.Chart.Invalidate()
 }
@@ -9340,7 +9608,7 @@ function Update-AnalysisAllocation {
     $warn = @(Get-ConcentrationWarnings -Groups $ac.Groups -ThresholdPct $thr)
     $dimName = switch ([string]$ac.Dim) { "Currency" { "Währung" } "Sector" { "Sektor" } "Country" { "Land" } default { "Position" } }
     if ($warn.Count -gt 0) {
-        $ac.AllocWarn.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        $ac.AllocWarn.ForeColor = $script:Pal.Warn
         $ac.AllocWarn.Text = "Klumpenrisiko ({0} über {1:N0} %): {2}" -f $dimName, $thr, ((@($warn) | ForEach-Object { "{0} {1:N1} %" -f $_.Key, $_.Pct }) -join ", ")
     } else {
         $ac.AllocWarn.ForeColor = $script:Pal.Muted
@@ -9377,7 +9645,7 @@ function Draw-AnalysisChart {
     $g.Clear($p.Card)
     $brMuted = New-Object System.Drawing.SolidBrush($p.Muted)
     $brText = New-Object System.Drawing.SolidBrush($p.Text)
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     try {
         $m = if ($null -ne $ac) { $ac.Model } else { $null }
         if ($null -eq $m -or $null -eq $m.Series) {
@@ -9474,7 +9742,7 @@ function Draw-AllocationBars {
     $brT = New-Object System.Drawing.SolidBrush($p.Text)
     $brM = New-Object System.Drawing.SolidBrush($p.Muted)
     $brA = New-Object System.Drawing.SolidBrush($p.Accent)
-    $brW = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 158, 11))
+    $brW = New-Object System.Drawing.SolidBrush($script:Pal.Warn)
     try {
         $groups = if ($null -ne $ac) { @($ac.Groups) } else { @() }
         if ($groups.Count -eq 0) {
@@ -9506,7 +9774,7 @@ function Draw-AllocationBars {
         # threshold marker
         if ($thr -le $maxPct) {
             $tx = [float]($x0 + ($x1 - $x0) * ($thr / $maxPct))
-            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(245, 158, 11), 1)
+            $pen = New-Object System.Drawing.Pen($script:Pal.Warn, 1)
             $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
             $g.DrawLine($pen, $tx, [float](S 4), $tx, [float]([math]::Min($H - 2, $y)))
             $pen.Dispose()
@@ -9551,7 +9819,7 @@ function Update-AnalysisDividends {
     if ($null -eq $ac -or $null -eq $ac.DivGrid) { return }
     $base = Get-AnalysisBase
     $today = (Get-Date).ToString("yyyy-MM-dd")
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     $g = $ac.DivGrid
     $g.Rows.Clear()
     $items = New-Object System.Collections.Generic.List[PSObject]
@@ -9804,7 +10072,7 @@ function Update-AnalysisTarget {
         $tradeTxt = if ([math]::Abs($pr.Trade) -lt 0.005) { "-" } else { "{0}{1:N2} {2}" -f $(if ($pr.Trade -gt 0) { (Tr "Kauf") + " " } else { (Tr "Verkauf") + " " }), [math]::Abs($pr.Trade), $base }
         $shTxt = if ([math]::Abs($pr.Shares) -lt 0.0001) { "-" } else { "{0:N2}" -f [math]::Abs($pr.Shares) }
         $i = $g.Rows.Add($x.Sym, (Protect-Amount ("{0:N2}" -f $x.Value) $priv), ("{0:N1}%" -f $ist), ("{0:0.##}" -f $pr.Target), ("{0:+0.0;-0.0;0.0} %-Pkt." -f $pr.Drift), $tradeTxt, $shTxt, ("{0:N1}%" -f $after))
-        $g.Rows[$i].Cells["Abweichung"].Style.ForeColor = if ([math]::Abs($pr.Drift) -ge 5) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Muted }
+        $g.Rows[$i].Cells["Abweichung"].Style.ForeColor = if ([math]::Abs($pr.Drift) -ge 5) { $script:Pal.Warn } else { $script:Pal.Muted }
         if ($pr.Trade -gt 0.005) { $g.Rows[$i].Cells["KaufVerkauf"].Style.ForeColor = $colGreen } elseif ($pr.Trade -lt -0.005) { $g.Rows[$i].Cells["KaufVerkauf"].Style.ForeColor = $colRed }
     }
     $p = $script:Pal
@@ -9816,7 +10084,7 @@ function Update-AnalysisTarget {
     $warn = if ([math]::Abs($plan.TargetSum - 100) -gt 0.05) { "  " + ("Achtung: Ziele ergeben {0:0.#} % - der Rest bleibt Geld." -f $plan.TargetSum) } else { "" }
     $ac.TSum.Text = "{0}: {1:N2} {2} | {3}: {4:N2} {2} | {5}: {6:N2} {2}{7}`r`n{8}" -f (Tr "Basis (Positionen mit Ziel + Geld)"), $plan.Base, $base, (Tr "netto investiert"), $plan.Invest, (Tr "übrig"), $plan.Left, $warn, (Tr "Vorschlag ohne Gebühren und Steuern, Stückzahlen gerundet auf 2 Stellen. Keine Anlageberatung.")
     if ($priv) { $ac.TSum.Text = Tr "Privat-Modus: Beträge ausgeblendet (F9)." }
-    $ac.TSum.ForeColor = if ($warn) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $p.Text }
+    $ac.TSum.ForeColor = if ($warn) { $script:Pal.Warn } else { $p.Text }
 }
 
 function Update-AnalysisHeat {
@@ -10003,7 +10271,7 @@ function Update-AnalysisBench {
         $ppy = Get-PeriodsPerYear -Dates $dd
         $hist = Get-FxHistoryMap
         $fb = @{}; foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
-        $colors = @($script:Pal.Accent, [System.Drawing.Color]::FromArgb(245, 158, 11), [System.Drawing.Color]::FromArgb(168, 85, 247), [System.Drawing.Color]::FromArgb(236, 72, 153), [System.Drawing.Color]::FromArgb(34, 211, 238), [System.Drawing.Color]::FromArgb(132, 204, 22), [System.Drawing.Color]::FromArgb(148, 163, 184))
+        $colors = @($script:Pal.Accent, $script:Pal.Warn, [System.Drawing.Color]::FromArgb(168, 85, 247), [System.Drawing.Color]::FromArgb(236, 72, 153), [System.Drawing.Color]::FromArgb(34, 211, 238), [System.Drawing.Color]::FromArgb(132, 204, 22), [System.Drawing.Color]::FromArgb(148, 163, 184))
         $lines = @()
         $full = Get-TwrIndex -Value ([double[]]$sr.Value) -Invested ([double[]]$sr.Invested) -Dividends ([double[]]$sr.Dividends)
         $win = Get-TwrIndex -Value ([double[]]$sr.Value) -Invested ([double[]]$sr.Invested) -Dividends ([double[]]$sr.Dividends) -Start $st
@@ -10058,7 +10326,7 @@ function Update-AnalysisBench {
     $ac.Dim = $savedDim
     foreach ($r in @(Get-SectorComparison -Groups $groups -Reference $script:SectorRef)) {
         $i = $sg.Rows.Add((Tr $r.Sector), ("{0:N1}%" -f $r.Depot), $(if ([double]::IsNaN([double]$r.Ref)) { "-" } else { "{0:N1}%" -f $r.Ref }), $(if ([double]::IsNaN([double]$r.Diff)) { "-" } else { "{0:+0.0;-0.0}" -f $r.Diff }))
-        if (-not [double]::IsNaN([double]$r.Diff) -and [math]::Abs([double]$r.Diff) -ge 5) { $sg.Rows[$i].Cells[3].Style.ForeColor = $(if ($r.Diff -gt 0) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { [System.Drawing.Color]::FromArgb(59, 130, 246) }) }
+        if (-not [double]::IsNaN([double]$r.Diff) -and [math]::Abs([double]$r.Diff) -ge 5) { $sg.Rows[$i].Cells[3].Style.ForeColor = $(if ($r.Diff -gt 0) { $script:Pal.Warn } else { [System.Drawing.Color]::FromArgb(59, 130, 246) }) }
     }
     if ($null -eq $script:SectorRef) { $sg.Columns[2].HeaderText = $(if ($script:SectorRefLoading) { Tr "MSCI World (lädt)" } else { Tr "MSCI World (n/v)" }) } else { $sg.Columns[2].HeaderText = "MSCI World" }
 }
@@ -11195,7 +11463,7 @@ function Update-TickerAnalysis {
             $g.Rows[$i].Cells[2].Style.ForeColor = $col
         }
         $sc = [int]$sig.Score
-        $c.TSum.ForeColor = if ($sc -ge 3) { $colGreen } elseif ($sc -le -3) { $colRed } else { [System.Drawing.Color]::FromArgb(245, 158, 11) }
+        $c.TSum.ForeColor = if ($sc -ge 3) { $colGreen } elseif ($sc -le -3) { $colRed } else { $script:Pal.Warn }
         $c.TSum.Text = "{0}: {1}  ({2} {3}, {4} {5}; {6} {7})" -f (Tr "Signale"), (Tr $sig.Summary), $sig.Positive, (Tr "positiv"), $sig.Negative, (Tr "negativ"), (Tr "Kurse in"), $c.Bars.Currency
     } elseif ($c.Failed) {
         [void]$g.Rows.Add((Tr "Kursverlauf nicht verfügbar"), "", "")
@@ -11274,7 +11542,7 @@ function Draw-TickerAnalysisChart {
                 $dp.Dispose()
             }
         }
-        foreach ($ser in @(@($s200, [System.Drawing.Color]::FromArgb(168, 85, 247), [float]1.2), @($s50, [System.Drawing.Color]::FromArgb(245, 158, 11), [float]1.2), @($cl, $p.Accent, [float]1.8))) {
+        foreach ($ser in @(@($s200, [System.Drawing.Color]::FromArgb(168, 85, 247), [float]1.2), @($s50, $script:Pal.Warn, [float]1.2), @($cl, $p.Accent, [float]1.8))) {
             $pts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
             for ($i = $st; $i -lt $n0; $i++) {
                 $v = [double]$ser[0][$i]
@@ -11352,11 +11620,11 @@ function Show-TickerAnalysis {
         $c0 = $script:TaCtl
         if ($null -eq $c0) { return }
         $w2 = [int](($sender.ClientSize.Width - (S 36)) / 2)
-        foreach ($ctl in @($c0.Chart, $c0.TGrid, $c0.TSum)) { $ctl.Width = $w2 }
+        foreach ($ctl in @($c0.Chart, $c0.TGrid, $c0.TSum, $c0.TLabel)) { $ctl.Width = $w2 }
         foreach ($ctl in @($c0.FGrid, $c0.FNote, $c0.FLabel)) { $ctl.Left = $w2 + (S 24); $ctl.Width = $sender.ClientSize.Width - $w2 - (S 36) }
     })
     $chart.Add_Paint({ param($sender, $e) try { Draw-TickerAnalysisChart -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "TA chart: $($_.Exception.Message)" "WARN" } })
-    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
+    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; TLabel = $lt; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
     $dlg.Add_Shown({
         Update-TickerAnalysis
         $c0 = $script:TaCtl
@@ -11429,7 +11697,7 @@ function Show-TickerDividendsDialog {
 # ---- CAL / EE: event calendar ----
 function Get-CalendarRows {
     param([string[]]$Symbols, [int]$Days)
-    $amber = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $amber = $script:Pal.Warn
     $rows = foreach ($c in @(Get-EventCalendar -Events $script:Events -Symbols $Symbols -Days $Days)) {
         $when = if ($c.Days -eq 0) { "heute" } elseif ($c.Days -eq 1) { "morgen" } else { "in {0} T" -f $c.Days }
         $own = if ($script:Portfolio.ContainsKey($c.Ticker)) { "Portfolio" } else { "" }
@@ -11645,6 +11913,15 @@ function Invoke-TerminalCommand {
                 $script:Config.Theme = $tn[0]
                 Save-JsonState -Path $script:ConfigPath -Data $script:Config
                 Apply-ThemeToAllControls
+            }
+            "STYLE"  {
+                # v5.2: STYLE / STYLE FRESH / STYLE REFINED (+ ROWS COMPACT|NORMAL|COMFORTABLE)
+                if ($arg0 -in @("FRESH", "REFINED")) { $script:Config.UiStyle = $(if ($arg0 -eq "FRESH") { "Fresh" } else { "Refined" }) }
+                elseif (-not $arg0) { $script:Config.UiStyle = $(if ([string]$script:Config.UiStyle -eq "Fresh") { "Refined" } else { "Fresh" }) }
+                else { return "STYLE / STYLE FRESH / STYLE REFINED" }
+                Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                Apply-ThemeToAllControls
+                Set-TransientStatus ("Design: {0}" -f $script:Config.UiStyle) 3
             }
             "SET"    { Show-SettingsDialog }
             "PUSH"   { [void](Show-PushDialog) }
@@ -13334,10 +13611,21 @@ function Show-SettingsDialog {
 
     & $addSection "Darstellung"
     $cbTheme  = & $addCombo "Theme" @(Get-ThemeNames) ([string]$cfg.Theme) "" "THEME"
-    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen"
+    $cbAccent = & $addCombo "Akzentfarbe" @("Sky", "Amber", "Violet", "Windows", "Eigene") ([string]$cfg.AccentColor) "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen"
     $cbLang   = & $addCombo "Sprache" @("Deutsch", "English") $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart."
     $chkTop   = & $addCheck "Immer im Vordergrund" ([bool]$cfg.TopMost) "" "PIN"
     $chkTape  = & $addCheck "Laufleiste (Watchlist) im Compact-Layout" ([bool]$cfg.CompactTape)
+
+    # v5.2
+    & $addSection "Design"
+    $dsMap = @{ "Refined" = "Refined - wie gewohnt, feiner"; "Fresh" = "Fresh - Karten, mehr Luft" }
+    $cbStyle = & $addCombo "Stil" @($dsMap["Refined"], $dsMap["Fresh"]) $dsMap[[string]$cfg.UiStyle] "Refined: gleiche Anordnung, feinere Linien und runde Knöpfe. Fresh: abgerundete Karten, mehr Abstand, Akzentlinie unter dem Kopf. Befehl STYLE schaltet um."
+    $rdMap = @{ "Compact" = "Kompakt"; "Normal" = "Normal"; "Comfortable" = "Bequem" }
+    $cbRows = & $addCombo "Zeilenhöhe der Listen" @("Kompakt", "Normal", "Bequem") $rdMap[[string]$cfg.RowDensity] "Höhe der Zeilen in Watchlist, Portfolio, News und Analyse"
+    $tsMap = @{ "Slow" = "Langsam"; "Normal" = "Normal"; "Fast" = "Schnell" }
+    $cbTapeSp = & $addCombo "Laufleiste Tempo" @("Langsam", "Normal", "Schnell") $tsMap[[string]$cfg.TapeSpeed] "Geschwindigkeit der Laufleiste im Compact-Layout (Maus darüber = Pause)"
+    $chkZebra = & $addCheck "Zebra-Zeilen (jede zweite Zeile heller)" ([bool]$cfg.ZebraRows)
+    $chkIcons = & $addCheck "Symbole auf Knöpfen und in Menüs" ([bool]$cfg.UseIcons) $(if ($script:IconFont) { "Schrift: $($script:IconFont)" } else { "Segoe Fluent Icons / MDL2 Assets nicht gefunden - es bleibt beim Text" })
 
     & $addSection "Benachrichtigungen"
     $chkTray  = & $addCheck "Tray-Hinweis + Ton bei Alarmen" ([bool]$cfg.ShowTrayNotifications)
@@ -13648,6 +13936,11 @@ function Show-SettingsDialog {
     $cfg.AccentColor           = [string]$cbAccent.SelectedItem
     $cfg.TopMost               = [bool]$chkTop.Checked
     $cfg.CompactTape           = [bool]$chkTape.Checked
+    $cfg.UiStyle               = if ([string]$cbStyle.SelectedItem -like "Fresh*") { "Fresh" } else { "Refined" }
+    $cfg.RowDensity            = switch ([string]$cbRows.SelectedItem) { "Kompakt" { "Compact" } "Bequem" { "Comfortable" } default { "Normal" } }
+    $cfg.TapeSpeed             = switch ([string]$cbTapeSp.SelectedItem) { "Langsam" { "Slow" } "Schnell" { "Fast" } default { "Normal" } }
+    $cfg.ZebraRows             = [bool]$chkZebra.Checked
+    $cfg.UseIcons              = [bool]$chkIcons.Checked
     $cfg.ShowTrayNotifications = [bool]$chkTray.Checked
     $cfg.NotifyMarketOpen      = [bool]$chkOpen.Checked
     $cfg.NotifyEarnings        = [bool]$chkEarn.Checked
@@ -13895,6 +14188,11 @@ NVDA TA         Ticker analysis: signals, support / resistance,
                 (also right-click a ticker or the chart)
 P               Beitrag (contribution, dividends, scenario),
                 Vergleich (indices, rolling 12M, sectors vs. MSCI World)
+
+New in 5.2
+STYLE           Refined / Fresh design (also Settings > Design:
+                row height, zebra rows, icons, ticker bar speed)
+THEME GRAPHITE  neutral grey theme; accent colour "Windows"
 "@
         Show-HelpTextDialog -Title "Help - $($script:AppTitle)" -Text $txtEn
         return
@@ -14005,6 +14303,11 @@ NVDA TA         Ticker-Analyse: Signale, Unterstützung / Widerstand,
                 (auch Rechtsklick auf Ticker oder Chart)
 P               Beitrag (je Position, Dividenden, Szenario),
                 Vergleich (Indizes, rollierend 12 M, Sektoren vs. MSCI World)
+
+Neu in 5.2
+STYLE           Design Refined / Fresh (auch Einstellungen > Design:
+                Zeilenhöhe, Zebra-Zeilen, Symbole, Tempo der Laufleiste)
+THEME GRAPHITE  neutrales Grau; Akzentfarbe "Windows"
 "@
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
@@ -16182,6 +16485,62 @@ function Invoke-SmokeTest {
     Invoke-SmokeStep "English palette" { Show-CommandPalette -Initial "NVDA " } 2000
     Invoke-SmokeStep "English help text" { Show-ShortcutHelp } 2000
     $script:Config.Language = "DE"
+    # v5.2: design styles, with screenshots for the review (TW_SMOKE_SHOTS = folder)
+    $shot = {
+        param([string]$Name, $Win = $null)
+        $dirS = [string]$env:TW_SMOKE_SHOTS
+        if (-not $dirS) { return }
+        if (-not (Test-Path $dirS)) { New-Item -ItemType Directory -Path $dirS -Force | Out-Null }
+        $wf = if ($null -ne $Win) { $Win } else { $form }
+        try { $wf.Activate() } catch { }
+        for ($k = 0; $k -lt 6; $k++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60 }
+        $b = $wf.Bounds
+        $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+        $gS = [System.Drawing.Graphics]::FromImage($bmp)
+        try { $gS.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size) } catch { $gS.Dispose(); $gS = $null; $wf.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $b.Width, $b.Height))) }
+        if ($null -ne $gS) { $gS.Dispose() }
+        $bmp.Save((Join-Path $dirS ($Name + ".png")), [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+    }
+    Invoke-SmokeStep "Design styles" {
+        $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        $form.SetBounds($wa.X, $wa.Y, [math]::Min($wa.Width, 1600), [math]::Min($wa.Height, 1000))
+        Apply-Layout "Terminal"; Set-ActiveTab -TabName "Watchlist"; & $pump
+        $script:Config.Theme = "Dark"; [void](Invoke-TerminalCommand "STYLE REFINED"); & $pump
+        if ($script:UiSpec.Fresh) { throw "STYLE REFINED did not switch" }
+        & $shot "01-refined-dark-terminal"
+        [void](Invoke-TerminalCommand "STYLE FRESH"); & $pump
+        if (-not $script:UiSpec.Fresh) { throw "STYLE FRESH did not switch" }
+        if ($script:IconFont -and $btnSettings.Text -ne [string][char]0xE713) { throw "settings button has no icon ('$($btnSettings.Text)')" }
+        $want = S ([math]::Round([int]$script:UiSpec.RowH * $script:GridRowScale))
+        if ($dgvWatchlist.RowTemplate.Height -ne $want) { throw "row height $($dgvWatchlist.RowTemplate.Height), expected $want" }
+        $pnlChartCanvas.Refresh(); $viewWatch.Refresh(); $btnRefreshNow.Refresh()
+        & $shot "02-fresh-dark-terminal"
+        $script:Config.Theme = "Light"; Apply-ThemeToAllControls; & $pump
+        & $shot "03-fresh-light-terminal"
+        $script:Config.Theme = "Graphite"; $script:Config.ZebraRows = $true; $script:Config.RowDensity = "Comfortable"; $script:Config.AccentColor = "Windows"; Apply-ThemeToAllControls; & $pump
+        if ($null -eq $script:Pal.Warn) { throw "palette has no Warn colour" }
+        & $shot "04-fresh-graphite-zebra-windows-accent"
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "Portfolio"; & $pump
+        & $shot "05-fresh-graphite-portfolio"
+        $script:Config.UseIcons = $false; Apply-Icons
+        if ($btnSettings.Text -ne [string][char]0x2699) { throw "icons off did not restore the text" }
+        $script:Config.UseIcons = $true
+        $script:Config.Theme = "Dark"; $script:Config.ZebraRows = $false; $script:Config.RowDensity = "Normal"; $script:Config.AccentColor = "Sky"
+        [void](Invoke-TerminalCommand "STYLE REFINED")
+        Apply-Layout "Compact"; & $pump
+        $script:Config.TapeSpeed = "Fast"; for ($k = 0; $k -lt 10; $k++) { Start-Sleep -Milliseconds 20; & $pump }
+        & $shot "06-refined-compact-tape"
+        $script:Config.TapeSpeed = "Normal"
+        Apply-Layout "Terminal"; Set-ActiveTab -TabName "Watchlist"; & $pump
+    } 20000
+    $script:SmokeShot = $shot
+    [void](Invoke-TerminalCommand "STYLE FRESH")
+    Invoke-SmokeStep "Design ticker analysis" { & $probeRun { Show-TickerAnalysis "NVDA" } { & $script:SmokeShot "07-fresh-ticker-analysis" ([System.Windows.Forms.Form]::ActiveForm); "" } 8000 } 10000
+    Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
+    Invoke-SmokeStep "Design analysis" { & $probeRun { Show-AnalysisDialog -Page "Bench" } { & $script:SmokeShot "09-fresh-analysis-bench" ([System.Windows.Forms.Form]::ActiveForm); "" } 9000 } 11000
+    [void](Invoke-TerminalCommand "STYLE REFINED")
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
 
     $rep = [PSCustomObject]@{

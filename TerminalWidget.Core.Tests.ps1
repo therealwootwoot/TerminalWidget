@@ -413,7 +413,8 @@ Describe "Layouts and themes (v4.0)" {
     }
     It "cycles the theme through Terminal and back to Dark" {
         Get-NextTheme "Light" | Should -Be "Terminal"
-        Get-NextTheme "Terminal" | Should -Be "Dark"
+        Get-NextTheme "Terminal" | Should -Be "Graphite"
+        Get-NextTheme "Graphite" | Should -Be "Dark"
         Get-NextTheme "unknown" | Should -Be "Dark"
     }
 }
@@ -1497,6 +1498,15 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         }
         $log = Join-Path $dir "widget.log"
         if (Test-Path $log) { Write-Host "---- widget.log (last 60 lines) ----"; Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
+        # v5.2: screenshots also into the log (base64), for reviews without artifact access
+        if ($env:TW_SMOKE_SHOTS -and (Test-Path $env:TW_SMOKE_SHOTS)) {
+            foreach ($png in Get-ChildItem -Path $env:TW_SMOKE_SHOTS -Filter *.png) {
+                $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($png.FullName))
+                Write-Host ("SHOT-BEGIN " + $png.Name)
+                for ($i = 0; $i -lt $b64.Length; $i += 3000) { Write-Host ("SHOT|" + $b64.Substring($i, [math]::Min(3000, $b64.Length - $i))) }
+                Write-Host ("SHOT-END " + $png.Name)
+            }
+        }
         $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
         Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
         $rep = Get-Content $report -Raw | ConvertFrom-Json
@@ -2065,6 +2075,13 @@ Describe "Analysis (v5.1)" {
         ($rows | Where-Object { $_.Key -eq "ProfitMargin" }).Peer | Should -Be "-"
         ($rows | Where-Object { $_.Key -eq "MarketCap" }).Value | Should -Be "2.5 Mrd. EUR"
     }
+    It "keeps fundamentals when they are stored (v5.2 fix)" {
+        $st = ConvertTo-StoredFund ([PSCustomObject]@{ TrailingPE = 30.5; MarketCap = 2.5e9; ForwardPE = [double]::NaN; Currency = "EUR" })
+        $st.TrailingPE | Should -Be 30.5
+        $st.ForwardPE | Should -BeNullOrEmpty
+        $st.Currency | Should -Be "EUR"
+        ((Get-FundamentalRows -Fund $st) | Where-Object { $_.Key -eq "TrailingPE" }).Value | Should -Be "30.50"
+    }
     It "compares sectors with the MSCI World" {
         $sum = [PSCustomObject]@{ quoteSummary = [PSCustomObject]@{ result = @([PSCustomObject]@{ topHoldings = [PSCustomObject]@{ sectorWeightings = @([PSCustomObject]@{ technology = [PSCustomObject]@{ raw = 0.25 } }, [PSCustomObject]@{ realestate = [PSCustomObject]@{ raw = 0.02 } }) } }) } }
         $ref = ConvertFrom-YahooSectorWeights -Summary $sum
@@ -2072,6 +2089,29 @@ Describe "Analysis (v5.1)" {
         $rows = Get-SectorComparison -Groups @([PSCustomObject]@{ Key = "Technology"; Pct = 60.0 }, [PSCustomObject]@{ Key = "Unbekannt"; Pct = 40.0 }) -Reference $ref
         $rows[0].Diff | Should -Be 35
         $rows[$rows.Count - 1].Sector | Should -Be "Andere / ETF / unbekannt"
+    }
+}
+
+Describe "Design (v5.2)" {
+    It "describes the two styles and the row densities" {
+        $r = Get-UiSpec -Style "Refined" -Density "Normal"
+        $f = Get-UiSpec -Style "Fresh" -Density "Comfortable"
+        $r.Fresh | Should -BeFalse
+        $r.CardRadius | Should -Be 0
+        $f.CardRadius | Should -BeGreaterThan 0
+        $f.Gap | Should -BeGreaterThan $r.Gap
+        $f.RowH | Should -Be 32
+        (Get-UiSpec -Style "nonsense" -Density "Compact").Style | Should -Be "Refined"
+        (Get-UiSpec -Density "Compact").RowH | Should -Be 21
+    }
+    It "reads the Windows accent colour" {
+        (ConvertFrom-AbgrDword -Value 0xFFD77800) -join "," | Should -Be "0,120,215"
+        (ConvertFrom-AbgrDword -Value -2656256) -join "," | Should -Be "0,120,215"
+    }
+    It "steps the ticker bar" {
+        Get-TapeStep "Slow" | Should -Be 0.5
+        Get-TapeStep "Fast" | Should -Be 2
+        Get-TapeStep "" | Should -Be 1
     }
 }
 

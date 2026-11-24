@@ -57,6 +57,7 @@ jobs:
       - name: Run Pester
         env:
           TW_RUN_UI_SMOKE: "1"
+          TW_SMOKE_SHOTS: ${{ github.workspace }}\shots
         run: |
           Import-Module Pester -MinimumVersion 5.5
           $cfg = New-PesterConfiguration
@@ -66,6 +67,14 @@ jobs:
           $cfg.TestResult.Enabled = $true
           $cfg.TestResult.OutputPath = 'testResults-${{ matrix.shell }}.xml'
           Invoke-Pester -Configuration $cfg
+
+      - name: Upload screenshots of the UI smoke test
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: screenshots-${{ matrix.shell }}
+          path: shots
+          if-no-files-found: ignore
 
       - name: Upload test results
         if: always()
