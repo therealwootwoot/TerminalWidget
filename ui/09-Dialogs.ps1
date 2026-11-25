@@ -1688,12 +1688,20 @@ function Invoke-TerminalCommand {
                     Set-TransientStatus "Layout '$rest' gelöscht" 3
                     return ""
                 }
+                if ($arg0 -eq "FOCUS") {
+                    # V7.0: chart + watchlist, no portfolio
+                    $script:Config.TerminalShowWatch = $true
+                    $script:Config.TerminalShowPortfolio = $false
+                    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+                    Apply-Layout "Terminal"
+                    return ""
+                }
                 $full = (@($c.Args) -join " ").Trim()
                 $ln = @(Get-LayoutNames | Where-Object { $_.ToUpper() -eq $arg0 })
                 if ($ln.Count -gt 0) { Apply-Layout $ln[0]; return "" }
                 if (Use-UserLayout -Name $full) { return "" }
                 $own = @(@($script:Config.UserLayouts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Name })
-                return "Layout: " + ((@(Get-LayoutNames) + $own) -join " / ") + " - eigenes speichern: LAYOUT SAVE <Name>"
+                return "Layout: " + ((@(Get-LayoutNames) + @("Focus") + $own) -join " / ") + " - eigenes speichern: LAYOUT SAVE <Name>"
             }
             "IND"    {
                 switch ($arg0) {

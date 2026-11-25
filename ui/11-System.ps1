@@ -339,7 +339,8 @@ function Show-SettingsDialog {
     $addCombo = {
         param([string]$Label, [string[]]$Items, [string]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "", [int]$Width = 0)
         $l = & $mkLabel $Label $Tip $TipKey
-        $cb = New-Object System.Windows.Forms.ComboBox
+        # V7.0: styled items (rounded hover, check mark)
+        if ('TwComboV7' -as [type]) { $cb = New-Object TwComboV7; $cb.ItemHeight = S 20 } else { $cb = New-Object System.Windows.Forms.ComboBox }
         $cb.Location = New-Object System.Drawing.Point($IX, $lay.Y)
         $cb.Size = New-Object System.Drawing.Size($(if ($Width -gt 0) { $Width } else { $IW }), (S 22))
         $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
@@ -425,6 +426,8 @@ function Show-SettingsDialog {
     $chkStatusBar = & $addCheck -Label "Statusleiste unten anzeigen" -Value ([bool]$cfg.ShowStatusBar) -Tip "Alter der Daten, Börsenstatus und Privat-Modus in einer Zeile am unteren Fensterrand" -Key "ShowStatusBar" -Default ([bool]$dc.ShowStatusBar) -Words "Status Leiste Statusbar Stand"
     $chkPerMon = & $addCheck -Label "Neu starten, wenn das Fenster auf einen Bildschirm mit anderer Skalierung wechselt" -Value ([bool]$cfg.PerMonitorDpi) -Tip "Das Widget rechnet alle Größen beim Start aus der Skalierung des Bildschirms. Beim Wechsel auf einen anderen Bildschirm startet es kurz neu, damit alles scharf und richtig groß ist." -Key "PerMonitorDpi" -Default ([bool]$dc.PerMonitorDpi) -Words "DPI Skalierung Monitor Bildschirm Multi-Monitor"
     $chkPill = & $addCheck -Label "Tagesveränderung als farbige Pille" -Value ([bool]$cfg.DayChangePill) -Tip "In Watchlist und Portfolio steht die Tagesveränderung in einer Pille mit getöntem Hintergrund, nicht nur in farbiger Schrift." -Key "DayChangePill" -Default ([bool]$dc.DayChangePill) -Words "Pille Tag Veränderung Prozent Pill"
+    $chkAnim = & $addCheck -Label "Kurze Übergänge (Hover-Effekte)" -Value ([bool]$cfg.Animations) -Tip "Knöpfe blenden beim Darüberfahren weich über. Aus, wenn Windows die Animationen abgeschaltet hat." -Key "Animations" -Default ([bool]$dc.Animations) -Words "Animation Motion Übergang Bewegung Reduce"
+    $chkHc = & $addCheck -Label "Windows-Kontrastmodus übernehmen" -Value ([bool]$cfg.FollowHighContrast) -Tip "Ist in Windows ein Kontrastdesign aktiv, startet das Widget im Theme 'Contrast'." -Key "FollowHighContrast" -Default ([bool]$dc.FollowHighContrast) -Words "Kontrast Hochkontrast Barrierefreiheit High Contrast"
     $chkToasts = & $addCheck -Label "Kurze Meldungen im Fenster (Toasts)" -Value ([bool]$cfg.ShowToasts) -Tip "Meldungen wie 'gespeichert' erscheinen unten rechts im Fenster. Alarme kommen weiter über das Tray-Symbol." -Key "ShowToasts" -Default ([bool]$dc.ShowToasts) -Words "Toast Meldung Hinweis"
     & $addSection "Schrift"
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
@@ -925,6 +928,8 @@ function Show-SettingsDialog {
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
     $cfg.ShowStatusBar         = [bool]$chkStatusBar.Checked
     $cfg.ShowToasts            = [bool]$chkToasts.Checked
+    $cfg.Animations            = [bool]$chkAnim.Checked
+    $cfg.FollowHighContrast    = [bool]$chkHc.Checked
     $cfg.DayChangePill         = [bool]$chkPill.Checked
     $cfg.PerMonitorDpi         = [bool]$chkPerMon.Checked
     $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked

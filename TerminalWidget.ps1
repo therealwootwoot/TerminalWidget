@@ -353,6 +353,62 @@ public class TwToggleV7 : CheckBox {
     # already loaded, or no compiler: normal check boxes stay
 }
 
+# V7.0: drop-down with styled items (rounded hover, check mark on the selected item); the combo box API stays the same
+try {
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+
+public class TwComboV7 : ComboBox {
+    public static Color ListC = Color.FromArgb(32, 32, 36);
+    public static Color HoverC = Color.FromArgb(54, 54, 61);
+    public static Color TextC = Color.FromArgb(244, 244, 245);
+    public static Color AccentC = Color.FromArgb(56, 189, 248);
+
+    public TwComboV7() {
+        DrawMode = DrawMode.OwnerDrawFixed;
+    }
+    protected override void OnDrawItem(DrawItemEventArgs e) {
+        Graphics g = e.Graphics;
+        bool edit = (e.State & DrawItemState.ComboBoxEdit) != 0;
+        bool sel = !edit && (e.State & DrawItemState.Selected) != 0;
+        Color back = edit ? BackColor : ListC;
+        using (SolidBrush bb = new SolidBrush(back)) { g.FillRectangle(bb, e.Bounds); }
+        if (e.Index < 0) { return; }
+        if (sel) {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(e.Bounds.X + 3, e.Bounds.Y + 1, e.Bounds.Width - 6, e.Bounds.Height - 2);
+            int d = 8;
+            using (GraphicsPath gp = new GraphicsPath()) {
+                gp.AddArc(r.X, r.Y, d, d, 180, 90);
+                gp.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+                gp.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+                gp.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+                gp.CloseFigure();
+                using (SolidBrush hb = new SolidBrush(HoverC)) { g.FillPath(hb, gp); }
+            }
+        }
+        string text = GetItemText(Items[e.Index]);
+        Color fore = edit ? ForeColor : TextC;
+        Rectangle tr = new Rectangle(e.Bounds.X + 6, e.Bounds.Y, e.Bounds.Width - (edit ? 8 : 26), e.Bounds.Height);
+        TextRenderer.DrawText(g, text, Font, tr, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        if (!edit && e.Index == SelectedIndex) {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int cx = e.Bounds.Right - 14;
+            int cy = e.Bounds.Y + e.Bounds.Height / 2;
+            using (Pen p = new Pen(AccentC, 2f)) {
+                g.DrawLines(p, new Point[] { new Point(cx - 4, cy), new Point(cx - 1, cy + 3), new Point(cx + 4, cy - 3) });
+            }
+        }
+    }
+}
+"@ -ErrorAction Stop
+} catch {
+    # already loaded, or no compiler: normal combo boxes stay
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # v3.0.1: an exception in any event handler (button click etc.) used to pop up
@@ -625,6 +681,8 @@ $defaultConfig = [PSCustomObject]@{
     ShowStatusBar         = $true             # V7.0: status bar at the bottom (data age, market, privacy mode)
     PerMonitorDpi         = $true             # V7.0: restart the widget when the window moves to a monitor with another scaling
     DayChangePill         = $false            # V7.0: day change as a coloured pill in the lists
+    Animations            = $true             # V7.0: short fades (hover); also off when Windows animations are off
+    FollowHighContrast    = $true             # V7.0: Windows high-contrast mode switches to the Contrast theme
     ShowToasts            = $true             # V7.0: short messages inside the window (alerts still use the tray)
     UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
     TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast
@@ -827,6 +885,13 @@ if ([string]$script:Config.MonoFont -notin @(Get-MonoFontNames)) { $script:Confi
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
 if ($script:Config.AccentColor -notin @("Sky", "Amber", "Violet", "Eigene", "Windows")) { $script:Config.AccentColor = "Sky" }
 if ([string]$script:Config.UiStyle -notin @(Get-UiStyles)) { $script:Config.UiStyle = "Refined" }
+# V7.0: Windows high-contrast mode -> Contrast theme
+try {
+    if ([bool]$script:Config.FollowHighContrast -and [System.Windows.Forms.SystemInformation]::HighContrast -and [string]$script:Config.Theme -ne "Contrast") {
+        $script:Config.Theme = "Contrast"
+        Write-WidgetLog "Windows high-contrast mode is on: Contrast theme"
+    }
+} catch { }
 if ([string]$script:Config.RowDensity -notin @(Get-RowDensities)) { $script:Config.RowDensity = "Normal" }
 if ([string]$script:Config.TapeSpeed -notin @(Get-TapeSpeeds)) { $script:Config.TapeSpeed = "Normal" }
 if ([string]$script:Config.MaType -notin @("SMA", "EMA")) { $script:Config.MaType = "SMA" }

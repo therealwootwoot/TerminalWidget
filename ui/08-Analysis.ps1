@@ -879,6 +879,25 @@ function Draw-Heatmap {
     }
     $ac.HeatRects = $list.ToArray()
     $txtBr.Dispose(); $pen.Dispose(); $fmt.Dispose()
+    # V7.0: colour scale legend (day change -3 % ... +3 %) at the bottom right
+    try {
+        $lw = S 120; $lh = S 8
+        $lx = $W - $lw - (S 10); $ly = $H - $lh - (S 18)
+        if ($lx -gt 0 -and $ly -gt 0) {
+            $half = [int]($lw / 2)
+            for ($k = 0; $k -lt $lw; $k++) {
+                $fr = ($k - $half) / [double]$half
+                $bc = if ($fr -ge 0) { $colGreen } else { $colRed }
+                $cc = Get-BlendColor -A $bc -B $script:Pal.Card -T (0.25 + 0.65 * [math]::Min(1.0, [math]::Abs($fr)))
+                $lb = New-Object System.Drawing.SolidBrush($cc)
+                $g.FillRectangle($lb, ($lx + $k), $ly, 1, $lh); $lb.Dispose()
+            }
+            $mb = New-Object System.Drawing.SolidBrush($script:Pal.Muted)
+            $g.DrawString("-3 %", $fontAxis, $mb, [float]$lx, [float]($ly + $lh + 1))
+            $g.DrawString("+3 %", $fontAxis, $mb, [float]($lx + $lw - (S 24)), [float]($ly + $lh + 1))
+            $mb.Dispose()
+        }
+    } catch { }
 }
 
 # ---- v5.1: Analyse pages "Beitrag" (attribution, dividends, scenario) and "Vergleich" (indices, rolling, sectors) ----

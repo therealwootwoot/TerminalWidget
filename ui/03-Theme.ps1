@@ -422,6 +422,12 @@ function Update-MenuRenderer {
         [TwMenuRendererV7]::BorderC = $p.Border
         [TwMenuRendererV7]::AccentC = $p.Accent
         [TwMenuRendererV7]::Radius  = [int]$script:UiSpec.BtnRadius
+        if ('TwComboV7' -as [type]) {
+            [TwComboV7]::ListC = $p.Card
+            [TwComboV7]::HoverC = $p.Hover
+            [TwComboV7]::TextC = $p.Text
+            [TwComboV7]::AccentC = $p.Accent
+        }
         if ('TwToggleV7' -as [type]) {
             [TwToggleV7]::OnC = $p.Accent
             [TwToggleV7]::OffC = $p.Border

@@ -547,6 +547,27 @@ $form.Location = New-Object System.Drawing.Point($initX, $initY)
 # v5.2: rounded buttons, painted over the flat button (radius from the style)
 $script:RoundBtns = New-Object System.Collections.Generic.HashSet[object]
 $script:HotBtn = $null
+# V7.0: hover fade (colour mix over ~120 ms); off with "Animationen" or when Windows animations are off
+$script:BtnFade = @{}
+$script:BtnFadeTarget = @{}
+function Test-MotionOn {
+    try { return ([bool]$script:Config.Animations -and [System.Windows.Forms.SystemInformation]::UIEffectsEnabled) } catch { return $false }
+}
+$script:BtnFadeTimer = New-Object System.Windows.Forms.Timer
+$script:BtnFadeTimer.Interval = 20
+$script:BtnFadeTimer.Add_Tick({
+    $done = $true
+    foreach ($b in @($script:BtnFadeTarget.Keys)) {
+        $cur = [double]$script:BtnFade[$b]
+        $tg = [double]$script:BtnFadeTarget[$b]
+        if ($cur -lt $tg) { $cur = [math]::Min($tg, $cur + 0.2) } elseif ($cur -gt $tg) { $cur = [math]::Max($tg, $cur - 0.2) }
+        $script:BtnFade[$b] = $cur
+        try { $b.Invalidate() } catch { }
+        if ($cur -eq $tg -and $tg -eq 0.0) { $script:BtnFade.Remove($b); $script:BtnFadeTarget.Remove($b) }
+        elseif ($cur -ne $tg) { $done = $false }
+    }
+    if ($done) { $script:BtnFadeTimer.Stop() }
+})
 $script:RoundBtnPaint = {
     param($sender, $e)
     $spec = $script:UiSpec
@@ -560,7 +581,7 @@ $script:RoundBtnPaint = {
         $w = $sender.ClientSize.Width; $h = $sender.ClientSize.Height
         $fill = if (-not $sender.Enabled) { Get-MixColor -A $sender.BackColor -B $bg -T 0.5 }
                 elseif ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:Pal.AccentSubtle }
-                elseif ([object]::ReferenceEquals($script:HotBtn, $sender)) { $sender.FlatAppearance.MouseOverBackColor }
+                elseif ($script:BtnFade.ContainsKey($sender) -and [double]$script:BtnFade[$sender] -gt 0) { Get-MixColor -A $sender.FlatAppearance.MouseOverBackColor -B $sender.BackColor -T ([double]$script:BtnFade[$sender]) }
                 else { $sender.BackColor }
         $br = New-Object System.Drawing.SolidBrush($fill)
         $pn = $null
@@ -586,8 +607,14 @@ $script:RoundBtnPaint = {
         [System.Windows.Forms.TextRenderer]::DrawText($g, $sender.Text, $sender.Font, $tr, $fg, $flags)
     } catch { }
 }
-$script:RoundBtnEnter = { param($sender, $e) $script:HotBtn = $sender; $sender.Invalidate() }
-$script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; $sender.Invalidate() }
+$script:RoundBtnEnter = {
+    param($sender, $e)
+    $script:HotBtn = $sender
+    $script:BtnFadeTarget[$sender] = 1.0
+    if (Test-MotionOn) { if (-not $script:BtnFade.ContainsKey($sender)) { $script:BtnFade[$sender] = 0.0 }; $script:BtnFadeTimer.Start() } else { $script:BtnFade[$sender] = 1.0 }
+    $sender.Invalidate()
+}
+$script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; if ($script:BtnFade.ContainsKey($sender)) { $script:BtnFadeTarget[$sender] = 0.0; if (Test-MotionOn) { $script:BtnFadeTimer.Start() } else { $script:BtnFade.Remove($sender); $script:BtnFadeTarget.Remove($sender) } }; $sender.Invalidate() }
 # V7.0: pressed state and focus ring need a repaint
 $script:RoundBtnDown  = { param($sender, $e) $script:PressBtn = $sender; $sender.Invalidate() }
 $script:RoundBtnUp    = { param($sender, $e) if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; $sender.Invalidate() }
