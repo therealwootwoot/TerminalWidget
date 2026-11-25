@@ -13,6 +13,8 @@ Design and UI only: no new data sources, no data format change. New config keys 
 - **Buttons**: focus ring (2 px accent, keyboard focus only) and a pressed state.
 - **Smoke test**: contrast of every theme (text 4.5 : 1, muted text and accent 3 : 1).
 
+- **The UI script is split** into `TerminalWidget.ps1` (start, storage, config) and 12 parts in `ui\` (`02-Data.ps1` … `13-Startup.ps1`). The parts are dot-sourced in the old order and run in the same scope, so nothing behaves differently. Keep the `ui` folder next to the script.
+
 ## Not done yet (from the V7 roadmap)
 Owner-drawn controls (segmented control, chips, drop-downs, sliders), watchlist chips / sparklines / inline bars, chart legend chips and indicator panes, Analyse KPI tiles / donut / heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
 
