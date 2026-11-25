@@ -200,7 +200,20 @@ public class Win32WidgetHelperV26 {
     public static extern bool DestroyIcon(IntPtr hIcon);
 }
 "@ -ErrorAction Stop
-    [void][Win32WidgetHelperV26]::SetProcessDPIAware()
+    # V7.0: per-monitor DPI awareness (v2, Windows 10 1703+); older systems keep the system-wide awareness
+    $pmOk = $false
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class TwDpiV7 {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+}
+"@ -ErrorAction Stop
+        $pmOk = [bool][TwDpiV7]::SetProcessDpiAwarenessContext([System.IntPtr]([int]-4))
+    } catch { $pmOk = $false }
+    if (-not $pmOk) { [void][Win32WidgetHelperV26]::SetProcessDPIAware() }
 } catch {
     # Already loaded in current PowerShell session
 }
@@ -551,6 +564,7 @@ $defaultConfig = [PSCustomObject]@{
     RowDensity            = "Normal"          # v5.2: Compact / Normal / Comfortable list rows
     ZebraRows             = $false            # v5.2: every second list row slightly lighter
     ShowStatusBar         = $true             # V7.0: status bar at the bottom (data age, market, privacy mode)
+    PerMonitorDpi         = $true             # V7.0: restart the widget when the window moves to a monitor with another scaling
     ShowToasts            = $true             # V7.0: short messages inside the window (alerts still use the tray)
     UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
     TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast
@@ -4876,6 +4890,26 @@ function Apply-DwmTitlebarTheme {
 $script:DialogChromeHandler = { param($sender, $e) Set-WindowChrome -Win $sender }
 
 $form.Add_HandleCreated({ Apply-DwmTitlebarTheme })
+
+# V7.0: the window moved to a monitor with another scaling -> rebuild by restarting
+# (all sizes are computed once at start from the monitor's DPI)
+try {
+    $form.Add_DpiChanged({
+        param($sender, $e)
+        try {
+            if (-not [bool]$script:Config.PerMonitorDpi -or $script:DpiRestartPending) { return }
+            $newScale = [math]::Max(1.0, ([double]$e.DeviceDpiNew / 96.0))
+            if ([math]::Abs($newScale - [double]$script:DpiScale) -lt 0.01) { return }
+            $script:DpiRestartPending = $true
+            Write-WidgetLog ("DPI changed ({0} -> {1}): restarting" -f $script:DpiScale, $newScale)
+            Show-Toast -Text "Bildschirm-Skalierung geändert - Widget startet neu" -Seconds 3
+            $t = New-Object System.Windows.Forms.Timer
+            $t.Interval = 1200
+            $t.Add_Tick({ $this.Stop(); Restart-Widget -KeepData })
+            $t.Start()
+        } catch { }
+    })
+} catch { }
 
 $gInit = $form.CreateGraphics()
 $script:DpiScale = [math]::Max(1.0, ($gInit.DpiX / 96.0))
@@ -13667,7 +13701,9 @@ function Invoke-DailyBackup {
 
 function Restart-Widget {
     # Restored / imported data must not be overwritten by this instance on exit
-    $script:FreezeData = $true
+    # (V7.0: -KeepData for a plain restart, e.g. after a DPI change: state is saved normally)
+    param([switch]$KeepData)
+    $script:FreezeData = (-not $KeepData)
     $bat = Join-Path $script:ScriptDir "TerminalWidget_Start.bat"
     try {
         if (Test-Path $bat) {
@@ -15245,6 +15281,7 @@ function Show-SettingsDialog {
     $chkArrow = & $addCheck -Label "Pfeile vor Veränderungen anzeigen" -Value ([bool]$cfg.ShowArrows) -Tip "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" -TipKey "COLORS" -Key "ShowArrows" -Default ([bool]$dc.ShowArrows)
     $chkFlash = & $addCheck -Label "Kurs kurz einfärben, wenn er sich ändert" -Value ([bool]$cfg.PriceFlash) -Key "PriceFlash" -Default ([bool]$dc.PriceFlash) -Words "blinken flash"
     $chkStatusBar = & $addCheck -Label "Statusleiste unten anzeigen" -Value ([bool]$cfg.ShowStatusBar) -Tip "Alter der Daten, Börsenstatus und Privat-Modus in einer Zeile am unteren Fensterrand" -Key "ShowStatusBar" -Default ([bool]$dc.ShowStatusBar) -Words "Status Leiste Statusbar Stand"
+    $chkPerMon = & $addCheck -Label "Neu starten, wenn das Fenster auf einen Bildschirm mit anderer Skalierung wechselt" -Value ([bool]$cfg.PerMonitorDpi) -Tip "Das Widget rechnet alle Größen beim Start aus der Skalierung des Bildschirms. Beim Wechsel auf einen anderen Bildschirm startet es kurz neu, damit alles scharf und richtig groß ist." -Key "PerMonitorDpi" -Default ([bool]$dc.PerMonitorDpi) -Words "DPI Skalierung Monitor Bildschirm Multi-Monitor"
     $chkToasts = & $addCheck -Label "Kurze Meldungen im Fenster (Toasts)" -Value ([bool]$cfg.ShowToasts) -Tip "Meldungen wie 'gespeichert' erscheinen unten rechts im Fenster. Alarme kommen weiter über das Tray-Symbol." -Key "ShowToasts" -Default ([bool]$dc.ShowToasts) -Words "Toast Meldung Hinweis"
     & $addSection "Schrift"
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
@@ -15745,6 +15782,7 @@ function Show-SettingsDialog {
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
     $cfg.ShowStatusBar         = [bool]$chkStatusBar.Checked
     $cfg.ShowToasts            = [bool]$chkToasts.Checked
+    $cfg.PerMonitorDpi         = [bool]$chkPerMon.Checked
     $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked
     $cfg.RiskFreePct           = [double]$nRf.Value
