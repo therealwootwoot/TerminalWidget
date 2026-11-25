@@ -813,7 +813,7 @@ function Set-TransientStatus {
     $script:TransientStatus = $Text
     $script:TransientUntil  = (Get-Date).AddSeconds($Seconds)
     if ($null -ne $lblStatus) {
-        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        $lblStatus.ForeColor = $script:Pal.Busy
         $lblStatus.Text = $Text
     }
 }
@@ -957,7 +957,7 @@ function Refresh-AllMarketData {
 
 function Update-RefreshIndicator {
     if ($null -eq $btnRefreshNow -or $btnRefreshNow.IsDisposed) { return }
-    $btnRefreshNow.ForeColor = if ($script:IsRefreshing) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Accent }
+    $btnRefreshNow.ForeColor = if ($script:IsRefreshing) { $script:Pal.Busy } else { $script:Pal.Accent }
 }
 
 function Complete-MarketRefresh {

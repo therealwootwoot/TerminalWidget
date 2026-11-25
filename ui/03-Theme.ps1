@@ -395,6 +395,15 @@ function Get-ThemeColors {
     $p["OnAccent"]      = [System.Drawing.Color]::FromArgb($st.OnAccent[0], $st.OnAccent[1], $st.OnAccent[2])
     $dis = Get-MixRgb -A (& $toRgb $p.Muted) -B (& $toRgb $p.Card) -T 0.55
     $p["Disabled"]      = [System.Drawing.Color]::FromArgb($dis[0], $dis[1], $dis[2])
+    # V7.1: fixed data colours as tokens (busy = amber, mark = ruler / drawings, series colours for charts and legends)
+    $p["Busy"]    = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $p["Mark"]    = $(if ($light) { [System.Drawing.Color]::FromArgb(202, 138, 4) } else { [System.Drawing.Color]::FromArgb(250, 204, 21) })
+    $p["Violet"]  = [System.Drawing.Color]::FromArgb(168, 85, 247)
+    $p["Pink"]    = [System.Drawing.Color]::FromArgb(236, 72, 153)
+    $p["Cyan"]    = [System.Drawing.Color]::FromArgb(34, 211, 238)
+    $p["Lime"]    = [System.Drawing.Color]::FromArgb(132, 204, 22)
+    $p["Blue"]    = [System.Drawing.Color]::FromArgb(59, 130, 246)
+    $p["Neutral"] = [System.Drawing.Color]::FromArgb(148, 163, 184)
     return $p
 }
 

@@ -2745,6 +2745,14 @@ Describe "Analyse key figure tiles (V7.0)" {
 }
 
 Describe "V7.1 helpers" {
+    It "rolls a number towards the target and ends exactly there" {
+        $r = @(Get-RollValues -From 100 -To 110 -Steps 5)
+        $r.Count | Should -Be 5
+        $r[0] | Should -BeGreaterThan 100
+        $r[0] | Should -BeLessThan 110
+        $r[4] | Should -Be 110
+        ($r[1] - $r[0]) | Should -BeLessThan ($r[0] - 100)
+    }
     It "builds donut slices that add up to 360 degrees and merges small shares" {
         $s = @(Get-DonutSlices -Items @(@{Name="A";Value=50},@{Name="B";Value=45},@{Name="C";Value=2},@{Name="D";Value=3}) -MinPct 4)
         ($s | ForEach-Object { $_.Name }) -join "," | Should -Be "A,B,Rest"

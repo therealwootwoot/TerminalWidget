@@ -4876,6 +4876,20 @@ function Get-SegmentLayout {
     return $out
 }
 
+function Get-RollValues {
+    # V7.1: intermediate values of a number roll-over (ease-out); the last value is exactly To
+    param([double]$From, [double]$To, [int]$Steps = 6)
+    if ($Steps -lt 1) { return @($To) }
+    $out = @()
+    for ($i = 1; $i -le $Steps; $i++) {
+        $t = $i / [double]$Steps
+        $e = 1.0 - [math]::Pow(1.0 - $t, 3)
+        $out += ($From + ($To - $From) * $e)
+    }
+    $out[$out.Count - 1] = $To
+    return $out
+}
+
 function Get-TokenMap {
     # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
     return [ordered]@{
@@ -4896,6 +4910,14 @@ function Get-TokenMap {
         "accent.subtle"   = "AccentSubtle"
         "accent.text"     = "OnAccent"
         "warning"         = "Warn"
+        "busy"            = "Busy"
+        "mark"            = "Mark"
+        "series.violet"   = "Violet"
+        "series.pink"     = "Pink"
+        "series.cyan"     = "Cyan"
+        "series.lime"     = "Lime"
+        "series.blue"     = "Blue"
+        "series.neutral"  = "Neutral"
     }
 }
 

@@ -245,7 +245,7 @@ function Update-TrayIcon {
     try {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $g.Clear([System.Drawing.Color]::Transparent)
-        $colr = switch ($Key) { "up" { $colGreen } "down" { $colRed } default { [System.Drawing.Color]::FromArgb(148, 163, 184) } }
+        $colr = switch ($Key) { "up" { $colGreen } "down" { $colRed } default { $script:Pal.Neutral } }
         $br = New-Object System.Drawing.SolidBrush($colr)
         if ($Key -eq "up") {
             $g.FillPolygon($br, [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF(8, 1)), (New-Object System.Drawing.PointF(15, 14)), (New-Object System.Drawing.PointF(1, 14))))
@@ -401,7 +401,7 @@ function Update-AllUiViews {
         $sign = if ($q.ChangePct -ge 0) { "+" } else { "" }
         $col  = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
 
-        $lblLivePrice.Text = "{0:N2} {1}" -f $dispPrice, $curr
+        Set-LivePriceText -Key $sym -Price ([double]$dispPrice) -Curr $curr
         # v4.0: a quote from the cache of the last session is shown grey
         $fromCache = [bool]$q.FromCache
         $lblLivePrice.ForeColor = if ($fromCache) { $p.Muted } else { $p.Text }

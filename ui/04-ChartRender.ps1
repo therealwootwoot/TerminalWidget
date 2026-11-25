@@ -17,7 +17,7 @@ function Render-ChartOverlay {
     if ($null -ne $script:DrawPending -and $null -ne $script:DrawMouse -and $n -ge 2) {
         $tmp = [PSCustomObject]@{ Kind = "T"; T1 = [long]$script:DrawPending.T; P1 = [double]$script:DrawPending.P; T2 = [long]$script:DrawMouse.T; P2 = [double]$script:DrawMouse.P; Cur = [string]$script:ChartCur }
         $pxT = Get-DrawingPixels -L $L -D $tmp
-        $rb = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(250, 204, 21), [float]1.5)
+        $rb = New-Object System.Drawing.Pen($script:Pal.Mark, [float]1.5)
         $rb.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
         $oy = [int]$L.OffsetY
         if ($script:DrawMode -eq "R") {
@@ -552,6 +552,30 @@ $script:BtnFade = @{}
 $script:BtnFadeTarget = @{}
 function Test-MotionOn {
     try { return ([bool]$script:Config.Animations -and [System.Windows.Forms.SystemInformation]::UIEffectsEnabled) } catch { return $false }
+}
+# V7.1: the big header price rolls from the old to the new value (150 ms, only when motion is on and the move is small)
+$script:PriceRoll = $null
+$script:PriceRollLast = @{ Key = ""; Value = [double]::NaN }
+$script:PriceRollTimer = New-Object System.Windows.Forms.Timer
+$script:PriceRollTimer.Interval = 25
+$script:PriceRollTimer.Add_Tick({
+    $r = $script:PriceRoll
+    if ($null -eq $r) { $script:PriceRollTimer.Stop(); return }
+    if ($r.Step -ge @($r.Values).Count) { $script:PriceRollTimer.Stop(); $script:PriceRoll = $null; return }
+    $lblLivePrice.Text = "{0:N2} {1}" -f [double]$r.Values[$r.Step], $r.Curr
+    $r.Step++
+    if ($r.Step -ge @($r.Values).Count) { $script:PriceRollTimer.Stop(); $script:PriceRoll = $null }
+})
+function Set-LivePriceText {
+    param([string]$Key, [double]$Price, [string]$Curr)
+    $from = [double]$script:PriceRollLast.Value
+    $same = ([string]$script:PriceRollLast.Key -eq $Key)
+    $script:PriceRollLast = @{ Key = $Key; Value = $Price }
+    $script:PriceRollTimer.Stop(); $script:PriceRoll = $null
+    $final = "{0:N2} {1}" -f $Price, $Curr
+    if (-not $same -or [double]::IsNaN($from) -or $from -eq $Price -or [math]::Abs($Price - $from) -gt ([math]::Abs($from) * 0.2) -or -not (Test-MotionOn)) { $lblLivePrice.Text = $final; return }
+    $script:PriceRoll = @{ Values = @(Get-RollValues -From $from -To $Price -Steps 5); Step = 0; Curr = $Curr }
+    $script:PriceRollTimer.Start()
 }
 $script:BtnFadeTimer = New-Object System.Windows.Forms.Timer
 $script:BtnFadeTimer.Interval = 20

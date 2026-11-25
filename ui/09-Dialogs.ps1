@@ -1406,7 +1406,7 @@ function Draw-TickerAnalysisChart {
                 $dp.Dispose()
             }
         }
-        foreach ($ser in @(@($s200, [System.Drawing.Color]::FromArgb(168, 85, 247), [float]1.2), @($s50, $script:Pal.Warn, [float]1.2), @($cl, $p.Accent, [float]1.8))) {
+        foreach ($ser in @(@($s200, $script:Pal.Violet, [float]1.2), @($s50, $script:Pal.Warn, [float]1.2), @($cl, $p.Accent, [float]1.8))) {
             $pts = New-Object System.Collections.Generic.List[System.Drawing.PointF]
             for ($i = $st; $i -lt $n0; $i++) {
                 $v = [double]$ser[0][$i]

@@ -573,7 +573,7 @@ function Draw-ChartDrawings {
     $dl = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
     if ($null -eq $dl -or $dl.Count -eq 0 -or $L.N -lt 2) { return }
     $pr = $L.PriceRect
-    $col = [System.Drawing.Color]::FromArgb(250, 204, 21)
+    $col = $script:Pal.Mark
     $pen = New-Object System.Drawing.Pen($col, [float]1.5)
     $fibPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(160, $col.R, $col.G, $col.B), [float]1)
     $fibPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
