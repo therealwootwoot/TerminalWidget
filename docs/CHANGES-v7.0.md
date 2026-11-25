@@ -14,9 +14,11 @@ Design and UI only: no new data sources, no data format change. New config keys 
 - **Smoke test**: contrast of every theme (text 4.5 : 1, muted text and accent 3 : 1).
 
 - **The UI script is split** into `TerminalWidget.ps1` (start, storage, config) and 12 parts in `ui\` (`02-Data.ps1` … `13-Startup.ps1`). The parts are dot-sourced in the old order and run in the same scope, so nothing behaves differently. Keep the `ui` folder next to the script.
+- **Watchlist group chips** above the list replace the drop-down: click = show group, + = new group, right click = delete, drag a ticker onto a chip = add it to the group. Too many groups move behind a … chip.
+- **Day change as a pill** (Settings → Design, off by default): coloured background in the watchlist and portfolio.
 
 ## Not done yet (from the V7 roadmap)
-Owner-drawn controls (segmented control, chips, drop-downs, sliders), watchlist chips / sparklines / inline bars, chart legend chips and indicator panes, Analyse KPI tiles / donut / heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
+Owner-drawn controls (segmented control, drop-downs, sliders), (sparklines and the 52-week bar already exist since v4.9.5), chart legend chips and indicator panes, Analyse KPI tiles / donut / heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
 
 ## Tests
 - Pester: scale on the 4 px grid, grid rounding, contrast ratio, accent states, token map, status bar text.
