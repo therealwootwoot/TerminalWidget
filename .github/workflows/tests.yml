@@ -68,6 +68,54 @@ jobs:
           $cfg.TestResult.OutputPath = 'testResults-${{ matrix.shell }}.xml'
           Invoke-Pester -Configuration $cfg
 
+      - name: Screenshot report and contact sheet
+        if: always()
+        continue-on-error: true
+        run: |
+          if (-not (Test-Path shots)) { exit 0 }
+          Add-Type -AssemblyName System.Drawing
+          $files = @(Get-ChildItem shots -Filter *.png | Where-Object { $_.Name -ne '_contact-sheet.png' } | Sort-Object Name)
+          if ($files.Count -eq 0) { exit 0 }
+          # report only (no failing): compares with docs/shots-baseline-<shell>.json if that file exists
+          $baseFile = 'docs/shots-baseline-${{ matrix.shell }}.json'
+          $base = @{}
+          if (Test-Path $baseFile) { (Get-Content $baseFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $base[$_.Name] = [string]$_.Value } }
+          $now = [ordered]@{}
+          $lines = @('### Screenshots (${{ matrix.shell }})', '', '| Image | Status |', '|---|---|')
+          foreach ($f in $files) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.Substring(0, 16)
+            $now[$f.Name] = $h
+            $st = 'no baseline'
+            if ($base.Count -gt 0) { if (-not $base.ContainsKey($f.Name)) { $st = 'new' } elseif ($base[$f.Name] -ne $h) { $st = 'changed' } else { $st = 'same' } }
+            $lines += ('| {0} | {1} |' -f $f.Name, $st)
+          }
+          $lines | Add-Content $env:GITHUB_STEP_SUMMARY
+          ($now | ConvertTo-Json) | Set-Content 'shots/_hashes.json' -Encoding UTF8
+          # contact sheet: all images side by side
+          $tw = 360; $th = 250; $cols = 4
+          $rowsN = [int][math]::Ceiling($files.Count / $cols)
+          $bmp = New-Object System.Drawing.Bitmap ([int]($cols * $tw)), ([int]($rowsN * $th))
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.Clear([System.Drawing.Color]::FromArgb(24, 24, 27))
+          $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+          $font = New-Object System.Drawing.Font('Segoe UI', 8)
+          $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(200, 200, 205))
+          $i = 0
+          foreach ($f in $files) {
+            try {
+              $im = [System.Drawing.Image]::FromFile($f.FullName)
+              $s = [math]::Min(($tw - 8) / $im.Width, ($th - 24) / $im.Height)
+              $x = ($i % $cols) * $tw + 4
+              $y = [int][math]::Floor($i / $cols) * $th + 4
+              $g.DrawImage($im, [int]$x, [int]$y, [int]($im.Width * $s), [int]($im.Height * $s))
+              $g.DrawString($f.BaseName, $font, $brush, [single]$x, [single]($y + $th - 20))
+              $im.Dispose()
+            } catch { }
+            $i++
+          }
+          $bmp.Save((Join-Path (Get-Location) 'shots/_contact-sheet.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+          $g.Dispose(); $bmp.Dispose()
+
       - name: Upload screenshots of the UI smoke test
         if: always()
         uses: actions/upload-artifact@v5
