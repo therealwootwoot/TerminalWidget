@@ -295,6 +295,64 @@ public class TwMenuRendererV7 : ToolStripProfessionalRenderer {
     # already loaded in this PowerShell session, or no compiler: system look stays
 }
 
+# V7.0: toggle switch (a real CheckBox, so .Checked / CheckedChanged keep working)
+try {
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+
+public class TwToggleV7 : CheckBox {
+    public static Color OnC = Color.FromArgb(56, 189, 248);
+    public static Color OffC = Color.FromArgb(60, 60, 68);
+    public static Color KnobC = Color.FromArgb(244, 244, 245);
+    public static Color TextC = Color.FromArgb(244, 244, 245);
+    public static Color DisabledC = Color.FromArgb(120, 120, 128);
+
+    public TwToggleV7() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+    }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+    static GraphicsPath Pill(Rectangle r) {
+        GraphicsPath p = new GraphicsPath();
+        int d = r.Height;
+        p.AddArc(r.X, r.Y, d, d, 90, 180);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 180);
+        p.CloseFigure();
+        return p;
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        Color back = (Parent != null) ? Parent.BackColor : BackColor;
+        g.Clear(back);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        int h = Math.Max(14, Math.Min(Height - 4, 20));
+        int w = (int)(h * 1.8);
+        Rectangle track = new Rectangle(2, (Height - h) / 2, w, h);
+        Color c = Checked ? OnC : OffC;
+        if (!Enabled) { c = Color.FromArgb(90, c); }
+        using (GraphicsPath gp = Pill(track)) using (SolidBrush b = new SolidBrush(c)) { g.FillPath(b, gp); }
+        int kd = h - 6;
+        int kx = Checked ? (track.Right - kd - 3) : (track.X + 3);
+        using (SolidBrush kb = new SolidBrush(KnobC)) { g.FillEllipse(kb, kx, track.Y + 3, kd, kd); }
+        if (Focused && ShowFocusCues) {
+            Rectangle fr = new Rectangle(track.X - 2, track.Y - 2, track.Width + 4, track.Height + 4);
+            using (GraphicsPath fp = Pill(fr)) using (Pen pen = new Pen(OnC, 2f)) { g.DrawPath(pen, fp); }
+        }
+        Rectangle tr = new Rectangle(w + 12, 0, Math.Max(1, Width - w - 14), Height);
+        TextRenderer.DrawText(g, Text, Font, tr, Enabled ? TextC : DisabledC, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+    }
+}
+"@ -ErrorAction Stop
+} catch {
+    # already loaded, or no compiler: normal check boxes stay
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # v3.0.1: an exception in any event handler (button click etc.) used to pop up
@@ -3295,6 +3353,13 @@ function Update-MenuRenderer {
         [TwMenuRendererV7]::BorderC = $p.Border
         [TwMenuRendererV7]::AccentC = $p.Accent
         [TwMenuRendererV7]::Radius  = [int]$script:UiSpec.BtnRadius
+        if ('TwToggleV7' -as [type]) {
+            [TwToggleV7]::OnC = $p.Accent
+            [TwToggleV7]::OffC = $p.Border
+            [TwToggleV7]::KnobC = $p.Text
+            [TwToggleV7]::TextC = $p.Text
+            [TwToggleV7]::DisabledC = $p.Disabled
+        }
         if (-not ([System.Windows.Forms.ToolStripManager]::Renderer -is [TwMenuRendererV7])) {
             [System.Windows.Forms.ToolStripManager]::Renderer = New-Object TwMenuRendererV7
         }
@@ -15215,9 +15280,10 @@ function Show-SettingsDialog {
     }
     $addCheck = {
         param([string]$Label, [bool]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "")
-        $c = New-Object System.Windows.Forms.CheckBox
+        # V7.0: toggle switch instead of a plain check box
+        if ('TwToggleV7' -as [type]) { $c = New-Object TwToggleV7 } else { $c = New-Object System.Windows.Forms.CheckBox }
         $c.Location = New-Object System.Drawing.Point($X0, $lay.Y)
-        $c.Size = New-Object System.Drawing.Size((S 470), (S 22))
+        $c.Size = New-Object System.Drawing.Size((S 470), (S 24))
         $c.Text = $Label
         $c.Checked = $Value
         $c.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
@@ -15226,7 +15292,7 @@ function Show-SettingsDialog {
         if ($Tip -or $TipKey) { Set-DynTip $c $Tip $TipKey }
         $script:SetTipText = $Tip
         & $register $c $null $Key $Default $Words
-        $lay.Y += S 26
+        $lay.Y += S 28
         return $c
     }
     $addText = {
