@@ -176,7 +176,7 @@ $btnPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) 
 $viewPortfolio.Controls.Add($btnPrivacy)
 
 # v4.5: depot selector
-$cmbDepot = New-Object System.Windows.Forms.ComboBox
+$cmbDepot = New-ThemedCombo
 $cmbDepot.Location = New-Object System.Drawing.Point((S 470), (S 6))
 $cmbDepot.Size = New-Object System.Drawing.Size((S 136), (S 24))
 $cmbDepot.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
@@ -188,7 +188,7 @@ $cmbDepot.DropDownWidth = S 200
 $viewPortfolio.Controls.Add($cmbDepot)
 Set-Tip $cmbDepot "Depot wählen: mehrere Portfolios (z. B. zweiter Broker, Übungsdepot). Befehl: PF <Name>"
 
-$cmbPortSort = New-Object System.Windows.Forms.ComboBox
+$cmbPortSort = New-ThemedCombo
 $cmbPortSort.Location = New-Object System.Drawing.Point((S 612), (S 6))
 $cmbPortSort.Size = New-Object System.Drawing.Size((S 136), (S 24))
 $cmbPortSort.DropDownWidth = S 200
@@ -359,7 +359,7 @@ $lblPortCurr.Text = "EK-Währ.:"
 $pnlPortBottom.Controls.Add($lblPortCurr)
 $script:PortInputLabels.Add($lblPortCurr)
 
-$cmbPortCurr = New-Object System.Windows.Forms.ComboBox
+$cmbPortCurr = New-ThemedCombo
 $cmbPortCurr.Location = New-Object System.Drawing.Point((S 254), (S 25))
 $cmbPortCurr.Size = New-Object System.Drawing.Size((S 58), (S 22))
 $cmbPortCurr.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
@@ -486,7 +486,7 @@ $viewWatch.Controls.Add($lblWlTitle)
 Set-Tip $lblWlTitle "Ziehen = Reihenfolge, Entf = Löschen, Rechtsklick auf einen Ticker = Aktionen und Gruppen"
 
 # v5.0: watchlist groups (e.g. Tech, ETFs) - a filter over the one watchlist
-$cmbWlGroup = New-Object System.Windows.Forms.ComboBox
+$cmbWlGroup = New-ThemedCombo
 $cmbWlGroup.Location = New-Object System.Drawing.Point((S 242), (S 6))
 $cmbWlGroup.Size = New-Object System.Drawing.Size((S 118), (S 24))
 $cmbWlGroup.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
@@ -892,7 +892,7 @@ $lblNewsTitle.Text = "Nachrichten - Depot und Watchlist"
 $lblNewsTitle.Anchor = $aNT -bor $aNL
 $viewNews.Controls.Add($lblNewsTitle)
 
-$cmbNewsFilter = New-Object System.Windows.Forms.ComboBox
+$cmbNewsFilter = New-ThemedCombo
 $cmbNewsFilter.SetBounds((S 470), (S 6), (S 128), (S 24))
 $cmbNewsFilter.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $cmbNewsFilter.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat

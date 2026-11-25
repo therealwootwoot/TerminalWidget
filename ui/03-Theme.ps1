@@ -410,6 +410,12 @@ $script:Pal = Get-ThemeColors
 # v5.2: design numbers of the chosen style (radii, gaps, row height ...)
 $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
 $script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+function New-ThemedCombo {
+    # V7.1: drop-down with rounded closed box and styled items (falls back to the plain combo box)
+    if ('TwComboV7' -as [type]) { $c = New-Object TwComboV7; $c.ItemHeight = S 18; return $c }
+    return (New-Object System.Windows.Forms.ComboBox)
+}
+
 function Update-MenuRenderer {
     # V7.0: colours of the shared menu renderer follow the theme
     try {
@@ -428,6 +434,19 @@ function Update-MenuRenderer {
             [TwComboV7]::TextC = $p.Text
             [TwComboV7]::AccentC = $p.Accent
         }
+        if ('TwSegmentV7' -as [type]) {
+            [TwSegmentV7]::AccentC = $p.Accent
+            [TwSegmentV7]::TrackC = $p.Input
+            [TwSegmentV7]::TextC = $p.Text
+            [TwSegmentV7]::MutedC = $p.Muted
+            [TwSegmentV7]::OnTextC = $p.OnAccent
+        }
+        if ('TwSliderV7' -as [type]) {
+            [TwSliderV7]::AccentC = $p.Accent
+            [TwSliderV7]::TrackC = $p.Border
+            [TwSliderV7]::KnobC = $p.Text
+        }
+        if ('TwComboV7' -as [type]) { [TwComboV7]::BorderC = $p.Border }
         if ('TwToggleV7' -as [type]) {
             [TwToggleV7]::OnC = $p.Accent
             [TwToggleV7]::OffC = $p.Border

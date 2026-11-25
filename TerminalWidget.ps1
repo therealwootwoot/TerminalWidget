@@ -367,8 +367,44 @@ public class TwComboV7 : ComboBox {
     public static Color TextC = Color.FromArgb(244, 244, 245);
     public static Color AccentC = Color.FromArgb(56, 189, 248);
 
+    public static Color BorderC = Color.FromArgb(70, 70, 80);
+    public static bool RoundedClosed = true;
+    bool hotC = false;
+
     public TwComboV7() {
         DrawMode = DrawMode.OwnerDrawFixed;
+    }
+    protected override void OnMouseEnter(EventArgs e) { hotC = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hotC = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        if (m.Msg == 0xF && RoundedClosed && DropDownStyle == ComboBoxStyle.DropDownList && Width > 20 && Height > 12) {
+            try { PaintClosed(); } catch (Exception) { }
+        }
+    }
+    void PaintClosed() {
+        using (Graphics g = Graphics.FromHwnd(Handle)) {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color pb = (Parent != null) ? Parent.BackColor : BackColor;
+            using (SolidBrush pbr = new SolidBrush(pb)) { g.FillRectangle(pbr, 0, 0, Width, Height); }
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            int d = 8;
+            using (GraphicsPath gp = new GraphicsPath()) {
+                gp.AddArc(r.X, r.Y, d, d, 180, 90);
+                gp.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+                gp.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+                gp.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+                gp.CloseFigure();
+                using (SolidBrush bb = new SolidBrush(BackColor)) { g.FillPath(bb, gp); }
+                using (Pen bp = new Pen((Focused || hotC || DroppedDown) ? AccentC : BorderC, 1f)) { g.DrawPath(bp, gp); }
+            }
+            Color fore = Enabled ? ForeColor : Color.FromArgb(120, ForeColor);
+            string text = (SelectedItem != null) ? GetItemText(SelectedItem) : "";
+            Rectangle tr = new Rectangle(8, 0, Math.Max(1, Width - 30), Height);
+            TextRenderer.DrawText(g, text, Font, tr, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            int cx = Width - 14; int cy = Height / 2;
+            using (Pen cp = new Pen(fore, 1.6f)) { g.DrawLines(cp, new Point[] { new Point(cx - 3, cy - 1), new Point(cx, cy + 2), new Point(cx + 3, cy - 1) }); }
+        }
     }
     protected override void OnDrawItem(DrawItemEventArgs e) {
         Graphics g = e.Graphics;
@@ -407,6 +443,174 @@ public class TwComboV7 : ComboBox {
 "@ -ErrorAction Stop
 } catch {
     # already loaded, or no compiler: normal combo boxes stay
+}
+
+# V7.1: segmented control (a few short choices side by side) and slider
+try {
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+
+public class TwSegmentV7 : Control {
+    public static Color AccentC = Color.FromArgb(56, 189, 248);
+    public static Color TrackC = Color.FromArgb(40, 40, 46);
+    public static Color TextC = Color.FromArgb(244, 244, 245);
+    public static Color MutedC = Color.FromArgb(160, 160, 170);
+    public static Color OnTextC = Color.FromArgb(10, 10, 12);
+    string[] items = new string[0];
+    int sel = 0;
+    int hot = -1;
+    public event EventHandler SelectedIndexChanged;
+
+    public TwSegmentV7() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        TabStop = true;
+        Cursor = Cursors.Hand;
+    }
+    public string[] Items { get { return items; } set { items = value ?? new string[0]; if (sel >= items.Length) { sel = 0; } Invalidate(); } }
+    public int SelectedIndex {
+        get { return sel; }
+        set {
+            if (value < 0 || value >= items.Length || value == sel) { return; }
+            sel = value; Invalidate();
+            if (SelectedIndexChanged != null) { SelectedIndexChanged(this, EventArgs.Empty); }
+        }
+    }
+    int[] Edges() {
+        int n = items.Length;
+        int[] e = new int[n + 1];
+        if (n == 0) { return e; }
+        int[] w = new int[n];
+        int sum = 0;
+        for (int i = 0; i < n; i++) { w[i] = TextRenderer.MeasureText(items[i], Font).Width + 24; sum += w[i]; }
+        int avail = Math.Max(1, Width - 4);
+        int x = 2;
+        e[0] = x;
+        for (int i = 0; i < n; i++) {
+            x += (i == n - 1) ? (avail - (x - 2)) : (int)((long)w[i] * avail / sum);
+            e[i + 1] = x;
+        }
+        e[n] = 2 + avail;
+        return e;
+    }
+    int HitTest(int px) {
+        int[] e = Edges();
+        for (int i = 0; i < items.Length; i++) { if (px >= e[i] && px < e[i + 1]) { return i; } }
+        return -1;
+    }
+    static GraphicsPath Round(Rectangle r, int d) {
+        GraphicsPath p = new GraphicsPath();
+        if (d < 2) { p.AddRectangle(r); return p; }
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Left || k == Keys.Right || base.IsInputKey(k); }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        if (e.KeyCode == Keys.Left) { SelectedIndex = Math.Max(0, sel - 1); e.Handled = true; }
+        else if (e.KeyCode == Keys.Right) { SelectedIndex = Math.Min(items.Length - 1, sel + 1); e.Handled = true; }
+        base.OnKeyDown(e);
+    }
+    protected override void OnMouseDown(MouseEventArgs e) { Focus(); int i = HitTest(e.X); if (i >= 0) { SelectedIndex = i; } base.OnMouseDown(e); }
+    protected override void OnMouseMove(MouseEventArgs e) { int i = HitTest(e.X); if (i != hot) { hot = i; Invalidate(); } base.OnMouseMove(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.Clear((Parent != null) ? Parent.BackColor : BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        Rectangle track = new Rectangle(0, 0, Width - 1, Height - 1);
+        int rad = Math.Min(Height - 1, 12);
+        using (GraphicsPath gp = Round(track, rad)) using (SolidBrush b = new SolidBrush(TrackC)) { g.FillPath(b, gp); }
+        int[] ed = Edges();
+        for (int i = 0; i < items.Length; i++) {
+            Rectangle r = new Rectangle(ed[i] + 1, 3, Math.Max(1, ed[i + 1] - ed[i] - 2), Height - 7);
+            bool on = (i == sel);
+            if (on) {
+                using (GraphicsPath sp = Round(r, Math.Max(2, rad - 4))) using (SolidBrush ab = new SolidBrush(Enabled ? AccentC : Color.FromArgb(90, AccentC))) { g.FillPath(ab, sp); }
+            }
+            Color fc = on ? OnTextC : ((i == hot) ? TextC : MutedC);
+            TextRenderer.DrawText(g, items[i], Font, r, fc, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        }
+        if (Focused && ShowFocusCues) {
+            using (GraphicsPath fp = Round(track, rad)) using (Pen pen = new Pen(AccentC, 2f)) { g.DrawPath(pen, fp); }
+        }
+    }
+}
+
+public class TwSliderV7 : Control {
+    public static Color AccentC = Color.FromArgb(56, 189, 248);
+    public static Color TrackC = Color.FromArgb(60, 60, 68);
+    public static Color KnobC = Color.FromArgb(244, 244, 245);
+    int min = 0, max = 100, val = 0, step = 1;
+    bool drag = false;
+    public event EventHandler ValueChanged;
+
+    public TwSliderV7() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        TabStop = true;
+        Cursor = Cursors.Hand;
+    }
+    public int Minimum { get { return min; } set { min = value; if (val < min) { val = min; } Invalidate(); } }
+    public int Maximum { get { return max; } set { max = Math.Max(value, min + 1); if (val > max) { val = max; } Invalidate(); } }
+    public int Step { get { return step; } set { step = Math.Max(1, value); } }
+    public int Value {
+        get { return val; }
+        set {
+            int v = Math.Max(min, Math.Min(max, value));
+            if (v == val) { return; }
+            val = v; Invalidate();
+            if (ValueChanged != null) { ValueChanged(this, EventArgs.Empty); }
+        }
+    }
+    int Snap(int v) { int s = step; return min + (int)Math.Round((double)(v - min) / s) * s; }
+    int FromX(int x) {
+        int pad = 9;
+        double f = (double)(x - pad) / Math.Max(1, Width - 2 * pad);
+        f = Math.Max(0.0, Math.Min(1.0, f));
+        return Snap((int)Math.Round(min + f * (max - min)));
+    }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Left || k == Keys.Right || k == Keys.Up || k == Keys.Down || base.IsInputKey(k); }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        if (e.KeyCode == Keys.Left || e.KeyCode == Keys.Down) { Value = val - step; e.Handled = true; }
+        else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Up) { Value = val + step; e.Handled = true; }
+        else if (e.KeyCode == Keys.Home) { Value = min; e.Handled = true; }
+        else if (e.KeyCode == Keys.End) { Value = max; e.Handled = true; }
+        else if (e.KeyCode == Keys.PageUp) { Value = val + step * 5; e.Handled = true; }
+        else if (e.KeyCode == Keys.PageDown) { Value = val - step * 5; e.Handled = true; }
+        base.OnKeyDown(e);
+    }
+    protected override void OnMouseDown(MouseEventArgs e) { Focus(); drag = true; Capture = true; Value = FromX(e.X); base.OnMouseDown(e); }
+    protected override void OnMouseMove(MouseEventArgs e) { if (drag) { Value = FromX(e.X); } base.OnMouseMove(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { drag = false; Capture = false; base.OnMouseUp(e); }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.Clear((Parent != null) ? Parent.BackColor : BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        int pad = 9;
+        int cy = Height / 2;
+        double f = (double)(val - min) / Math.Max(1, max - min);
+        int kx = pad + (int)Math.Round(f * (Width - 2 * pad));
+        Color ac = Enabled ? AccentC : Color.FromArgb(90, AccentC);
+        using (Pen tp = new Pen(TrackC, 4f)) { tp.StartCap = LineCap.Round; tp.EndCap = LineCap.Round; g.DrawLine(tp, pad, cy, Width - pad, cy); }
+        using (Pen ap = new Pen(ac, 4f)) { ap.StartCap = LineCap.Round; ap.EndCap = LineCap.Round; g.DrawLine(ap, pad, cy, kx, cy); }
+        using (SolidBrush kb = new SolidBrush(KnobC)) { g.FillEllipse(kb, kx - 7, cy - 7, 14, 14); }
+        if (Focused && ShowFocusCues) { using (Pen fp = new Pen(AccentC, 2f)) { g.DrawEllipse(fp, kx - 9, cy - 9, 18, 18); } }
+    }
+}
+"@ -ErrorAction Stop
+} catch {
+    # already loaded, or no compiler: combo boxes and number fields stay
 }
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
