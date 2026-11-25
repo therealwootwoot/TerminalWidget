@@ -424,6 +424,7 @@ function Show-SettingsDialog {
     $chkFlash = & $addCheck -Label "Kurs kurz einfärben, wenn er sich ändert" -Value ([bool]$cfg.PriceFlash) -Key "PriceFlash" -Default ([bool]$dc.PriceFlash) -Words "blinken flash"
     $chkStatusBar = & $addCheck -Label "Statusleiste unten anzeigen" -Value ([bool]$cfg.ShowStatusBar) -Tip "Alter der Daten, Börsenstatus und Privat-Modus in einer Zeile am unteren Fensterrand" -Key "ShowStatusBar" -Default ([bool]$dc.ShowStatusBar) -Words "Status Leiste Statusbar Stand"
     $chkPerMon = & $addCheck -Label "Neu starten, wenn das Fenster auf einen Bildschirm mit anderer Skalierung wechselt" -Value ([bool]$cfg.PerMonitorDpi) -Tip "Das Widget rechnet alle Größen beim Start aus der Skalierung des Bildschirms. Beim Wechsel auf einen anderen Bildschirm startet es kurz neu, damit alles scharf und richtig groß ist." -Key "PerMonitorDpi" -Default ([bool]$dc.PerMonitorDpi) -Words "DPI Skalierung Monitor Bildschirm Multi-Monitor"
+    $chkPill = & $addCheck -Label "Tagesveränderung als farbige Pille" -Value ([bool]$cfg.DayChangePill) -Tip "In Watchlist und Portfolio steht die Tagesveränderung in einer Pille mit getöntem Hintergrund, nicht nur in farbiger Schrift." -Key "DayChangePill" -Default ([bool]$dc.DayChangePill) -Words "Pille Tag Veränderung Prozent Pill"
     $chkToasts = & $addCheck -Label "Kurze Meldungen im Fenster (Toasts)" -Value ([bool]$cfg.ShowToasts) -Tip "Meldungen wie 'gespeichert' erscheinen unten rechts im Fenster. Alarme kommen weiter über das Tray-Symbol." -Key "ShowToasts" -Default ([bool]$dc.ShowToasts) -Words "Toast Meldung Hinweis"
     & $addSection "Schrift"
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
@@ -924,6 +925,7 @@ function Show-SettingsDialog {
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
     $cfg.ShowStatusBar         = [bool]$chkStatusBar.Checked
     $cfg.ShowToasts            = [bool]$chkToasts.Checked
+    $cfg.DayChangePill         = [bool]$chkPill.Checked
     $cfg.PerMonitorDpi         = [bool]$chkPerMon.Checked
     $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked

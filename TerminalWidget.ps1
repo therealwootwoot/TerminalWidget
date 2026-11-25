@@ -624,6 +624,7 @@ $defaultConfig = [PSCustomObject]@{
     ZebraRows             = $false            # v5.2: every second list row slightly lighter
     ShowStatusBar         = $true             # V7.0: status bar at the bottom (data age, market, privacy mode)
     PerMonitorDpi         = $true             # V7.0: restart the widget when the window moves to a monitor with another scaling
+    DayChangePill         = $false            # V7.0: day change as a coloured pill in the lists
     ShowToasts            = $true             # V7.0: short messages inside the window (alerts still use the tray)
     UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
     TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast

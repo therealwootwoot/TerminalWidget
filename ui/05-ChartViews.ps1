@@ -285,6 +285,35 @@ $script:SparkCellPainter = {
     }
 }
 
+# V7.0: day change as a pill (coloured background, not only coloured text); optional
+$script:DayPillPainter = {
+    param($sender, $e)
+    if (-not [bool]$script:Config.DayChangePill -or $e.RowIndex -lt 0 -or $e.ColumnIndex -lt 0 -or $sender.Columns[$e.ColumnIndex].Name -ne "Day") { return }
+    $txt = [string]$e.FormattedValue
+    if ([string]::IsNullOrWhiteSpace($txt)) { return }
+    try {
+        $sel = (($e.State -band [System.Windows.Forms.DataGridViewElementStates]::Selected) -ne 0)
+        $e.PaintBackground($e.ClipBounds, $sel)
+        $fg = $e.CellStyle.ForeColor
+        if ($sel) { $fg = $e.CellStyle.SelectionForeColor }
+        $bgc = if ($sel) { $e.CellStyle.SelectionBackColor } else { $e.CellStyle.BackColor }
+        if ($bgc.A -lt 255) { $bgc = $script:Pal.Card }
+        $flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
+        $tw = [System.Windows.Forms.TextRenderer]::MeasureText($txt, $e.CellStyle.Font, [System.Drawing.Size]::Empty, $flags).Width
+        $b = $e.CellBounds
+        $w = [math]::Min($b.Width - (S 6), $tw + (S 12))
+        $h = [math]::Min($b.Height - (S 4), (S 18))
+        $r = New-Object System.Drawing.RectangleF(([float]($b.Right - $w - (S 3))), ([float]($b.Y + ($b.Height - $h) / 2)), [float]$w, [float]$h)
+        $g = $e.Graphics
+        $br = New-Object System.Drawing.SolidBrush((Get-MixColor -A $fg -B $bgc -T 0.22))
+        Fill-RoundedRect -g $g -Brush $br -Rect $r -Radius ([float]($h / 2))
+        $br.Dispose()
+        $tf = [System.Windows.Forms.TextFormatFlags]
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $e.CellStyle.Font, (New-Object System.Drawing.Rectangle([int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height)), $fg, ($tf::HorizontalCenter -bor $tf::VerticalCenter -bor $tf::NoPadding -bor $tf::SingleLine))
+        $e.Handled = $true
+    } catch { }
+}
+
 $pnlPortBottom = New-Object System.Windows.Forms.Panel
 $pnlPortBottom.Location = New-Object System.Drawing.Point((S 8), (S 326))
 $pnlPortBottom.Size = New-Object System.Drawing.Size((S 740), (S 122))
@@ -771,7 +800,9 @@ foreach ($col in $dgvWatchlist.Columns) { $col.SortMode = [System.Windows.Forms.
 $dgvWatchlist.AllowDrop = $true
 $viewWatch.Controls.Add($dgvWatchlist)
 $dgvPortfolio.Add_CellPainting($script:SparkCellPainter)
+$dgvPortfolio.Add_CellPainting($script:DayPillPainter)
 $dgvWatchlist.Add_CellPainting($script:SparkCellPainter)
+$dgvWatchlist.Add_CellPainting($script:DayPillPainter)
 # v4.9.5: 52-week range bar under the "52W-H" value (marker = price between low and high)
 $dgvWatchlist.Add_CellPainting({
     param($sender, $e)

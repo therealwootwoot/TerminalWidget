@@ -4934,7 +4934,7 @@ function Get-PortableSettingKeys {
         "RefreshSeconds", "SlowRefreshSeconds", "HttpTimeoutSeconds", "ClosedPollMinutes",
         "SmaFastPeriod", "SmaSlowPeriod", "RsiPeriod", "RsiOverbought", "RsiOversold", "MaType", "LowerPanel",
         "Theme", "AccentColor", "AccentHex", "Language", "TopMost", "CompactTape",
-        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "ShowToasts", "PerMonitorDpi",
+        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "ShowToasts", "PerMonitorDpi", "DayChangePill",
         "ShowTrayNotifications", "NotifyMarketOpen", "NotifyEarnings", "QuietFrom", "QuietTo",
         "Layout", "Opacity", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalChartPct", "CompactShow",
         "UpDownScheme", "UpColor", "DownColor", "ShowArrows", "PriceFlash", "TrayFollowsDepot", "SnapToEdges",
