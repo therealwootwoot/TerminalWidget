@@ -24,7 +24,7 @@ jobs:
       - name: Parse check (catches syntax the host does not know, e.g. ?? in 5.1)
         run: |
           $bad = 0
-          foreach ($f in Get-ChildItem -Filter *.ps1) {
+          foreach ($f in Get-ChildItem -Filter *.ps1 -Recurse) {
             $tokens = $null; $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
             foreach ($e in $errors) {
@@ -38,7 +38,7 @@ jobs:
       - name: Encoding check (UTF-8 with BOM, needed by Windows PowerShell 5.1)
         run: |
           $bad = 0
-          foreach ($f in Get-ChildItem -Filter *.ps1) {
+          foreach ($f in Get-ChildItem -Filter *.ps1 -Recurse) {
             $b = [System.IO.File]::ReadAllBytes($f.FullName)
             if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) {
               Write-Host "::error file=$($f.Name)::missing UTF-8 BOM"

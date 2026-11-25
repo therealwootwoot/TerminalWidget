@@ -547,7 +547,9 @@ Describe "Glossary and tooltips (v4.0)" {
         # quoted UPPERCASE tokens on tooltip / legend lines; label texts excluded
         $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK", "EN", "DE")
         $used = New-Object System.Collections.Generic.HashSet[string]
-        foreach ($line in (Get-Content -Path $ui -Encoding UTF8)) {
+        # V7.0: the UI script is split into the main file + ui\*.ps1 parts
+        $uiFiles = @($ui) + @(Get-ChildItem -Path (Join-Path $PSScriptRoot "ui") -Filter *.ps1 -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
+        foreach ($line in ($uiFiles | ForEach-Object { Get-Content -Path $_ -Encoding UTF8 })) {
             if ($line -notmatch 'Set-Tip|Set-DynTip|addLeg|Legends\.Add|GlossaryShort|Spark = "SPARK"|addNum|addCombo|addCheck') { continue }
             foreach ($m in [regex]::Matches($line, '"([A-Z][A-Z0-9]{1,11})"')) {
                 $k = $m.Groups[1].Value
