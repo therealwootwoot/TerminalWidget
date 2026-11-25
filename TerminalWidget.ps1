@@ -5002,6 +5002,7 @@ $script:RoundBtnPaint = {
         $g.Clear($bg)
         $w = $sender.ClientSize.Width; $h = $sender.ClientSize.Height
         $fill = if (-not $sender.Enabled) { Get-MixColor -A $sender.BackColor -B $bg -T 0.5 }
+                elseif ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:Pal.AccentSubtle }
                 elseif ([object]::ReferenceEquals($script:HotBtn, $sender)) { $sender.FlatAppearance.MouseOverBackColor }
                 else { $sender.BackColor }
         $br = New-Object System.Drawing.SolidBrush($fill)
@@ -5009,7 +5010,13 @@ $script:RoundBtnPaint = {
         if ($sender.FlatAppearance.BorderSize -gt 0) { $pn = New-Object System.Drawing.Pen($sender.FlatAppearance.BorderColor, 1) }
         Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF(0.5, 0.5, ($w - 1.5), ($h - 1.5))) -Radius ([float](S $spec.BtnRadius)) -Pen $pn
         $br.Dispose(); if ($null -ne $pn) { $pn.Dispose() }
-        $fg = if ($sender.Enabled) { $sender.ForeColor } else { $script:Pal.Muted }
+        # V7.0: focus ring (keyboard focus only): 2 px accent line, one style in every theme
+        if ($sender.Focused -and $sender.ShowFocusCues) {
+            $fpen = New-Object System.Drawing.Pen($script:Pal.Accent, 2)
+            Fill-RoundedRect -g $g -Brush ([System.Drawing.Brushes]::Transparent) -Rect (New-Object System.Drawing.RectangleF(1, 1, ($w - 3), ($h - 3))) -Radius ([float](S $spec.BtnRadius)) -Pen $fpen
+            $fpen.Dispose()
+        }
+        $fg = if ($sender.Enabled) { $sender.ForeColor } else { $script:Pal.Disabled }
         $tf = [System.Windows.Forms.TextFormatFlags]
         # icon buttons (one glyph) get no padding and no ellipsis
         $short = ([string]$sender.Text).Length -le 2
@@ -5023,7 +5030,11 @@ $script:RoundBtnPaint = {
     } catch { }
 }
 $script:RoundBtnEnter = { param($sender, $e) $script:HotBtn = $sender; $sender.Invalidate() }
-$script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; $sender.Invalidate() }
+$script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; $sender.Invalidate() }
+# V7.0: pressed state and focus ring need a repaint
+$script:RoundBtnDown  = { param($sender, $e) $script:PressBtn = $sender; $sender.Invalidate() }
+$script:RoundBtnUp    = { param($sender, $e) if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; $sender.Invalidate() }
+$script:RoundBtnFocus = { param($sender, $e) $sender.Invalidate() }
 
 function Style-FlatButton {
     param(
@@ -5038,6 +5049,10 @@ function Style-FlatButton {
         $Btn.Add_Paint($script:RoundBtnPaint)
         $Btn.Add_MouseEnter($script:RoundBtnEnter)
         $Btn.Add_MouseLeave($script:RoundBtnLeave)
+        $Btn.Add_MouseDown($script:RoundBtnDown)
+        $Btn.Add_MouseUp($script:RoundBtnUp)
+        $Btn.Add_GotFocus($script:RoundBtnFocus)
+        $Btn.Add_LostFocus($script:RoundBtnFocus)
     }
     # v5.2: the Fresh style drops plain borders (accent borders stay: they mean something)
     $Btn.FlatAppearance.BorderSize = if ($script:UiSpec.Fresh -and $BorderColor.ToArgb() -eq $script:Pal.Border.ToArgb()) { 0 } else { 1 }
