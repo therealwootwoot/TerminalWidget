@@ -205,6 +205,83 @@ public class Win32WidgetHelperV26 {
     # Already loaded in current PowerShell session
 }
 
+# V7.0: one renderer for all context / tray menus (rounded hover, token colours,
+# right-aligned shortcuts, separators from the border colour). If this fails to
+# compile, the menus keep the system look.
+try {
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+
+public class TwMenuRendererV7 : ToolStripProfessionalRenderer {
+    public static Color BackC = Color.FromArgb(32, 32, 36);
+    public static Color HoverC = Color.FromArgb(54, 54, 61);
+    public static Color TextC = Color.FromArgb(244, 244, 245);
+    public static Color MutedC = Color.FromArgb(161, 161, 170);
+    public static Color BorderC = Color.FromArgb(60, 60, 68);
+    public static Color AccentC = Color.FromArgb(56, 189, 248);
+    public static int Radius = 4;
+
+    public TwMenuRendererV7() : base() { this.RoundedEdges = false; }
+
+    static GraphicsPath RoundRect(Rectangle r, int radius) {
+        GraphicsPath p = new GraphicsPath();
+        int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
+        using (SolidBrush b = new SolidBrush(BackC)) { e.Graphics.FillRectangle(b, e.AffectedBounds); }
+    }
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+        using (Pen p = new Pen(BorderC)) { e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1); }
+    }
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        ToolStripItem item = e.Item;
+        if (!item.Enabled || !(item.Selected || item.Pressed)) { return; }
+        Rectangle r = new Rectangle(4, 1, item.Width - 8, item.Height - 2);
+        SmoothingMode old = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = RoundRect(r, Radius)) using (SolidBrush b = new SolidBrush(HoverC)) { e.Graphics.FillPath(b, gp); }
+        e.Graphics.SmoothingMode = old;
+    }
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+        e.TextColor = e.Item.Enabled ? TextC : MutedC;
+        base.OnRenderItemText(e);
+    }
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+        int y = e.Item.Height / 2;
+        using (Pen p = new Pen(BorderC)) { e.Graphics.DrawLine(p, 8, y, e.Item.Width - 8, y); }
+    }
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+        e.ArrowColor = MutedC;
+        base.OnRenderArrow(e);
+    }
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
+        Rectangle r = e.ImageRectangle;
+        SmoothingMode old = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        int cx = r.X + r.Width / 2;
+        int cy = r.Y + r.Height / 2;
+        using (Pen p = new Pen(AccentC, 2f)) {
+            e.Graphics.DrawLines(p, new Point[] { new Point(cx - 4, cy), new Point(cx - 1, cy + 3), new Point(cx + 4, cy - 3) });
+        }
+        e.Graphics.SmoothingMode = old;
+    }
+}
+"@ -ErrorAction Stop
+} catch {
+    # already loaded in this PowerShell session, or no compiler: system look stays
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # v3.0.1: an exception in any event handler (button click etc.) used to pop up
@@ -3139,6 +3216,25 @@ $script:Pal = Get-ThemeColors
 # v5.2: design numbers of the chosen style (radii, gaps, row height ...)
 $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
 $script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+Update-MenuRenderer
+
+function Update-MenuRenderer {
+    # V7.0: colours of the shared menu renderer follow the theme
+    try {
+        $p = $script:Pal
+        if (-not ('TwMenuRendererV7' -as [type])) { return }
+        [TwMenuRendererV7]::BackC   = $p.Card
+        [TwMenuRendererV7]::HoverC  = $p.Hover
+        [TwMenuRendererV7]::TextC   = $p.Text
+        [TwMenuRendererV7]::MutedC  = $p.Disabled
+        [TwMenuRendererV7]::BorderC = $p.Border
+        [TwMenuRendererV7]::AccentC = $p.Accent
+        [TwMenuRendererV7]::Radius  = [int]$script:UiSpec.BtnRadius
+        if (-not ([System.Windows.Forms.ToolStripManager]::Renderer -is [TwMenuRendererV7])) {
+            [System.Windows.Forms.ToolStripManager]::Renderer = New-Object TwMenuRendererV7
+        }
+    } catch { }
+}
 
 function Get-MixColor {
     # v5.2: T = share of A (0..1), alpha kept opaque
@@ -7271,6 +7367,7 @@ function Apply-ThemeToAllControls {
     $script:Pal = Get-ThemeColors
     $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
     Rebuild-GdiCache
+    Update-MenuRenderer
     Apply-DwmTitlebarTheme
     $p = $script:Pal
 
