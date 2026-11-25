@@ -4732,6 +4732,23 @@ function Get-AccentStates {
     return [PSCustomObject]@{ Hover = $hover; Pressed = $pressed; Subtle = $subtle; OnAccent = $onAccent }
 }
 
+function Get-StatusBarParts {
+    # V7.0: the pieces of the status bar at the bottom of the window
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false)
+    $parts = @()
+    if ($Stand) {
+        $a = ""
+        if (-not [double]::IsNaN($AgeSec)) {
+            if ($AgeSec -lt 90) { $a = " (vor {0:N0} s)" -f $AgeSec } else { $a = " (vor {0:N0} min)" -f [math]::Floor($AgeSec / 60) }
+        }
+        $parts += ("Stand " + $Stand + $a)
+    }
+    else { $parts += "Noch keine Daten" }
+    if ($Market) { $parts += $Market }
+    if ($Privacy) { $parts += "Privat-Modus" }
+    return $parts
+}
+
 function Get-TokenMap {
     # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
     return [ordered]@{
@@ -4891,7 +4908,7 @@ function Get-PortableSettingKeys {
         "RefreshSeconds", "SlowRefreshSeconds", "HttpTimeoutSeconds", "ClosedPollMinutes",
         "SmaFastPeriod", "SmaSlowPeriod", "RsiPeriod", "RsiOverbought", "RsiOversold", "MaType", "LowerPanel",
         "Theme", "AccentColor", "AccentHex", "Language", "TopMost", "CompactTape",
-        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons",
+        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "ShowToasts",
         "ShowTrayNotifications", "NotifyMarketOpen", "NotifyEarnings", "QuietFrom", "QuietTo",
         "Layout", "Opacity", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalChartPct", "CompactShow",
         "UpDownScheme", "UpColor", "DownColor", "ShowArrows", "PriceFlash", "TrayFollowsDepot", "SnapToEdges",

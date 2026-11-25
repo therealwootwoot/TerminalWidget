@@ -2688,3 +2688,18 @@ Describe "Design tokens (V7.0)" {
         }
     }
 }
+
+Describe "Status bar and toasts (V7.0)" {
+    It "lists data age, market and privacy mode" {
+        $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 30 -Market "Börse offen" -Privacy $true)
+        $p.Count | Should -Be 3
+        $p[0] | Should -Be "Stand 10:00:00 (vor 30 s)"
+        $p[2] | Should -Be "Privat-Modus"
+    }
+    It "switches to minutes when the data is older than 90 seconds" {
+        @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 300)[0] | Should -Be "Stand 10:00:00 (vor 5 min)"
+    }
+    It "says so when there is no data yet" {
+        @(Get-StatusBarParts)[0] | Should -Be "Noch keine Daten"
+    }
+}

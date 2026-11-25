@@ -547,9 +547,11 @@ $defaultConfig = [PSCustomObject]@{
     ActiveTab             = "Chart"
     Currency              = "EUR"
     AutoCurrency          = $true             # v5.1: price + chart in the ticker's own currency (depot stays in Currency)
-    UiStyle               = "Refined"         # v5.2: Refined (same layout, cleaner) / Fresh (rounded cards, more space)
+    UiStyle               = "Fresh"           # V7.0: new installs start in Fresh (saved settings stay as they are); was Refined. v5.2: Refined (same layout, cleaner) / Fresh (rounded cards, more space)
     RowDensity            = "Normal"          # v5.2: Compact / Normal / Comfortable list rows
     ZebraRows             = $false            # v5.2: every second list row slightly lighter
+    ShowStatusBar         = $true             # V7.0: status bar at the bottom (data age, market, privacy mode)
+    ShowToasts            = $true             # V7.0: short messages inside the window (alerts still use the tray)
     UseIcons              = $true             # v5.2: Segoe Fluent / MDL2 icons on buttons and menus
     TapeSpeed             = "Normal"          # v5.2: ticker bar Slow / Normal / Fast
     SettingsPage          = "Design"          # v5.3: last page of the settings window
@@ -2123,8 +2125,59 @@ function Confirm-Action {
     return ($ans -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+function Show-Toast {
+    # V7.0: short message at the bottom right of the window; click to close
+    param([string]$Text, [int]$Seconds = 4)
+    try {
+        if (-not [bool]$script:Config.ShowToasts -or [string]::IsNullOrWhiteSpace($Text)) { return }
+        if ($null -eq $form -or $form.IsDisposed -or -not $form.Visible) { return }
+        if ($null -eq $script:ToastPanel) {
+            $pn = New-Object System.Windows.Forms.Panel
+            $pn.Visible = $false
+            $pn.Cursor = [System.Windows.Forms.Cursors]::Hand
+            Enable-DoubleBuffering -Control $pn
+            $pn.Add_Paint({
+                param($sender, $e)
+                $g = $e.Graphics
+                $p = $script:Pal
+                $g.Clear($p.BodyBg)
+                $r = New-Object System.Drawing.RectangleF(1, 1, ($sender.Width - 3), ($sender.Height - 3))
+                $br = New-Object System.Drawing.SolidBrush($p.Card)
+                $pen = New-Object System.Drawing.Pen($p.Border, 1)
+                Fill-RoundedRect $g $br $r ([float]$script:UiSpec.BtnRadius) $pen 0
+                $br.Dispose(); $pen.Dispose()
+                $bar = New-Object System.Drawing.SolidBrush($p.Accent)
+                $g.FillRectangle($bar, (S 8), (S 8), (S 3), ($sender.Height - (S 16)))
+                $bar.Dispose()
+                $tr = New-Object System.Drawing.Rectangle((S 18), 0, ($sender.Width - (S 26)), $sender.Height)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$script:ToastText, $fontUi, $tr, $p.Text, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
+            })
+            $pn.Add_Click({ $script:ToastTimer.Stop(); $script:ToastPanel.Visible = $false })
+            $form.Controls.Add($pn)
+            $script:ToastPanel = $pn
+            $script:ToastTimer = New-Object System.Windows.Forms.Timer
+            $script:ToastTimer.Add_Tick({ $script:ToastTimer.Stop(); $script:ToastPanel.Visible = $false })
+        }
+        $script:ToastText = $Text
+        $flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
+        $tw = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $fontUi, [System.Drawing.Size]::Empty, $flags).Width
+        $w = [math]::Min([int]($form.ClientSize.Width - (S 24)), [math]::Max((S 160), $tw + (S 36)))
+        $h = S 32
+        $sb = 0
+        if ($null -ne $script:PnlStatusBar -and $script:PnlStatusBar.Visible) { $sb = $script:PnlStatusBar.Height }
+        $script:ToastPanel.SetBounds([int]($form.ClientSize.Width - $w - (S 12)), [int]($form.ClientSize.Height - $h - $sb - (S 12)), [int]$w, [int]$h)
+        $script:ToastPanel.Visible = $true
+        $script:ToastPanel.BringToFront()
+        $script:ToastPanel.Invalidate()
+        $script:ToastTimer.Stop()
+        $script:ToastTimer.Interval = [int]([math]::Max(1, $Seconds) * 1000)
+        $script:ToastTimer.Start()
+    } catch { }
+}
+
 function Set-TransientStatus {
     param([string]$Text, [int]$Seconds = 5)
+    Show-Toast -Text $Text -Seconds $Seconds
     $script:TransientStatus = $Text
     $script:TransientUntil  = (Get-Date).AddSeconds($Seconds)
     if ($null -ne $lblStatus) {
@@ -3216,8 +3269,6 @@ $script:Pal = Get-ThemeColors
 # v5.2: design numbers of the chosen style (radii, gaps, row height ...)
 $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
 $script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
-Update-MenuRenderer
-
 function Update-MenuRenderer {
     # V7.0: colours of the shared menu renderer follow the theme
     try {
@@ -3235,6 +3286,8 @@ function Update-MenuRenderer {
         }
     } catch { }
 }
+
+Update-MenuRenderer
 
 function Get-MixColor {
     # v5.2: T = share of A (0..1), alpha kept opaque
@@ -5502,6 +5555,34 @@ $pnlHealth.Add_Paint({
     $br.Dispose()
 })
 $pnlNav.Controls.Add($pnlHealth)
+
+# V7.0: status bar at the bottom (data age, market state, privacy mode)
+$script:PnlStatusBar = New-Object System.Windows.Forms.Panel
+$script:PnlStatusBar.Height = S 22
+$script:PnlStatusBar.BackColor = $script:Pal.HeaderBg
+$script:PnlStatusBar.Visible = $false
+Enable-DoubleBuffering -Control $script:PnlStatusBar
+$script:PnlStatusBar.Add_Paint({
+    param($sender, $e)
+    $g = $e.Graphics
+    $p = $script:Pal
+    $g.Clear($p.HeaderBg)
+    $g.DrawLine($script:GdiCache["sepPen"], 0, 0, $sender.Width, 0)
+    $age = [double]::NaN
+    $stand = ""
+    if ($null -ne $script:LastDataTime) { $age = ((Get-Date) - $script:LastDataTime).TotalSeconds; $stand = $script:LastDataTime.ToString("HH:mm:ss") }
+    $mk = ""
+    try { $mk = [string]$lblMarketStatus.Text } catch { }
+    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode))
+    $txt = $parts -join "   |   "
+    $tr = New-Object System.Drawing.Rectangle((S 12), 0, ($sender.Width - (S 24)), $sender.Height)
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $fontMono, $tr, $p.Muted, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
+})
+$form.Controls.Add($script:PnlStatusBar)
+$script:StatusBarTimer = New-Object System.Windows.Forms.Timer
+$script:StatusBarTimer.Interval = 1000
+$script:StatusBarTimer.Add_Tick({ if ($script:PnlStatusBar.Visible) { $script:PnlStatusBar.Invalidate() } })
+$script:StatusBarTimer.Start()
 Set-Tip $lblStatus "Wechselkurse und Stand der letzten Aktualisierung" "STAND"
 
 # ==============================================================================
@@ -7270,10 +7351,20 @@ Set-Tip $splitChart "Ziehen = Chart-Höhe ändern, Doppelklick = Standard"
 Set-Tip $splitLists "Ziehen = Breite von Watchlist und Portfolio ändern, Doppelklick = Standard"
 
 function Update-MainLayout {
+    if ([bool]$script:Config.CompactMode) { $script:PnlStatusBar.Visible = $false }
     if ([bool]$script:Config.CompactMode -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
     $W = $form.ClientSize.Width
     $H = $form.ClientSize.Height
     if ($W -lt (S 400) -or $H -lt (S 300)) { return }
+
+    # V7.0: status bar at the bottom edge; the views end above it
+    $sbH = 0
+    if ([bool]$script:Config.ShowStatusBar) {
+        $sbH = S 22
+        $script:PnlStatusBar.SetBounds(0, ($H - $sbH), $W, $sbH)
+        $script:PnlStatusBar.Visible = $true
+        $script:PnlStatusBar.BringToFront()
+    } else { $script:PnlStatusBar.Visible = $false }
 
     # Header: right-hand buttons stick to the right edge
     $pnlHeader.Width = $W
@@ -7304,7 +7395,7 @@ function Update-MainLayout {
     $vx = S 12
     $vy = S 92
     $vw = $W - (S 24)
-    $vh = $H - (S 92) - (S 12)
+    $vh = $H - (S 92) - (S 12) - $sbH
     if ([string]$script:Config.Layout -eq "Terminal") {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
@@ -15153,6 +15244,8 @@ function Show-SettingsDialog {
     $cbUd = & $addCombo -Label "Farben für Plus / Minus" -Items (@(@((Get-UpDownSchemes).Keys) + @("Eigene"))) -Value ([string]$cfg.UpDownScheme) -Tip "Farbenblind = Blau / Orange. Eigene = frei wählen." -TipKey "COLORS" -Key "UpDownScheme" -Default ([string]$dc.UpDownScheme) -Words "grün rot farbenblind"
     $chkArrow = & $addCheck -Label "Pfeile vor Veränderungen anzeigen" -Value ([bool]$cfg.ShowArrows) -Tip "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" -TipKey "COLORS" -Key "ShowArrows" -Default ([bool]$dc.ShowArrows)
     $chkFlash = & $addCheck -Label "Kurs kurz einfärben, wenn er sich ändert" -Value ([bool]$cfg.PriceFlash) -Key "PriceFlash" -Default ([bool]$dc.PriceFlash) -Words "blinken flash"
+    $chkStatusBar = & $addCheck -Label "Statusleiste unten anzeigen" -Value ([bool]$cfg.ShowStatusBar) -Tip "Alter der Daten, Börsenstatus und Privat-Modus in einer Zeile am unteren Fensterrand" -Key "ShowStatusBar" -Default ([bool]$dc.ShowStatusBar) -Words "Status Leiste Statusbar Stand"
+    $chkToasts = & $addCheck -Label "Kurze Meldungen im Fenster (Toasts)" -Value ([bool]$cfg.ShowToasts) -Tip "Meldungen wie 'gespeichert' erscheinen unten rechts im Fenster. Alarme kommen weiter über das Tray-Symbol." -Key "ShowToasts" -Default ([bool]$dc.ShowToasts) -Words "Toast Meldung Hinweis"
     & $addSection "Schrift"
     $monoOffered = @(Get-MonoFontNames | Where-Object { $_ -eq "Consolas" -or $script:InstalledFonts -contains $_ })
     $cbMono  = & $addCombo -Label "Schrift für Zahlen (ab Neustart)" -Items $monoOffered -Value ([string]$cfg.MonoFont) -Tip "Feste Zeichenbreite: Ziffern stehen untereinander. Cascadia Mono kommt mit Windows 11 / Windows Terminal." -Key "MonoFont" -Default ([string]$dc.MonoFont) -Words "Font"
@@ -15650,6 +15743,8 @@ function Show-SettingsDialog {
     if ($cfg.AccentColor -eq "Eigene" -and -not $cfg.AccentHex) { $cfg.AccentColor = "Sky" }
     $cfg.ShowArrows            = [bool]$chkArrow.Checked
     $cfg.PriceFlash            = [bool]$chkFlash.Checked
+    $cfg.ShowStatusBar         = [bool]$chkStatusBar.Checked
+    $cfg.ShowToasts            = [bool]$chkToasts.Checked
     $cfg.TrayFollowsDepot      = [bool]$chkTrayDepot.Checked
     $cfg.SnapToEdges           = [bool]$chkSnap.Checked
     $cfg.RiskFreePct           = [double]$nRf.Value
