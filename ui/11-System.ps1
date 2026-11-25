@@ -168,6 +168,61 @@ function Invoke-SettingsPreview {
     $cfg.RowDensity = switch ([string]$sc.Rows.SelectedItem) { "Kompakt" { "Compact" } "Bequem" { "Comfortable" } default { "Normal" } }
     $cfg.ZebraRows  = [bool]$sc.Zebra.Checked
     try { Apply-ThemeToAllControls } catch { Write-WidgetLog "Settings preview: $($_.Exception.Message)" "WARN" }
+    $pvp = $script:SettingsPreviewPanel
+    if ($null -ne $pvp -and -not $pvp.IsDisposed) { $pvp.Invalidate() }
+}
+
+function Draw-SettingsPreview {
+    # V7.1: a small sample (card, price, pill, button, toggle) in the current style / theme / accent
+    param([System.Drawing.Graphics]$g, [int]$W, [int]$H)
+    $p = $script:Pal; $sp = $script:UiSpec
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    $g.Clear($p.BodyBg)
+    $rr = [float][math]::Max(2, [int]$sp.BtnRadius)
+    $bp = New-Object System.Drawing.Pen($p.Border, [float]1)
+    $outline = New-RoundedPath (New-Object System.Drawing.RectangleF(0.5, 0.5, [float]($W - 1), [float]($H - 1))) ([float](S 8))
+    $g.DrawPath($bp, $outline); $outline.Dispose()
+    # card
+    $card = New-Object System.Drawing.RectangleF([float](S 10), [float](S 10), [float](S 200), [float]($H - (S 20)))
+    $cp = New-RoundedPath $card $rr
+    $cb = New-Object System.Drawing.SolidBrush($p.Card); $g.FillPath($cb, $cp); $g.DrawPath($bp, $cp); $cb.Dispose(); $cp.Dispose()
+    $ba = New-Object System.Drawing.SolidBrush($p.Accent); $bt = New-Object System.Drawing.SolidBrush($p.Text); $bm = New-Object System.Drawing.SolidBrush($p.Muted)
+    $g.DrawString("NVDA", $fontTicker, $ba, [float]($card.X + (S 10)), [float]($card.Y + (S 6)))
+    $g.DrawString("123,45 EUR", $fontUiBold, $bt, [float]($card.X + (S 10)), [float]($card.Y + (S 26)))
+    $upC = $colGreen
+    if ([bool]$sp.Fresh) {
+        $pill = New-Object System.Drawing.RectangleF([float]($card.X + (S 110)), [float]($card.Y + (S 26)), [float](S 74), [float](S 18))
+        $pp = New-RoundedPath $pill ([float](S 9))
+        $pb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(48, $upC.R, $upC.G, $upC.B)); $g.FillPath($pb, $pp); $pb.Dispose(); $pp.Dispose()
+    }
+    $ub = New-Object System.Drawing.SolidBrush($upC)
+    $g.DrawString("+1,2 %", $fontUi, $ub, [float]($card.X + (S 120)), [float]($card.Y + (S 27)))
+    $g.DrawString("Beispiel", $fontUi, $bm, [float]($card.X + (S 10)), [float]($card.Y + (S 46)))
+    $ub.Dispose()
+    # button
+    $btn = New-Object System.Drawing.RectangleF([float](S 230), [float](S 14), [float](S 96), [float](S 28))
+    $bpth = New-RoundedPath $btn $rr
+    $g.FillPath($ba, $bpth); $bpth.Dispose()
+    $ob = New-Object System.Drawing.SolidBrush($p.OnAccent)
+    $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = [System.Drawing.StringAlignment]::Center; $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $g.DrawString("Aktion", $fontUi, $ob, $btn, $sf); $ob.Dispose()
+    # secondary button
+    $btn2 = New-Object System.Drawing.RectangleF([float](S 230), [float](S 48), [float](S 96), [float](S 28))
+    $b2 = New-RoundedPath $btn2 $rr
+    $ib = New-Object System.Drawing.SolidBrush($p.Input); $g.FillPath($ib, $b2); $g.DrawPath($bp, $b2); $ib.Dispose(); $b2.Dispose()
+    $g.DrawString("Zweitaktion", $fontUi, $bt, $btn2, $sf); $sf.Dispose()
+    # toggle (on)
+    $tr = New-Object System.Drawing.RectangleF([float](S 344), [float](S 16), [float](S 36), [float](S 20))
+    $tp = New-RoundedPath $tr ([float](S 10)); $g.FillPath($ba, $tp); $tp.Dispose()
+    $kb = New-Object System.Drawing.SolidBrush($p.Text); $g.FillEllipse($kb, [float]($tr.Right - (S 17)), [float]($tr.Y + (S 3)), [float](S 14), [float](S 14)); $kb.Dispose()
+    $g.DrawString("An", $fontUi, $bt, [float](S 386), [float]($tr.Y + (S 1)))
+    # toggle (off)
+    $tr2 = New-Object System.Drawing.RectangleF([float](S 344), [float](S 46), [float](S 36), [float](S 20))
+    $tp2 = New-RoundedPath $tr2 ([float](S 10)); $ob2 = New-Object System.Drawing.SolidBrush($p.Border); $g.FillPath($ob2, $tp2); $ob2.Dispose(); $tp2.Dispose()
+    $kb2 = New-Object System.Drawing.SolidBrush($p.Text); $g.FillEllipse($kb2, [float]($tr2.X + (S 3)), [float]($tr2.Y + (S 3)), [float](S 14), [float](S 14)); $kb2.Dispose()
+    $g.DrawString("Aus", $fontUi, $bm, [float](S 386), [float]($tr2.Y + (S 1)))
+    $ba.Dispose(); $bt.Dispose(); $bm.Dispose(); $bp.Dispose()
 }
 
 function Get-SettingsPaletteEntries {
@@ -502,6 +557,15 @@ function Show-SettingsDialog {
     }
     $lay.Y += S 66
     & $addNote "Auch ohne dieses Fenster: Befehl STYLE, Layout-Menü (oben rechts) und Tray-Menü." 1 | Out-Null
+    & $addSection "Vorschau"
+    $pvPanel = New-Object System.Windows.Forms.Panel
+    $pvPanel.SetBounds($X0, $lay.Y, (S 456), (S 84))
+    $pvPanel.BackColor = $p.BodyBg
+    Enable-DoubleBuffering -Control $pvPanel
+    $pvPanel.Add_Paint({ param($s, $e) try { Draw-SettingsPreview -g $e.Graphics -W $s.Width -H $s.Height } catch { } })
+    $lay.Host.Controls.Add($pvPanel)
+    $script:SettingsPreviewPanel = $pvPanel
+    $lay.Y += S 96
     & $addSection "Farben"
     $cbTheme  = & $addCombo -Label "Theme" -Items @(Get-ThemeNames) -Value ([string]$cfg.Theme) -TipKey "THEME" -Key "Theme" -Default ([string]$dc.Theme) -Words "dunkel hell dark light graphite Farbschema"
     $cbAccent = & $addCombo -Label "Akzentfarbe" -Items @("Sky", "Amber", "Violet", "Windows", "Eigene") -Value ([string]$cfg.AccentColor) -Tip "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen" -Key "AccentColor" -Default ([string]$dc.AccentColor) -Words "Accent"

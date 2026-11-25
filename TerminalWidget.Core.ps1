@@ -4734,7 +4734,7 @@ function Get-AccentStates {
 
 function Get-StatusBarParts {
     # V7.0: the pieces of the status bar at the bottom of the window
-    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false)
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1)
     $parts = @()
     if ($Stand) {
         $a = ""
@@ -4745,6 +4745,7 @@ function Get-StatusBarParts {
     }
     else { $parts += "Noch keine Daten" }
     if ($Market) { $parts += $Market }
+    if ($ReqPerMin -ge 0) { $parts += ("{0} Abfragen/min" -f $ReqPerMin) }
     if ($Privacy) { $parts += "Privat-Modus" }
     return $parts
 }

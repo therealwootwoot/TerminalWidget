@@ -2692,6 +2692,11 @@ Describe "Design tokens (V7.0)" {
 }
 
 Describe "Status bar and toasts (V7.0)" {
+    It "shows the request rate when it is known (V7.1)" {
+        $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 5 -Market "Börse offen" -ReqPerMin 12)
+        $p[2] | Should -Be "12 Abfragen/min"
+        @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 5).Count | Should -Be 1
+    }
     It "lists data age, market and privacy mode" {
         $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 30 -Market "Börse offen" -Privacy $true)
         $p.Count | Should -Be 3

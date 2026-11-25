@@ -1295,7 +1295,7 @@ $script:PnlStatusBar.Add_Paint({
     if ($null -ne $script:LastDataTime) { $age = ((Get-Date) - $script:LastDataTime).TotalSeconds; $stand = $script:LastDataTime.ToString("HH:mm:ss") }
     $mk = ""
     try { $mk = [string]$lblMarketStatus.Text } catch { }
-    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode))
+    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode) -ReqPerMin (Get-RequestsPerMinute))
     $txt = $parts -join "   |   "
     $tr = New-Object System.Drawing.Rectangle((S 12), 0, ($sender.Width - (S 24)), $sender.Height)
     [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $fontMono, $tr, $p.Muted, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
