@@ -1138,6 +1138,43 @@ function Set-PeerGroup {
     if ($miss.Count -gt 0) { Start-ProfileJob -Symbols $miss -EventsOnly $true -OnComplete { if ($null -ne $script:TaCtl) { Update-TickerAnalysis } } }
 }
 
+function Draw-FundStrip {
+    # V7.1: dot plot (own value among peers) or valuation band (fair-price range from the P/E history) in one cell
+    param([System.Drawing.Graphics]$g, [System.Drawing.Rectangle]$Rect, $Tag)
+    $p = $script:Pal
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $x0 = $Rect.X + (S 8); $x1 = $Rect.Right - (S 8); $cy = $Rect.Y + [int]($Rect.Height / 2)
+    if ($x1 - $x0 -lt 20) { return }
+    $pen = New-Object System.Drawing.Pen($p.Border, 2)
+    $g.DrawLine($pen, $x0, $cy, $x1, $cy); $pen.Dispose()
+    if ([string]$Tag.Kind -eq "Dots") {
+        $d = $Tag.Layout
+        $bm = New-Object System.Drawing.SolidBrush($p.Muted)
+        foreach ($pp in @($d.PeerPos)) { $px = $x0 + ($x1 - $x0) * [double]$pp; $g.FillEllipse($bm, [float]($px - 3), [float]($cy - 3), 6, 6) }
+        $bm.Dispose()
+        $mx = $x0 + ($x1 - $x0) * [double]$d.MedianPos
+        $pt = New-Object System.Drawing.Pen($p.Text, 1)
+        $g.DrawLine($pt, [float]$mx, [float]($cy - 6), [float]$mx, [float]($cy + 6)); $pt.Dispose()
+        $ba = New-Object System.Drawing.SolidBrush($p.Accent)
+        $ox = $x0 + ($x1 - $x0) * [double]$d.Pos
+        $g.FillEllipse($ba, [float]($ox - 5), [float]($cy - 5), 10, 10); $ba.Dispose()
+    } elseif ([string]$Tag.Kind -eq "Band") {
+        $b = $Tag.Band; $px = [double]$Tag.Price
+        $lo = [math]::Min([double]$b.Low, $px) * 0.95; $hi = [math]::Max([double]$b.High, $px) * 1.05
+        $sp = [math]::Max(1e-9, $hi - $lo)
+        $xf = { param([double]$v) $x0 + ($x1 - $x0) * (($v - $lo) / $sp) }
+        $bandBr = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(70, $p.Accent))
+        $xl = & $xf ([double]$b.Low); $xh = & $xf ([double]$b.High)
+        $g.FillRectangle($bandBr, [float]$xl, [float]($cy - 6), [float]([math]::Max(2, $xh - $xl)), 12); $bandBr.Dispose()
+        $mp = New-Object System.Drawing.Pen($p.Text, 1)
+        $xm = & $xf ([double]$b.Mid); $g.DrawLine($mp, [float]$xm, [float]($cy - 7), [float]$xm, [float]($cy + 7)); $mp.Dispose()
+        $col = $p.Accent
+        if ($b.State -eq "cheap") { $col = $colGreen } elseif ($b.State -eq "expensive") { $col = $colRed }
+        $bc = New-Object System.Drawing.SolidBrush($col)
+        $xp = & $xf $px; $g.FillEllipse($bc, [float]($xp - 5), [float]($cy - 5), 10, 10); $bc.Dispose()
+    }
+}
+
 function Get-FundPeers {
     # other tickers of your depot + watchlist in the same sector with fundamentals
     # v5.7: an own comparison group (PEER) wins over the sector
@@ -1230,6 +1267,10 @@ function Update-TickerAnalysis {
     $pe = Get-FundPeers -Sym $sym
     foreach ($r in @(Get-FundamentalRows -Fund $fund -Peers $pe.Peers)) {
         $i = $f.Rows.Add((Tr $r.Name), $r.Value, $(if ($r.PeerCount -ge 2) { $r.Peer } else { "-" }), (Tr $r.Note))
+        if ($r.PeerCount -ge 2 -and -not [double]::IsNaN([double]$r.X)) {
+            $f.Rows[$i].Tag = [PSCustomObject]@{ Kind = "Dots"; Layout = (Get-DotPlotLayout -Value ([double]$r.X) -Peers ([double[]]$r.PeerValues)) }
+            $f.Rows[$i].Cells[4].ToolTipText = ("{0} {1} / {2}" -f (Tr "Rang"), $f.Rows[$i].Tag.Layout.Rank, $f.Rows[$i].Tag.Layout.Count)
+        }
         $col = if ($r.Score -gt 0) { $colGreen } elseif ($r.Score -lt 0) { $colRed } else { $p.Muted }
         $f.Rows[$i].Cells[3].Style.ForeColor = $col
         if ($r.Value -eq "-") { $f.Rows[$i].Cells[1].Style.ForeColor = $p.Muted }
@@ -1244,6 +1285,18 @@ function Update-TickerAnalysis {
         $pct = ($r.Key -eq "DivYield")
         $fmt = { param($v) if ($pct) { "{0:N2}%" -f ($v * 100) } else { "{0:N1}" -f $v } }
         $i = $f.Rows.Add(("  " + (Tr $r.Label)), (& $fmt $r.Now), (& $fmt $r.Median), ("{0} ({1} {2}: {3} - {4})" -f (Tr $r.Note), (Tr "Rang"), $r.Rank, (& $fmt $r.Min), (& $fmt $r.Max)))
+        if ($r.Key -eq "TrailingPE" -and $null -ne $c.Bars -and @($c.Bars.Close).Count -gt 0) {
+            $mults = @($script:FundHist[$sym] | ForEach-Object { try { [double]$_.TrailingPE } catch { [double]::NaN } })
+            $pxNow = [double]@($c.Bars.Close)[-1]
+            $peNow = [double]$r.Now
+            if ($peNow -gt 0 -and $pxNow -gt 0) {
+                $bnd = Get-ValuationBand -Multiples ([double[]]$mults) -Eps ($pxNow / $peNow) -Price $pxNow
+                if ($null -ne $bnd) {
+                    $f.Rows[$i].Tag = [PSCustomObject]@{ Kind = "Band"; Band = $bnd; Price = $pxNow }
+                    $f.Rows[$i].Cells[4].ToolTipText = ("{0}: {1:N2} - {2:N2} ({3} {4:N2})" -f (Tr "Fairer Kurs nach eigener KGV-Historie"), $bnd.Low, $bnd.High, (Tr "Mitte"), $bnd.Mid)
+                }
+            }
+        }
         $good = if ($pct) { $r.Rank -ge 80 } else { $r.Rank -le 20 }
         $bad = if ($pct) { $r.Rank -le 20 } else { $r.Rank -ge 80 }
         $f.Rows[$i].Cells[3].Style.ForeColor = if ($good) { $colGreen } elseif ($bad) { $colRed } else { $p.Muted }
@@ -1438,10 +1491,21 @@ function Show-TickerAnalysis {
     $fg = New-Object System.Windows.Forms.DataGridView
     $fg.SetBounds($rx, (S 60), (S 516), (S 532)); $fg.Anchor = $aT -bor $aB -bor $aL -bor $aR
     Style-DataGrid -Grid $fg
-    foreach ($cd in @(@("K", "Kennzahl", 170), @("V", "Wert", 110), @("P", "Vergleich", 100), @("E", "Einordnung", 150))) { $ci = $fg.Columns.Add($cd[0], $cd[1]); $fg.Columns[$ci].FillWeight = [float](S $cd[2]); $fg.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
+    foreach ($cd in @(@("K", "Kennzahl", 170), @("V", "Wert", 110), @("P", "Vergleich", 100), @("E", "Einordnung", 150), @("L", "Lage", 120))) { $ci = $fg.Columns.Add($cd[0], $cd[1]); $fg.Columns[$ci].FillWeight = [float](S $cd[2]); $fg.Columns[$ci].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable }
     $fg.Columns[1].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
     $fg.Columns[2].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
     $fg.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $fg.Add_CellPainting({
+        param($s, $e)
+        if ($e.RowIndex -lt 0 -or $e.ColumnIndex -ne 4) { return }
+        $tag = $s.Rows[$e.RowIndex].Tag
+        if ($null -eq $tag) { return }
+        try {
+            $e.PaintBackground($e.ClipBounds, [bool]($e.State -band [System.Windows.Forms.DataGridViewElementStates]::Selected))
+            Draw-FundStrip -g $e.Graphics -Rect $e.CellBounds -Tag $tag
+            $e.Handled = $true
+        } catch { }
+    })
     $dlg.Controls.Add($fg)
     $fnote = New-Object System.Windows.Forms.Label
     $fnote.SetBounds($rx, (S 596), (S 516), (S 20)); $fnote.Anchor = $aB -bor $aL -bor $aR; $fnote.ForeColor = $p.Muted; $fnote.AutoEllipsis = $true

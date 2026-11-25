@@ -4560,7 +4560,7 @@ function Get-FundamentalRows {
                 }
             }
         }
-        $rows += [PSCustomObject]@{ Key = $k; Name = $f[1]; Value = (Format-FundamentalValue -X $x -Kind $kind -Currency $cur); Peer = (Format-FundamentalValue -X $med -Kind $kind -Currency $cur); PeerCount = $pv.Count; Score = $sc; Note = $note }
+        $rows += [PSCustomObject]@{ Key = $k; Name = $f[1]; Value = (Format-FundamentalValue -X $x -Kind $kind -Currency $cur); Peer = (Format-FundamentalValue -X $med -Kind $kind -Currency $cur); PeerCount = $pv.Count; Score = $sc; Note = $note; X = $x; PeerValues = @($pv) }
     }
     return $rows
 }
