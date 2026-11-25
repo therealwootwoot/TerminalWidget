@@ -1253,6 +1253,24 @@ function Invoke-SmokeTest {
         if (-not (Test-PaneDividerHit -L $fakeL -Y 209)) { throw "divider hit test (inside the gap)" }
         if (Test-PaneDividerHit -L $fakeL -Y 100) { throw "divider hit test (inside the chart)" }
     } 3000
+    Invoke-SmokeStep "Accessibility" {
+        Set-AccessibilityDefaults $form -NoTabOrder
+        $miss = @(); $small = @()
+        $scan = $null
+        $scan = {
+            param($c)
+            foreach ($k in @($c.Controls)) {
+                $isInput = ($k -is [System.Windows.Forms.Button] -or $k -is [System.Windows.Forms.TextBox] -or $k -is [System.Windows.Forms.ComboBox] -or $k -is [System.Windows.Forms.NumericUpDown])
+                if ($isInput -and $k.Visible -and [string]::IsNullOrEmpty($k.AccessibleName)) { $miss += ("{0}:{1}" -f $k.GetType().Name, $k.Name) }
+                if ($k -is [System.Windows.Forms.Button] -and $k.Visible -and ($k.Height -lt (S 20) -or $k.Width -lt (S 20))) { $small += ("{0} {1}x{2}" -f $k.Text, $k.Width, $k.Height) }
+                if ($k.Controls.Count -gt 0) { & $scan $k }
+            }
+        }
+        & $scan $form
+        $script:SmokeNotes.Add("Accessibility: {0} inputs without a name, {1} buttons under 20 px" -f $miss.Count, $small.Count)
+        if ($small.Count -gt 0) { $script:SmokeNotes.Add("Small buttons: " + (($small | Select-Object -First 8) -join "; ")) }
+        if ($miss.Count -gt 0) { $script:SmokeNotes.Add("Unnamed: " + (($miss | Select-Object -First 8) -join "; ")) }
+    } 1000
     Invoke-SmokeStep "GDI handles" {
         if (-not ('TwSmokeGdi' -as [type])) { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class TwSmokeGdi { [DllImport("user32.dll")] public static extern uint GetGuiResources(IntPtr h, uint f); }' }
         $hp = [System.Diagnostics.Process]::GetCurrentProcess().Handle

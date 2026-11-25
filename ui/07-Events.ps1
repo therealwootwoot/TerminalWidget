@@ -693,6 +693,42 @@ function Invoke-Transaction {
     return ""
 }
 
+function Set-AccessibilityDefaults {
+    # V7.1: accessible names for buttons / inputs without one (own text, else the label to the left or above)
+    # and a tab order that follows the reading order (top to bottom, left to right) inside every container.
+    param([System.Windows.Forms.Control]$Root, [switch]$NoTabOrder)
+    try {
+        $walk = {
+            param($c)
+            $kids = @($c.Controls)
+            foreach ($k in $kids) {
+                if ([string]::IsNullOrEmpty($k.AccessibleName)) {
+                    $n = ""
+                    if ($k -is [System.Windows.Forms.Button] -or $k -is [System.Windows.Forms.CheckBox]) { $n = [string]$k.Text }
+                    elseif ($k -is [System.Windows.Forms.TextBox] -or $k -is [System.Windows.Forms.ComboBox] -or $k -is [System.Windows.Forms.NumericUpDown] -or $k -is [System.Windows.Forms.DataGridView]) {
+                        $best = $null
+                        foreach ($lb in $kids) {
+                            if ($lb -isnot [System.Windows.Forms.Label] -or [string]::IsNullOrWhiteSpace($lb.Text)) { continue }
+                            $sameRow = ([math]::Abs($lb.Top - $k.Top) -le (S 8) -and $lb.Left -lt $k.Left)
+                            $above = ($lb.Bottom -le ($k.Top + (S 2)) -and ($k.Top - $lb.Bottom) -le (S 24) -and [math]::Abs($lb.Left - $k.Left) -le (S 40))
+                            if ($sameRow -or $above) { if ($null -eq $best -or $lb.Left -gt $best.Left) { $best = $lb } }
+                        }
+                        if ($null -ne $best) { $n = [string]$best.Text }
+                    }
+                    $n = $n.Trim().TrimEnd(":").Trim()
+                    if ($n) { $k.AccessibleName = $n }
+                }
+                if ($k.Controls.Count -gt 0) { & $walk $k }
+            }
+            if ($NoTabOrder) { return }
+            $ord = @($kids | Where-Object { $_.TabStop } | Sort-Object @{ Expression = { [int][math]::Floor($_.Top / [double](S 8)) } }, @{ Expression = { $_.Left } })
+            $ix = 0
+            foreach ($k in $ord) { try { $k.TabIndex = $ix } catch { }; $ix++ }
+        }
+        & $walk $Root
+    } catch { }
+}
+
 function New-DialogForm {
     # v5.5: Key = remember position (and size, if sizable) under this name
     param([string]$Title, [int]$W, [int]$H, [string]$Key = "")
@@ -708,7 +744,7 @@ function New-DialogForm {
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
     $d.Add_HandleCreated($script:DialogChromeHandler)
     # v4.7: English mode translates the static texts once the dialog is built
-    $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender })
     $d.Text = Tr $Title
     if ($Key) { Register-DialogPlacement -Dlg $d -Key $Key }
     return $d

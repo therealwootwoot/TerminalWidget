@@ -391,6 +391,7 @@ function Invoke-LayoutMenuTag {
 $btnTray.Add_Click({ $form.Hide() })
 function Show-MainWindow {
     $form.Show()
+    if (-not $script:MainA11yDone) { $script:MainA11yDone = $true; Set-AccessibilityDefaults $form -NoTabOrder }
     # back to maximized if it was maximized (was: always "Normal")
     $form.WindowState = if ([bool]$script:Config.WindowMaximized -and -not [bool]$script:Config.CompactMode) { [System.Windows.Forms.FormWindowState]::Maximized } else { [System.Windows.Forms.FormWindowState]::Normal }
     $form.Activate()
