@@ -1,4 +1,4 @@
-# TerminalWidget V7.0 – Design & UI (in progress)
+﻿# TerminalWidget V7.0 – Design & UI (in progress)
 
 Design and UI only: no new data sources, no data format change. New config keys are added automatically; saved settings are never changed silently. Decisions: see the Powershell Widget project (roadmap-to-v7-decisions).
 
@@ -20,8 +20,17 @@ Design and UI only: no new data sources, no data format change. New config keys 
 - **Analyse → Wertentwicklung**: key figure tiles (value, result, return p.a., dividends, period) above the summary; green / red only for gains / losses.
 - **Heatmap**: rounded tiles with a small gap.
 
+- **Button hover fade** (150 ms, only when motion is on – follows Windows animation setting and Settings → Design).
+- **High contrast**: follows the Windows high-contrast mode automatically (can be switched off).
+- **Heatmap** has a colour legend.
+- **Layout command `LAYOUT FOCUS`** and a new page "Neu in V7" in the welcome tour.
+- **Drop-down items** use the theme (hover colour, selected row).
+- **Signal gauge** in the ticker analysis: day and week signal on a red-grey-green scale.
+- **CSV import**: step indicator (Datei, Spalten, Prüfen, Import).
+- **CI**: screenshot report (same / changed / new vs. `docs/shots-baseline-<shell>.json`) in the job summary and a contact sheet as artifact.
+
 ## Not done yet (from the V7 roadmap)
-Owner-drawn controls (segmented control, drop-downs, sliders), (sparklines and the 52-week bar already exist since v4.9.5), indicator panes, donut and a colour legend for the heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
+Segmented control and slider, closed drop-downs drawn by the app, indicator panes (title, card style, draggable divider), allocation donut, dot plots and valuation band, unified hover card, one common dialog template, settings mini live preview, replacing the remaining hard-coded colours by tokens, number roll-over and page fade, focus rings on all controls, accessible names / tab order check, GDI handle and timing checks in the smoke test. These can follow in V7.1.
 
 ## Tests
 - Pester: scale on the 4 px grid, grid rounding, contrast ratio, accent states, token map, status bar text.
