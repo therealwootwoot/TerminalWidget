@@ -1202,6 +1202,8 @@ function Update-TickerAnalysis {
         }
         $sc = [int]$sig.Score
         $vd = Get-TimeframeVerdict -Daily $sc -Weekly ([int]$wsig.Score) -HasWeekly (@($wb.Close).Count -ge 30)
+        $c.Gauge = @{ Daily = $sc; Weekly = [int]$wsig.Score }
+        if ($null -ne $c.GaugePanel) { $c.GaugePanel.Invalidate() }
         $c.TSum.ForeColor = if ($vd.Tone -gt 0) { $colGreen } elseif ($vd.Tone -lt 0) { $colRed } else { $script:Pal.Warn }
         $c.TSum.Text = "{0} {1:+0;-0;0} / {2} {3:+0;-0;0}: {4}" -f (Tr "Tag"), $sc, (Tr "Woche"), [int]$wsig.Score, (Tr $vd.Text)
         Set-DynTip $c.TSum ("{0}: {1} ({2} {3}, {4} {5})`r`n{6}: {7}`r`n{8} {9}" -f (Tr "Tageskurse"), (Tr $sig.Summary), $sig.Positive, (Tr "positiv"), $sig.Negative, (Tr "negativ"), (Tr "Wochenkurse"), (Tr $wsig.Summary), (Tr "Kurse in"), $c.Bars.Currency)
@@ -1378,9 +1380,39 @@ function Show-TickerAnalysis {
     $dlg.MaximizeBox = $true
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 900), (S 520))
     $title = New-Object System.Windows.Forms.Label
-    $title.SetBounds((S 12), (S 10), (S 1056), (S 24)); $title.Anchor = $aT -bor $aL -bor $aR
+    $title.SetBounds((S 12), (S 10), (S 846), (S 24)); $title.Anchor = $aT -bor $aL -bor $aR
     $title.Font = $fontUiBold; $title.ForeColor = $p.Accent; $title.AutoEllipsis = $true
     $dlg.Controls.Add($title)
+    # V7.0: signal gauge (daily and weekly score on a red - grey - green scale)
+    $gauge = New-Object System.Windows.Forms.Panel
+    $gauge.SetBounds((S 868), (S 6), (S 200), (S 30)); $gauge.Anchor = $aT -bor $aR
+    Enable-DoubleBuffering -Control $gauge
+    $gauge.Add_Paint({
+        param($sender, $e)
+        $g = $e.Graphics
+        $pp = $script:Pal
+        $g.Clear($sender.Parent.BackColor)
+        $tc = $script:TaCtl
+        if ($null -eq $tc -or $null -eq $tc.Gauge) { return }
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $rows = @(@("Tag", [int]$tc.Gauge.Daily), @("Woche", [int]$tc.Gauge.Weekly))
+        $x0 = S 44; $tw = $sender.Width - $x0 - (S 4); $th = S 8
+        for ($k = 0; $k -lt 2; $k++) {
+            $y = (S 3) + $k * (S 13)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, (Tr $rows[$k][0]), $fontAxis, (New-Object System.Drawing.Rectangle(0, ($y - (S 2)), $x0, (S 13))), $pp.Muted, ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::NoPadding))
+            $seg = [int]($tw / 3)
+            $cols = @((Get-BlendColor -A $script:colRed -B $pp.Card -T 0.55), (Get-BlendColor -A $pp.Muted -B $pp.Card -T 0.35), (Get-BlendColor -A $script:colGreen -B $pp.Card -T 0.55))
+            for ($s2 = 0; $s2 -lt 3; $s2++) {
+                $sb = New-Object System.Drawing.SolidBrush($cols[$s2])
+                $g.FillRectangle($sb, ($x0 + $s2 * $seg), $y, $seg, $th); $sb.Dispose()
+            }
+            $sc2 = [math]::Max(-6, [math]::Min(6, [int]$rows[$k][1]))
+            $mx = $x0 + [int](($sc2 + 6) / 12.0 * $tw)
+            $mb = New-Object System.Drawing.SolidBrush($pp.Text)
+            $g.FillEllipse($mb, ($mx - (S 4)), ($y - 1), (S 8), ($th + 2)); $mb.Dispose()
+        }
+    })
+    $dlg.Controls.Add($gauge)
     $half = S 528
     $lt = New-Object System.Windows.Forms.Label
     $lt.SetBounds((S 12), (S 40), $half, (S 18)); $lt.Text = "Technische Signale (Tageskurse)"; $lt.Font = $fontUiBold
@@ -1450,7 +1482,7 @@ function Show-TickerAnalysis {
         foreach ($ctl in @($c0.FGrid, $c0.FNote, $c0.FLabel)) { $ctl.Left = $w2 + (S 24); $ctl.Width = $sender.ClientSize.Width - $w2 - (S 36) }
     })
     $chart.Add_Paint({ param($sender, $e) try { Draw-TickerAnalysisChart -g $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "TA chart: $($_.Exception.Message)" "WARN" } })
-    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; TLabel = $lt; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
+    $script:TaCtl = @{ Sym = $sym; Dlg = $dlg; Title = $title; GaugePanel = $gauge; Gauge = $null; Chart = $chart; TGrid = $tg; TSum = $tsum; FGrid = $fg; FNote = $fnote; FLabel = $lf; TLabel = $lt; Bars = $null; Sig = $null; Failed = $false; FundTried = $false }
     $dlg.Add_Shown({
         Update-TickerAnalysis
         $c0 = $script:TaCtl
