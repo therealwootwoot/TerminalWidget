@@ -494,6 +494,7 @@ function Update-WatchGroupCombo {
     $cmbWlGroup.SelectedIndex = [math]::Max(0, $ix)
     $cmbWlGroup.EndUpdate()
     $script:WlGroupUpdating = $false
+    if ($null -ne $script:PnlWlChips) { $script:PnlWlChips.Invalidate() }
 }
 function Set-WatchGroup {
     param([string]$Name)
@@ -533,6 +534,150 @@ $cmbWlGroup.Add_SelectionChangeCommitted({
     }
     Set-WatchGroup $k
     if ($dgvWatchlist.CanFocus) { [void]$dgvWatchlist.Focus() }
+})
+
+# V7.0: group chips above the list instead of the drop-down (the hidden drop-down still holds the state).
+# Click = show group, "+" = new group, right click = delete, drop a ticker on a chip = add it to the group.
+$cmbWlGroup.Visible = $false
+$script:PnlWlChips = New-Object System.Windows.Forms.Panel
+$script:PnlWlChips.Location = New-Object System.Drawing.Point((S 8), (S 64))
+$script:PnlWlChips.Size = New-Object System.Drawing.Size((S 480), (S 28))
+$script:PnlWlChips.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:PnlWlChips.AllowDrop = $true
+$script:PnlWlChips.TabStop = $false
+Enable-DoubleBuffering -Control $script:PnlWlChips
+$viewWatch.Controls.Add($script:PnlWlChips)
+Set-Tip $script:PnlWlChips "Gruppen: Klick zeigt die Gruppe, + legt eine neue an, Rechtsklick löscht. Einen Ticker aus der Liste auf eine Gruppe ziehen, um ihn einzusortieren."
+$script:WlChips = @()
+$script:WlChipHot = -1
+
+function Get-WlChipModel {
+    # chips in order: Alle, every group, then (if too narrow) a "more" chip and the "+" chip
+    $items = @()
+    $items += [PSCustomObject]@{ Key = ""; Text = ("{0} {1}" -f (Tr "Alle"), @($script:Config.Watchlist).Count); Kind = "group" }
+    foreach ($gr in @($script:Config.WatchGroups)) {
+        if ($null -eq $gr -or -not $gr.Name) { continue }
+        $cnt = @(Get-WatchGroupSymbols -Watchlist @($script:Config.Watchlist) -Groups @($script:Config.WatchGroups) -Group ([string]$gr.Name)).Count
+        $items += [PSCustomObject]@{ Key = [string]$gr.Name; Text = ("{0} {1}" -f $gr.Name, $cnt); Kind = "group" }
+    }
+    $flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
+    $widths = @($items | ForEach-Object { [int]([System.Windows.Forms.TextRenderer]::MeasureText($_.Text, $fontUi, [System.Drawing.Size]::Empty, $flags).Width + (S 20)) })
+    $lay = Get-ChipLayout -Widths $widths -Available ([int]$script:PnlWlChips.Width) -Gap (S 6) -AddWidth (S 26) -MoreWidth (S 34)
+    $out = @()
+    for ($i = 0; $i -lt [int]$lay.Shown; $i++) {
+        $items[$i] | Add-Member -NotePropertyName X -NotePropertyValue ([int]$lay.X[$i]) -Force
+        $items[$i] | Add-Member -NotePropertyName W -NotePropertyValue ([int]$widths[$i]) -Force
+        $out += $items[$i]
+    }
+    $nx = 0
+    if ($out.Count -gt 0) { $nx = [int]$out[-1].X + [int]$out[-1].W + (S 6) }
+    if ([bool]$lay.Overflow) {
+        $hidden = @($items | Select-Object -Skip ([int]$lay.Shown))
+        $out += [PSCustomObject]@{ Key = "|more"; Text = ([string][char]0x2026); Kind = "more"; X = $nx; W = (S 34); Hidden = $hidden }
+        $nx += (S 34) + (S 6)
+    }
+    $out += [PSCustomObject]@{ Key = "|new"; Text = "+"; Kind = "add"; X = $nx; W = (S 26) }
+    return $out
+}
+
+function Get-WlChipAt {
+    param([int]$X, [int]$Y)
+    if ($Y -lt (S 2) -or $Y -gt (S 26)) { return $null }
+    foreach ($ch in @($script:WlChips)) { if ($X -ge [int]$ch.X -and $X -le ([int]$ch.X + [int]$ch.W)) { return $ch } }
+    return $null
+}
+
+$script:PnlWlChips.Add_Paint({
+    param($sender, $e)
+    $g = $e.Graphics
+    $p = $script:Pal
+    $g.Clear($sender.Parent.BackColor)
+    $script:WlChips = @(Get-WlChipModel)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $cur = [string]$script:Config.WatchGroup
+    $hh = S 22
+    $rad = if ($script:UiSpec.Fresh) { [float]($hh / 2) } else { [float](S $script:UiSpec.BtnRadius) }
+    for ($i = 0; $i -lt $script:WlChips.Count; $i++) {
+        $ch = $script:WlChips[$i]
+        $sel = ($ch.Kind -eq "group" -and [string]$ch.Key -eq $cur)
+        $hot = ($i -eq $script:WlChipHot)
+        $fill = if ($sel) { $p.AccentSubtle } elseif ($hot) { $p.Hover } else { $p.Card }
+        $line = if ($sel) { $p.Accent } else { $p.Border }
+        $fg = if ($sel) { $p.Accent } elseif ($ch.Kind -eq "group") { $p.Text } else { $p.Muted }
+        $br = New-Object System.Drawing.SolidBrush($fill)
+        $pn = New-Object System.Drawing.Pen($line, 1)
+        Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$ch.X, [float](S 3), [float]($ch.W - 1), [float]$hh)) -Radius $rad -Pen $pn
+        $br.Dispose(); $pn.Dispose()
+        $tf = [System.Windows.Forms.TextFormatFlags]
+        $tr = New-Object System.Drawing.Rectangle([int]$ch.X, (S 3), [int]$ch.W, $hh)
+        [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$ch.Text, $(if ($sel) { $fontUiBold } else { $fontUi }), $tr, $fg, ($tf::HorizontalCenter -bor $tf::VerticalCenter -bor $tf::SingleLine -bor $tf::NoPadding))
+    }
+})
+$script:PnlWlChips.Add_Resize({ $script:PnlWlChips.Invalidate() })
+$script:PnlWlChips.Add_MouseMove({
+    param($sender, $e)
+    $ch = Get-WlChipAt -X $e.X -Y $e.Y
+    $ix = if ($null -eq $ch) { -1 } else { [array]::IndexOf(@($script:WlChips), $ch) }
+    if ($ix -ne $script:WlChipHot) { $script:WlChipHot = $ix; $sender.Cursor = $(if ($ix -ge 0) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }); $sender.Invalidate() }
+})
+$script:PnlWlChips.Add_MouseLeave({ $script:WlChipHot = -1; $script:PnlWlChips.Invalidate() })
+$script:PnlWlChips.Add_MouseUp({
+    param($sender, $e)
+    $ch = Get-WlChipAt -X $e.X -Y $e.Y
+    if ($null -eq $ch) { return }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        if ($ch.Kind -eq "group") { Set-WatchGroup ([string]$ch.Key); if ($dgvWatchlist.CanFocus) { [void]$dgvWatchlist.Focus() } }
+        elseif ($ch.Kind -eq "add") { $nm = New-WatchGroup; if ($nm) { Set-WatchGroup $nm } }
+        elseif ($ch.Kind -eq "more") {
+            $mm = New-Object System.Windows.Forms.ContextMenuStrip
+            foreach ($hd in @($ch.Hidden)) {
+                $mi = New-Object System.Windows.Forms.ToolStripMenuItem([string]$hd.Text)
+                $mi.Tag = [string]$hd.Key
+                $mi.Checked = ([string]$hd.Key -eq [string]$script:Config.WatchGroup)
+                $mi.Add_Click({ param($s2, $e2) Set-WatchGroup ([string]$s2.Tag) })
+                [void]$mm.Items.Add($mi)
+            }
+            $mm.Show($sender, (New-Object System.Drawing.Point([int]$ch.X, (S 28))))
+        }
+    }
+    elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $ch.Kind -eq "group" -and [string]$ch.Key) {
+        $gn = [string]$ch.Key
+        if (Confirm-Action -Text ("Gruppe '{0}' löschen? (Die Ticker bleiben in der Watchlist.)" -f $gn) -Title "Gruppe") {
+            $script:Config.WatchGroups = @(@($script:Config.WatchGroups) | Where-Object { $null -ne $_ -and [string]$_.Name -ne $gn })
+            Set-WatchGroup $(if ([string]$script:Config.WatchGroup -eq $gn) { "" } else { [string]$script:Config.WatchGroup })
+        }
+    }
+})
+$script:PnlWlChips.Add_DragOver({
+    param($sender, $e)
+    $pt = $sender.PointToClient((New-Object System.Drawing.Point($e.X, $e.Y)))
+    $ch = Get-WlChipAt -X $pt.X -Y $pt.Y
+    $ok = ($null -ne $ch -and ($ch.Kind -eq "add" -or ($ch.Kind -eq "group" -and [string]$ch.Key)) -and $e.Data.GetDataPresent([string]))
+    $e.Effect = if ($ok) { [System.Windows.Forms.DragDropEffects]::Move } else { [System.Windows.Forms.DragDropEffects]::None }
+    $ix = if ($null -eq $ch -or -not $ok) { -1 } else { [array]::IndexOf(@($script:WlChips), $ch) }
+    if ($ix -ne $script:WlChipHot) { $script:WlChipHot = $ix; $sender.Invalidate() }
+})
+$script:PnlWlChips.Add_DragLeave({ $script:WlChipHot = -1; $script:PnlWlChips.Invalidate() })
+$script:PnlWlChips.Add_DragDrop({
+    param($sender, $e)
+    $script:WlChipHot = -1
+    try {
+        $pt = $sender.PointToClient((New-Object System.Drawing.Point($e.X, $e.Y)))
+        $ch = Get-WlChipAt -X $pt.X -Y $pt.Y
+        $sym = [string]$e.Data.GetData([string])
+        if ($null -eq $ch -or [string]::IsNullOrWhiteSpace($sym)) { return }
+        if ($ch.Kind -eq "add") {
+            $nm = New-WatchGroup -Symbol $sym
+            if ($nm) { Set-WatchGroup $nm }
+        } elseif ($ch.Kind -eq "group" -and [string]$ch.Key) {
+            $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$ch.Key) -Symbol $sym -In $true)
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+            Set-TransientStatus ("{0} -> {1}" -f $sym, [string]$ch.Key) 3
+            Update-WatchGroupCombo
+            Refresh-WatchlistAndAlerts
+        }
+    } catch { }
+    $sender.Invalidate()
 })
 
 $btnWlAddActive = New-Object System.Windows.Forms.Button
@@ -581,8 +726,8 @@ $viewWatch.Controls.Add($lstWlSearchDropdown)
 $lstWlSearchDropdown.BringToFront()
 
 $dgvWatchlist = New-Object System.Windows.Forms.DataGridView
-$dgvWatchlist.Location = New-Object System.Drawing.Point((S 8), (S 66))
-$dgvWatchlist.Size = New-Object System.Drawing.Size((S 480), (S 382))
+$dgvWatchlist.Location = New-Object System.Drawing.Point((S 8), (S 96))   # V7.0: group chips sit between the search row and the list
+$dgvWatchlist.Size = New-Object System.Drawing.Size((S 480), (S 352))
 Style-DataGrid -Grid $dgvWatchlist
 Enable-DoubleBuffering -Control $dgvWatchlist
 

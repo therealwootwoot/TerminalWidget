@@ -4749,6 +4749,32 @@ function Get-StatusBarParts {
     return $parts
 }
 
+function Get-ChipLayout {
+    # V7.0: how many chips fit into one row; the rest goes behind a "more" chip.
+    # Returns Shown (number of chips), Overflow ($true = a "more" chip is needed) and X (left edge of each shown chip).
+    param([int[]]$Widths, [int]$Available, [int]$Gap = 6, [int]$AddWidth = 26, [int]$MoreWidth = 34)
+    $n = @($Widths).Count
+    $total = 0
+    foreach ($w in @($Widths)) { $total += ([int]$w + $Gap) }
+    $x = @()
+    if ($n -eq 0) { return [PSCustomObject]@{ Shown = 0; Overflow = $false; X = @() } }
+    if (($total + $AddWidth) -le $Available) {
+        $pos = 0
+        foreach ($w in @($Widths)) { $x += $pos; $pos += ([int]$w + $Gap) }
+        return [PSCustomObject]@{ Shown = $n; Overflow = $false; X = $x }
+    }
+    $cap = $Available - ($MoreWidth + $Gap + $AddWidth + $Gap)
+    $pos = 0
+    $shown = 0
+    foreach ($w in @($Widths)) {
+        if ($shown -gt 0 -and ($pos + [int]$w) -gt $cap) { break }
+        $x += $pos
+        $pos += ([int]$w + $Gap)
+        $shown++
+    }
+    return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
+}
+
 function Get-TokenMap {
     # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
     return [ordered]@{

@@ -200,6 +200,7 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnWlRemove    -BgColor $p.Input -FgColor $colRed   -BorderColor $p.Border
     $lstWlSearchDropdown.BackColor = $p.HeaderBg; $lstWlSearchDropdown.ForeColor = $p.Text
     $cmbWlGroup.BackColor = $p.Input; $cmbWlGroup.ForeColor = $p.Accent
+    if ($null -ne $script:PnlWlChips) { $script:PnlWlChips.Invalidate() }
     Style-DataGrid -Grid $dgvWatchlist
 
     $txtAlertTicker.BackColor = $p.Input; $txtAlertTicker.ForeColor = $p.Text

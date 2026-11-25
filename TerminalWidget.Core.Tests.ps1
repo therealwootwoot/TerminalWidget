@@ -2705,3 +2705,23 @@ Describe "Status bar and toasts (V7.0)" {
         @(Get-StatusBarParts)[0] | Should -Be "Noch keine Daten"
     }
 }
+
+Describe "Chip row layout (V7.0)" {
+    It "shows every chip when they fit" {
+        $l = Get-ChipLayout -Widths @(50, 60, 70) -Available 400
+        $l.Shown | Should -Be 3
+        $l.Overflow | Should -BeFalse
+        ($l.X -join ",") | Should -Be "0,56,122"
+    }
+    It "moves the rest behind a more chip when the row is too narrow" {
+        $l = Get-ChipLayout -Widths @(50, 60, 70) -Available 150
+        $l.Shown | Should -Be 1
+        $l.Overflow | Should -BeTrue
+    }
+    It "always keeps the first chip" {
+        (Get-ChipLayout -Widths @(200, 60) -Available 100).Shown | Should -Be 1
+    }
+    It "handles an empty list" {
+        (Get-ChipLayout -Widths @() -Available 300).Shown | Should -Be 0
+    }
+}
