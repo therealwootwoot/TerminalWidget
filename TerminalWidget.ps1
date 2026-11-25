@@ -18838,6 +18838,26 @@ function Invoke-SmokeTest {
     [void](Invoke-TerminalCommand "STYLE FRESH")
     Invoke-SmokeStep "Design ticker analysis" { & $probeRun { Show-TickerAnalysis "NVDA" } { & $script:SmokeShot "07-fresh-ticker-analysis" ([System.Windows.Forms.Form]::ActiveForm); "" } 8000 } 10000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
+    # V7.0: contrast of every theme (text 4.5:1, muted text and accent 3:1) against card and background
+    Invoke-SmokeStep "Theme contrast" {
+        $saved = [string]$script:Config.Theme
+        $bad = @()
+        $rgb = { param($c) return @([int]$c.R, [int]$c.G, [int]$c.B) }
+        foreach ($tn in (Get-ThemeNames)) {
+            $script:Config.Theme = $tn
+            $pp = Get-ThemeColors
+            foreach ($surf in @("Card", "BodyBg", "PanelBg")) {
+                $r1 = Get-ContrastRatio -A (& $rgb $pp.Text) -B (& $rgb $pp[$surf])
+                if ($r1 -lt 4.5) { $bad += ("{0}: text on {1} = {2:N1}" -f $tn, $surf, $r1) }
+                $r2 = Get-ContrastRatio -A (& $rgb $pp.Muted) -B (& $rgb $pp[$surf])
+                if ($r2 -lt 3.0) { $bad += ("{0}: muted on {1} = {2:N1}" -f $tn, $surf, $r2) }
+                $r3 = Get-ContrastRatio -A (& $rgb $pp.Accent) -B (& $rgb $pp[$surf])
+                if ($r3 -lt 3.0) { $bad += ("{0}: accent on {1} = {2:N1}" -f $tn, $surf, $r3) }
+            }
+        }
+        $script:Config.Theme = $saved
+        if ($bad.Count -gt 0) { throw ($bad -join "; ") }
+    } 5000
     # v5.3: settings pages, style findable, search, markers, reset, preview, Ctrl+K, settings file
     Invoke-SmokeStep "Settings pages" {
         $styleBefore = [string]$script:Config.UiStyle
