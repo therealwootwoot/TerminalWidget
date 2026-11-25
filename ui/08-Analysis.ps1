@@ -481,6 +481,36 @@ function Draw-AllocationBars {
         $pctW = S 120
         $x0 = $labW + (S 8)
         $x1 = $W - $pctW
+        # V7.1: donut on the right when there is room (slices = the same groups, small ones merged into "Rest")
+        $donutW = 0
+        if ($W -ge (S 620) -and $H -ge (S 150)) {
+            $donutW = [math]::Min((S 230), $H - (S 8))
+            $x1 = $W - $pctW - $donutW - (S 12)
+            $slices = @(Get-DonutSlices -Items @($groups | ForEach-Object { [PSCustomObject]@{ Name = [string]$_.Key; Value = [double]$_.Pct } }) -MinPct 3 -MaxSlices 8)
+            if ($slices.Count -gt 0) {
+                $pal8 = @(Get-SeriesPalette -Count 8)
+                $dx = $W - $donutW - (S 8); $dy = [int](($H - ($donutW - (S 24))) / 2); $dd = $donutW - (S 24)
+                $rect = New-Object System.Drawing.RectangleF([float]$dx, [float]$dy, [float]$dd, [float]$dd)
+                $ci = 0
+                foreach ($sl in $slices) {
+                    $col = $pal8[$ci % 8]; $ci++
+                    $sb = New-Object System.Drawing.SolidBrush($col)
+                    $sw = [float][math]::Max(0.5, $sl.Sweep - 1.2)
+                    $g.FillPie($sb, [int]$rect.X, [int]$rect.Y, [int]$rect.Width, [int]$rect.Height, [float]($sl.Start - 90 + 0.6), $sw)
+                    $sb.Dispose()
+                }
+                # hole
+                $hb = New-Object System.Drawing.SolidBrush($p.Card)
+                $hole = [int]($dd * 0.58)
+                $g.FillEllipse($hb, [int]($dx + ($dd - $hole) / 2), [int]($dy + ($dd - $hole) / 2), $hole, $hole)
+                $hb.Dispose()
+                $cap = [string]$slices[0].Name; if ($cap.Length -gt 14) { $cap = $cap.Substring(0, 13) + "…" }
+                $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = [System.Drawing.StringAlignment]::Center; $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $cr = New-Object System.Drawing.RectangleF([float]($dx + ($dd - $hole) / 2), [float]($dy + ($dd - $hole) / 2), [float]$hole, [float]$hole)
+                $g.DrawString(("{0:N0} %`n{1}" -f $slices[0].Pct, $cap), $fontUi, $brT, $cr, $sf)
+                $sf.Dispose()
+            }
+        }
         $maxPct = [math]::Max(1.0, (@($groups | ForEach-Object { [double]$_.Pct }) | Sort-Object -Descending)[0])
         $y = S 8
         foreach ($gr in $groups) {

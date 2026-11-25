@@ -410,6 +410,27 @@ $script:Pal = Get-ThemeColors
 # v5.2: design numbers of the chosen style (radii, gaps, row height ...)
 $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
 $script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+function Get-SeriesPalette {
+    # V7.1: categorical colours for donut / legend, derived from the accent (hue steps), so every theme stays consistent
+    param([int]$Count = 8)
+    $a = $script:Pal.Accent
+    $h0 = [double]$a.GetHue()
+    $dark = ($script:Pal.BodyBg.GetBrightness() -lt 0.5)
+    $s = 0.55; $v = $(if ($dark) { 0.90 } else { 0.72 })
+    $out = @()
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($i -eq 0) { $out += $a; continue }
+        $h = (($h0 + 360.0 / $Count * $i) % 360.0)
+        $c = $v * $s; $x = $c * (1 - [math]::Abs((($h / 60.0) % 2) - 1)); $m = $v - $c
+        switch ([int][math]::Floor($h / 60.0)) {
+            0 { $r = $c; $g = $x; $b = 0 } 1 { $r = $x; $g = $c; $b = 0 } 2 { $r = 0; $g = $c; $b = $x }
+            3 { $r = 0; $g = $x; $b = $c } 4 { $r = $x; $g = 0; $b = $c } default { $r = $c; $g = 0; $b = $x }
+        }
+        $out += [System.Drawing.Color]::FromArgb([int](($r + $m) * 255), [int](($g + $m) * 255), [int](($b + $m) * 255))
+    }
+    return $out
+}
+
 function New-ThemedCombo {
     # V7.1: drop-down with rounded closed box and styled items (falls back to the plain combo box)
     if ('TwComboV7' -as [type]) { $c = New-Object TwComboV7; $c.ItemHeight = S 18; return $c }
