@@ -1267,7 +1267,7 @@ function Invoke-SmokeTest {
             }
         }
         & $scan $form
-        $script:SmokeNotes.Add("Accessibility: {0} inputs without a name, {1} buttons under 20 px" -f $miss.Count, $small.Count)
+        $script:SmokeNotes.Add(("Accessibility: {0} inputs without a name, {1} buttons under 20 px" -f $miss.Count, $small.Count))
         if ($small.Count -gt 0) { $script:SmokeNotes.Add("Small buttons: " + (($small | Select-Object -First 8) -join "; ")) }
         if ($miss.Count -gt 0) { $script:SmokeNotes.Add("Unnamed: " + (($miss | Select-Object -First 8) -join "; ")) }
     } 1000
