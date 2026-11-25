@@ -110,12 +110,44 @@ function Show-AnalysisDialog {
     $pp.Controls.Add($chkBench)
     Set-DynTip $chkBench "" "BENCHMARK"
     $chart = New-Object System.Windows.Forms.Panel
-    $chart.SetBounds(0, (S 32), (S 976), (S 456))
+    $chart.SetBounds(0, (S 32), (S 976), (S 396))   # V7.0: 60 px shorter, the key figure tiles sit below
     $chart.Anchor = $aAll
     Enable-DoubleBuffering -Control $chart
     $pp.Controls.Add($chart)
     $btnBuyDates = & $mkBtn "Kaufdaten ..." (S 846) 0 (S 130) $pp ($aT -bor $aR)
     Set-DynTip $btnBuyDates "Kaufdatum für Positionen ohne Buchung nachtragen (Anfangsbestand) oder Datum von Editor-Buchungen korrigieren" "OPENING"
+    # V7.0: key figure tiles (value, result, return p.a., dividends, period)
+    $kpiPanel = New-Object System.Windows.Forms.Panel
+    $kpiPanel.SetBounds(0, (S 432), (S 976), (S 56))
+    $kpiPanel.Anchor = $aB -bor $aL -bor $aR
+    Enable-DoubleBuffering -Control $kpiPanel
+    $kpiPanel.Add_Paint({
+        param($sender, $e)
+        $g = $e.Graphics
+        $p = $script:Pal
+        $g.Clear($sender.Parent.BackColor)
+        $ac = $script:AnaCtl
+        if ($null -eq $ac -or $null -eq $ac.Kpi -or @($ac.Kpi).Count -eq 0) { return }
+        $tiles = @($ac.Kpi)
+        $gap = S 8
+        $w = [int](($sender.Width - ($tiles.Count - 1) * $gap) / $tiles.Count)
+        $rad = if ($script:UiSpec.Fresh) { [float](S 10) } else { [float](S 3) }
+        $tf = [System.Windows.Forms.TextFormatFlags]
+        $fl = $tf::Left -bor $tf::Top -bor $tf::NoPadding -bor $tf::SingleLine -bor $tf::EndEllipsis
+        for ($i = 0; $i -lt $tiles.Count; $i++) {
+            $t = $tiles[$i]
+            $x = $i * ($w + $gap)
+            $br = New-Object System.Drawing.SolidBrush($p.Card)
+            $pn = New-Object System.Drawing.Pen($p.Border, 1)
+            Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$x, 0.5, [float]($w - 1), [float]($sender.Height - 1.5))) -Radius $rad -Pen $pn
+            $br.Dispose(); $pn.Dispose()
+            $vc = switch ([string]$t.Kind) { "up" { $script:colGreen } "down" { $script:colRed } default { $p.Text } }
+            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Label, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 6), ($w - (S 20)), (S 14))), $p.Muted, $fl)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Text, $fontUiBold, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 21), ($w - (S 20)), (S 16))), $vc, $fl)
+            if ($t.Sub) { [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Sub, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 38), ($w - (S 20)), (S 14))), $p.Muted, $fl) }
+        }
+    })
+    $pp.Controls.Add($kpiPanel)
     $lblSum = New-Object System.Windows.Forms.Label
     $lblSum.SetBounds(0, (S 494), (S 976), (S 68))
     $lblSum.Anchor = $aB -bor $aL -bor $aR
@@ -228,7 +260,7 @@ function Show-AnalysisDialog {
         DivGrid = $dg; DivSum = $lblDivSum; DivBars = $divBars; DivBuckets = @(); DivBase = ""
         Dlg = $dlg; Status = $lblStatus; Reload = $btnReload; Base = $cbBase; Bench = $tbBench
         Pages = $pages; PageButtons = $pageBtns; Page = "Perf"
-        Chart = $chart; Sum = $lblSum; RangeButtons = $rangeBtns; HoverIdx = -1; Geom = $null
+        Chart = $chart; Sum = $lblSum; KpiPanel = $kpiPanel; Kpi = @(); RangeButtons = $rangeBtns; HoverIdx = -1; Geom = $null
         RetGrid = $grid; RetNote = $lblRetNote
         Bars = $bars; AllocWarn = $lblWarn; ProfGrid = $pg; DimButtons = $dimBtns; Dim = "Position"; Groups = @()
         Model = $null; Failed = @()

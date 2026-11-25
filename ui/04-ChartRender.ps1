@@ -1519,6 +1519,14 @@ function Update-ChartLegendTip {
     $toolTip.Show($txt, $Canvas, [int]($X + (S 14)), [int]($Y + (S 18)), [int]$dur)
 }
 
+function Get-ChartLegendAt {
+    param($L, [int]$X, [int]$Y)
+    if ($null -eq $L -or $null -eq $L.Legends) { return $null }
+    $py = [float]($Y - [int]$L.OffsetY)
+    foreach ($lg in @($L.Legends)) { if ($lg.R.Contains([float]$X, $py)) { return $lg } }
+    return $null
+}
+
 $script:ChartMouseMoveHandler = {
     param($sender, $e)
     # Hit-testing uses the geometry of the bitmap that is actually on screen
@@ -1526,6 +1534,10 @@ $script:ChartMouseMoveHandler = {
     if ($null -eq $L) { return }
     if ($null -ne $script:DrawPending) { $script:DrawMouse = Get-ChartPointAt -L $L -X $e.X -Y $e.Y; $sender.Invalidate() }
     Update-ChartLegendTip -Canvas $sender -L $L -X $e.X -Y $e.Y
+    $lgh = Get-ChartLegendAt -L $L -X $e.X -Y $e.Y
+    $wantHand = ($null -ne $lgh -and [string]$lgh.Key -in @("BB", "SMA", "VWAP"))
+    if ($wantHand -and $sender.Cursor -ne [System.Windows.Forms.Cursors]::Hand) { $sender.Cursor = [System.Windows.Forms.Cursors]::Hand }
+    elseif (-not $wantHand -and $sender.Cursor -eq [System.Windows.Forms.Cursors]::Hand) { $sender.Cursor = [System.Windows.Forms.Cursors]::Default }
     $idx = Get-HoverIndexAt -L $L -X $e.X
     if ($null -ne $script:ZoomDrag -and $idx -ge 0) { $script:ZoomDrag.B = [int]$L.ViewStart + $idx; $sender.Invalidate() }
     $m = $script:Measure
@@ -1580,6 +1592,19 @@ $script:ChartMouseDownHandler = {
         return
     }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        # V7.0: a click on an indicator legend (BB20, SMA / EMA, VWAP) hides that indicator
+        $lgHit = Get-ChartLegendAt -L $L -X $e.X -Y $e.Y
+        if ($null -ne $lgHit -and [string]$lgHit.Key -in @("BB", "SMA", "VWAP")) {
+            switch ([string]$lgHit.Key) {
+                "BB"   { $script:Config.ShowBollinger = $false }
+                "SMA"  { $script:Config.ShowSma = $false }
+                "VWAP" { $script:Config.ShowVwap = $false }
+            }
+            Save-JsonState -Path $script:ConfigPath -Data $script:Config
+            Set-TransientStatus ("{0} ausgeblendet (Knopf unter dem Chart schaltet wieder ein)" -f [string]$lgHit.Key) 3
+            Update-AllUiViews
+            return
+        }
         $idx = Get-HoverIndexAt -L $L -X $e.X
         $script:Measure = @{ Active = $false; Dragging = ($idx -ge 0); A = ([int]$L.ViewStart + $idx); B = ([int]$L.ViewStart + $idx); X0 = $e.X; Key = $script:ActiveSeriesKey }
         $sender.Invalidate()

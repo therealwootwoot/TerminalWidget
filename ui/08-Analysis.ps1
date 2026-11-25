@@ -232,6 +232,7 @@ function Update-AnalysisPerf {
     if ($null -eq $sr) {
         $ac.Sum.Text = if ($script:Transactions.Count -eq 0) { "Noch keine Buchungen. Die Wertentwicklung wird aus deinen Käufen und Verkäufen berechnet: Portfolio > 'Transaktion...'." } else { "Keine Kursverläufe für die gebuchten Ticker verfügbar." }
         $ac.Sum.ForeColor = $script:Pal.Muted
+        $ac.Kpi = @()
     } else {
         $last = $sr.Dates.Count - 1
         $v = $sr.Value[$last]; $i = $sr.Invested[$last]; $d = $sr.Dividends[$last]
@@ -251,11 +252,15 @@ function Update-AnalysisPerf {
         if ($sr.Approx) { $notes.Add("Teilweise mit aktuellem statt historischem Wechselkurs gerechnet (Verlauf fehlte).") }
         $ac.Sum.Text = ($lines -join "`r`n")
         $ac.Sum.ForeColor = if ($res -ge 0) { $colGreen } else { $colRed }
+        try {
+            $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)))
+        } catch { $ac.Kpi = @() }
     }
     $ac.Status.Text = if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b }
     $ac.Status.ForeColor = if ($notes.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
     Set-DynTip $ac.Status ($ac.Status.Text)
     $ac.Chart.Invalidate()
+    if ($null -ne $ac.KpiPanel) { $ac.KpiPanel.Invalidate() }
 }
 
 function Get-RangeLabel {
@@ -859,8 +864,10 @@ function Draw-Heatmap {
         $col = Get-BlendColor -A $base -B $script:Pal.Card -T $t
         $br = New-Object System.Drawing.SolidBrush($col)
         $rf = New-Object System.Drawing.RectangleF([float]$r[0], [float]$r[1], [float]$r[2], [float]$r[3])
-        $g.FillRectangle($br, $rf); $br.Dispose()
-        $g.DrawRectangle($pen, [float]$r[0], [float]$r[1], [float]$r[2], [float]$r[3])
+        # V7.0: rounded tiles with a small gap (the text below is drawn without smoothing as before)
+        $ri = New-Object System.Drawing.RectangleF(([float]$r[0] + 1), ([float]$r[1] + 1), ([float]$r[2] - 2), ([float]$r[3] - 2))
+        Fill-RoundedRect -g $g -Brush $br -Rect $ri -Radius ([float]$(if ($script:UiSpec.Fresh) { S 6 } else { S 2 }))
+        $br.Dispose()
         $lines = @($sym)
         if (-not [double]::IsNaN($pct)) { $lines += ("{0:+0.00;-0.00}%" -f $pct) }
         if ($ac.HeatMode -ne "Watch" -and $tot -gt 0) { $lines += ("{0:N1}% {1}" -f ($items[$i].Value / $tot * 100.0), (Tr "Anteil")) }

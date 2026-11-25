@@ -2725,3 +2725,21 @@ Describe "Chip row layout (V7.0)" {
         (Get-ChipLayout -Widths @() -Available 300).Shown | Should -Be 0
     }
 }
+
+Describe "Analyse key figure tiles (V7.0)" {
+    It "builds the tiles and colours gains and losses" {
+        $k = @(Get-AnalysisKpiTiles -Value 10000 -Invested 8000 -Dividends 200 -Xirr 0.123 -WindowResult 150 -RangeLabel "1J")
+        ($k | ForEach-Object { $_.Id }) -join "," | Should -Be "Value,Result,Xirr,Div,Window"
+        ($k | Where-Object { $_.Id -eq "Result" }).Kind | Should -Be "up"
+        ($k | Where-Object { $_.Id -eq "Value" }).Kind | Should -Be "flat"
+    }
+    It "marks a loss as down and leaves out the period tile without a window" {
+        $k = @(Get-AnalysisKpiTiles -Value 7000 -Invested 8000 -Dividends 0 -Xirr -0.05)
+        ($k | Where-Object { $_.Id -eq "Result" }).Kind | Should -Be "down"
+        ($k | Where-Object { $_.Id -eq "Xirr" }).Kind | Should -Be "down"
+        @($k).Count | Should -Be 4
+    }
+    It "shows a dash when the XIRR is unknown" {
+        (@(Get-AnalysisKpiTiles -Value 100 -Invested 100 -Dividends 0 -Xirr ([double]::NaN)) | Where-Object { $_.Id -eq "Xirr" }).Text | Should -Be "-"
+    }
+}

@@ -4775,6 +4775,25 @@ function Get-ChipLayout {
     return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
 }
 
+function Get-AnalysisKpiTiles {
+    # V7.0: the key figures at the top of the Analyse "Wertentwicklung" page.
+    # Kind = up / down / flat decides the colour (green / red only for gains / losses).
+    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "")
+    $res = $Value + $Dividends - $Invested
+    $kindOf = { param([double]$x) if ([double]::IsNaN($x) -or [math]::Abs($x) -lt 0.005) { return "flat" } elseif ($x -gt 0) { return "up" } else { return "down" } }
+    $pct = [double]::NaN
+    if ($Invested -gt 0) { $pct = $res / $Invested * 100.0 }
+    $tiles = @()
+    $tiles += [PSCustomObject]@{ Id = "Value"; Label = "Depotwert"; Text = ("{0:N0} {1}" -f $Value, $Base); Sub = ("Investiert {0:N0}" -f $Invested); Kind = "flat" }
+    $tiles += [PSCustomObject]@{ Id = "Result"; Label = "Ergebnis"; Text = ("{0:+#,##0;-#,##0;0} {1}" -f $res, $Base); Sub = $(if ([double]::IsNaN($pct)) { "" } else { "{0:+0.0;-0.0;0.0} % auf Einsatz" -f $pct }); Kind = (& $kindOf $res) }
+    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = "XIRR"; Kind = (& $kindOf $Xirr) }
+    $tiles += [PSCustomObject]@{ Id = "Div"; Label = "Dividenden"; Text = ("{0:N0} {1}" -f $Dividends, $Base); Sub = "bisher erhalten"; Kind = "flat" }
+    if (-not [double]::IsNaN($WindowResult)) {
+        $tiles += [PSCustomObject]@{ Id = "Window"; Label = $(if ($RangeLabel) { "Im Zeitraum ($RangeLabel)" } else { "Im Zeitraum" }); Text = ("{0:+#,##0;-#,##0;0} {1}" -f $WindowResult, $Base); Sub = ""; Kind = (& $kindOf $WindowResult) }
+    }
+    return $tiles
+}
+
 function Get-TokenMap {
     # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
     return [ordered]@{
