@@ -714,6 +714,52 @@ function New-DialogForm {
     return $d
 }
 
+function New-StandardDialog {
+    # V7.1: one dialog template - title + subtitle, 16 px margins (4 px grid), primary button bottom right,
+    # Enter = OK, Esc = cancel, inline error line instead of pop-up messages.
+    # Returns Dlg, Body (panel for the content, Body width = W - 32), Ok, Cancel, Err. Validation: set $r.Dlg.Tag.Validate = { param($text) "" or error text }.
+    param([string]$Title, [string]$Subtitle = "", [int]$W = 400, [int]$BodyH = 60, [string]$OkText = "OK", [string]$CancelText = "Abbrechen", [string]$Key = "")
+    $p = $script:Pal
+    $headH = if ($Subtitle) { S 60 } else { S 40 }
+    $bodyPx = S $BodyH
+    $d = New-DialogForm -Title $Title -W (S $W) -H ($headH + $bodyPx + (S 76)) -Key $Key
+    $lt = New-Object System.Windows.Forms.Label
+    $lt.SetBounds((S 16), (S 14), ((S $W) - (S 32)), (S 22)); $lt.Font = $fontUiBold; $lt.Text = $Title; $lt.AutoEllipsis = $true
+    $d.Controls.Add($lt)
+    if ($Subtitle) {
+        $ls = New-Object System.Windows.Forms.Label
+        $ls.SetBounds((S 16), (S 36), ((S $W) - (S 32)), (S 18)); $ls.ForeColor = $p.Muted; $ls.Text = $Subtitle; $ls.AutoEllipsis = $true
+        $d.Controls.Add($ls)
+    }
+    $body = New-Object System.Windows.Forms.Panel
+    $body.SetBounds((S 16), $headH, ((S $W) - (S 32)), $bodyPx); $body.BackColor = $d.BackColor
+    $d.Controls.Add($body)
+    $err = New-Object System.Windows.Forms.Label
+    $err.SetBounds((S 16), ($headH + $bodyPx + (S 4)), ((S $W) - (S 32)), (S 18)); $err.ForeColor = $colRed; $err.Text = ""; $err.AutoEllipsis = $true
+    $d.Controls.Add($err)
+    $y = $headH + $bodyPx + (S 28)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds(((S $W) - (S 16) - (S 96)), $y, (S 96), (S 28)); $ok.Text = $OkText
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.OnAccent -BorderColor $p.Accent
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $d.Controls.Add($ok)
+    $ca = New-Object System.Windows.Forms.Button
+    $ca.SetBounds(((S $W) - (S 16) - (S 96) - (S 8) - (S 96)), $y, (S 96), (S 28)); $ca.Text = $CancelText
+    Style-FlatButton -Btn $ca -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $d.Controls.Add($ca)
+    $d.AcceptButton = $ok; $d.CancelButton = $ca
+    $d.Tag = @{ Validate = $null; Err = $err; Input = $null }
+    $d.Add_FormClosing({
+        param($s, $e)
+        if ($s.DialogResult -ne [System.Windows.Forms.DialogResult]::OK -or $null -eq $s.Tag -or $null -eq $s.Tag.Validate) { return }
+        $txt = if ($null -ne $s.Tag.Input) { [string]$s.Tag.Input.Text } else { "" }
+        $msg = [string](& $s.Tag.Validate $txt)
+        if ($msg) { $e.Cancel = $true; $s.Tag.Err.Text = $msg; $s.DialogResult = [System.Windows.Forms.DialogResult]::None }
+    })
+    return [PSCustomObject]@{ Dlg = $d; Body = $body; Ok = $ok; Cancel = $ca; Err = $err }
+}
+
 # ---- v5.5: dialogs open where they were closed (if that screen still exists) ----
 function Register-DialogPlacement {
     param([System.Windows.Forms.Form]$Dlg, [string]$Key)
