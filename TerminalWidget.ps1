@@ -2969,7 +2969,7 @@ $fontGridUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize
 
 $script:GdiCache = @{}
 
-function Get-ThemeColors {
+function Get-ThemeBaseColors {
     $accent = switch ($script:Config.AccentColor) {
         "Eigene" {
             $rgb = ConvertFrom-HexColor ([string]$script:Config.AccentHex)
@@ -3108,6 +3108,31 @@ function Get-ThemeColors {
             }
         }
     }
+}
+
+function Get-ThemeColors {
+    # V7.0: the base colours of the theme plus the derived tokens (disabled text,
+    # accent hover / pressed / subtle, text on accent)
+    $p = Get-ThemeBaseColors
+    $toRgb = { param($c) return @([int]$c.R, [int]$c.G, [int]$c.B) }
+    $acc = & $toRgb $p.Accent
+    $light = ([string]$script:Config.Theme -eq "Light")
+    $st = Get-AccentStates -Rgb $acc -Surface (& $toRgb $p.Card) -DarkSurface (-not $light)
+    $p["AccentHover"]   = [System.Drawing.Color]::FromArgb($st.Hover[0], $st.Hover[1], $st.Hover[2])
+    $p["AccentPressed"] = [System.Drawing.Color]::FromArgb($st.Pressed[0], $st.Pressed[1], $st.Pressed[2])
+    $p["AccentSubtle"]  = [System.Drawing.Color]::FromArgb($st.Subtle[0], $st.Subtle[1], $st.Subtle[2])
+    $p["OnAccent"]      = [System.Drawing.Color]::FromArgb($st.OnAccent[0], $st.OnAccent[1], $st.OnAccent[2])
+    $dis = Get-MixRgb -A (& $toRgb $p.Muted) -B (& $toRgb $p.Card) -T 0.55
+    $p["Disabled"]      = [System.Drawing.Color]::FromArgb($dis[0], $dis[1], $dis[2])
+    return $p
+}
+
+function Get-Token {
+    # V7.0: Get-Token 'surface.card' -> colour from the current palette
+    param([string]$Name)
+    $map = Get-TokenMap
+    if (-not $map.Contains($Name)) { throw "Unknown design token: $Name" }
+    return $script:Pal[$map[$Name]]
 }
 
 $script:Pal = Get-ThemeColors
