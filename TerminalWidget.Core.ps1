@@ -5043,7 +5043,7 @@ function Get-PortableSettingKeys {
         "NewsRefreshMinutes", "NewsMoveThreshold", "NewsKeywords", "NewsKeywordWatch", "NewsMuted",
         "TooltipMode", "TooltipDelayMs", "HoverCards",
         "Currency", "AutoCurrency", "RiskFreePct",
-        "ChartType", "ShowVolume", "ShowRsi", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
+        "ChartType", "ShowVolume", "ShowRsi", "PaneDivider", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
         "UserLayouts", "GridLayouts",
         "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds"
     )

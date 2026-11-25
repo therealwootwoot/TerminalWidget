@@ -908,6 +908,7 @@ $defaultConfig = [PSCustomObject]@{
     CompactMode           = $false
     TopMost               = $true
     ShowRsi               = $true
+    PaneDivider           = 0.72
     ShowSma               = $true
     ShowVwap              = $true
     ShowBollinger         = $false

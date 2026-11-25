@@ -1554,11 +1554,32 @@ function Get-ChartLegendAt {
     return $null
 }
 
+function Test-PaneDividerHit {
+    # V7.1: the gap between chart and indicator pane is a drag handle
+    param($L, [int]$Y)
+    if ($null -eq $L -or $null -eq $L.RsiRect -or $null -eq $L.PaneTotal) { return $false }
+    $my = $Y - [int]$L.OffsetY
+    return ($my -ge ([int]$L.PriceRect.Bottom - (S 2)) -and $my -le ([int]$L.RsiRect.Top + (S 2)))
+}
+
+$script:PaneDrag = $null
 $script:ChartMouseMoveHandler = {
     param($sender, $e)
     # Hit-testing uses the geometry of the bitmap that is actually on screen
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
+    if ($null -ne $script:PaneDrag) {
+        $frac = (($e.Y - [int]$L.OffsetY) - [double]$L.PaneTop - ([double]$L.GapY / 2.0)) / [double]$L.PaneTotal
+        $frac = [math]::Max(0.35, [math]::Min(0.85, $frac))
+        if ([math]::Abs($frac - [double]$script:Config.PaneDivider) -gt 0.004 -and $script:PaneDrag.Sw.ElapsedMilliseconds -gt 40) {
+            $script:Config.PaneDivider = [math]::Round($frac, 3)
+            $script:PaneDrag.Sw.Restart()
+            Refresh-ChartView
+        }
+        return
+    }
+    if (Test-PaneDividerHit -L $L -Y $e.Y) { if ($sender.Cursor -ne [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS } }
+    elseif ($sender.Cursor -eq [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::Default }
     if ($null -ne $script:DrawPending) { $script:DrawMouse = Get-ChartPointAt -L $L -X $e.X -Y $e.Y; $sender.Invalidate() }
     Update-ChartLegendTip -Canvas $sender -L $L -X $e.X -Y $e.Y
     $lgh = Get-ChartLegendAt -L $L -X $e.X -Y $e.Y
@@ -1584,6 +1605,10 @@ $script:ChartMouseDownHandler = {
     param($sender, $e)
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and (Test-PaneDividerHit -L $L -Y $e.Y)) {
+        $script:PaneDrag = @{ Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+        return
+    }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         if ($script:DrawMode) { Set-DrawMode ""; $script:CtxDrawing = $null; return }
         $script:CtxDrawing = Find-DrawingAt -L $L -X $e.X -Y $e.Y
@@ -1639,6 +1664,12 @@ $script:ChartMouseDownHandler = {
 }
 $script:ChartMouseUpHandler = {
     param($sender, $e)
+    if ($null -ne $script:PaneDrag) {
+        $script:PaneDrag = $null
+        Refresh-ChartView
+        try { Save-JsonState -Path $script:ConfigPath -Data $script:Config } catch { }
+        return
+    }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $script:Measure.Dragging = $false
         $zd = $script:ZoomDrag

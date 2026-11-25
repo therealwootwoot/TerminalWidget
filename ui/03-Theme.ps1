@@ -690,7 +690,15 @@ function Render-ChartAndRsi {
     $totalH    = $Bounds.Height - $padTop - $padBot - $gapY
     if ($plotWidth -lt 80 -or $totalH -lt 90) { return }
 
-    $priceH = if ($showRsi) { [int]([math]::Floor($totalH * 0.72)) } else { $totalH }
+    # V7.1: the divider between chart and indicator pane can be dragged (Config.PaneDivider = share of the main chart)
+    $priceH = $totalH
+    if ($showRsi) {
+        $dv = 0.72
+        try { $dv = [double]$script:Config.PaneDivider } catch { $dv = 0.72 }
+        if ($dv -lt 0.35 -or $dv -gt 0.85) { $dv = 0.72 }
+        $priceH = [int]([math]::Floor($totalH * $dv))
+        if (($totalH - $priceH) -lt (S 42)) { $priceH = [math]::Max(1, $totalH - (S 42)) }
+    }
     $rsiH   = $totalH - $priceH
 
     $priceRect = New-Object System.Drawing.Rectangle($padLeft, $padTop, $plotWidth, $priceH)
@@ -1256,6 +1264,11 @@ function Render-ChartAndRsi {
     if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
+        if ($fresh) {
+            # V7.1: indicator pane as a rounded card
+            $cp = New-RoundedPath (New-Object System.Drawing.RectangleF([float]$rsiRect.X, [float]$rsiRect.Y, [float]$rsiRect.Width, [float]$rsiRect.Height)) ([float](S 6))
+            $g.FillPath($c["panelBrush"], $cp); $cp.Dispose()
+        }
         $mAll = $script:ActiveMacd
         if ($null -ne $mAll -and @($mAll.Macd).Count -eq $totalN) {
             $vM = Get-ArraySlice $mAll.Macd $s0 $s1
@@ -1306,6 +1319,11 @@ function Render-ChartAndRsi {
     } elseif ($showRsi -and $rsiH -ge (S 42)) {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
+        if ($fresh) {
+            # V7.1: indicator pane as a rounded card
+            $cp = New-RoundedPath (New-Object System.Drawing.RectangleF([float]$rsiRect.X, [float]$rsiRect.Y, [float]$rsiRect.Width, [float]$rsiRect.Height)) ([float](S 6))
+            $g.FillPath($c["panelBrush"], $cp); $cp.Dispose()
+        }
 
         $obVal = [double]$script:Config.RsiOverbought
         $osVal = [double]$script:Config.RsiOversold
@@ -1380,6 +1398,9 @@ function Render-ChartAndRsi {
         CmpSym         = $cmpSym
         PriceRect      = $priceRect
         RsiRect        = $rsiRectL
+        PaneTop        = $padTop
+        PaneTotal      = $totalH
+        GapY           = $gapY
         BottomAxis     = $bottomAxisAnchor
         MinP           = $minP
         SpanP          = $spanP
