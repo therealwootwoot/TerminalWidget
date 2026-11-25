@@ -16,9 +16,12 @@ Design and UI only: no new data sources, no data format change. New config keys 
 - **The UI script is split** into `TerminalWidget.ps1` (start, storage, config) and 12 parts in `ui\` (`02-Data.ps1` … `13-Startup.ps1`). The parts are dot-sourced in the old order and run in the same scope, so nothing behaves differently. Keep the `ui` folder next to the script.
 - **Watchlist group chips** above the list replace the drop-down: click = show group, + = new group, right click = delete, drag a ticker onto a chip = add it to the group. Too many groups move behind a … chip.
 - **Day change as a pill** (Settings → Design, off by default): coloured background in the watchlist and portfolio.
+- **Chart legends are clickable**: a click on BB20, SMA / EMA or VWAP hides that indicator (the button under the chart switches it back on).
+- **Analyse → Wertentwicklung**: key figure tiles (value, result, return p.a., dividends, period) above the summary; green / red only for gains / losses.
+- **Heatmap**: rounded tiles with a small gap.
 
 ## Not done yet (from the V7 roadmap)
-Owner-drawn controls (segmented control, drop-downs, sliders), (sparklines and the 52-week bar already exist since v4.9.5), chart legend chips and indicator panes, Analyse KPI tiles / donut / heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
+Owner-drawn controls (segmented control, drop-downs, sliders), (sparklines and the 52-week bar already exist since v4.9.5), indicator panes, donut and a colour legend for the heatmap, signal gauge and dot plots, one dialog template and the import wizard, settings live preview, motion (hover fades, number roll-over), focus rings on the other controls and the high-contrast auto-switch, layout preset "Focus", new welcome tour, screenshot comparison in CI.
 
 ## Tests
 - Pester: scale on the 4 px grid, grid rounding, contrast ratio, accent states, token map, status bar text.
