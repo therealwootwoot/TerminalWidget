@@ -464,9 +464,32 @@ function Show-CsvImportDialog {
     $aBL = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $aBR = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
     $info = New-Object System.Windows.Forms.Label
-    $info.SetBounds((S 12), (S 8), (S 976), (S 20)); $info.Anchor = $aTLR; $info.ForeColor = $p.Muted
-    $info.Text = "Spalten zuordnen (automatisch erkannt). Häkchen = wird importiert. Symbol-Spalte ist änderbar. Schon vorhandene Buchungen werden nicht doppelt importiert."
+    $info.SetBounds((S 12), (S 8), (S 560), (S 20)); $info.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left; $info.ForeColor = $p.Muted
+    $info.Text = "Spalten prüfen, Häkchen setzen, Symbole anpassen. Doppelte Buchungen werden übersprungen."
     $dlg.Controls.Add($info)
+    # step indicator: Datei > Spalten > Prüfen > Import (step 2 until a column is changed, then 3)
+    $steps = New-Object System.Windows.Forms.Panel
+    $steps.SetBounds((S 580), (S 6), (S 408), (S 24)); $steps.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $steps.BackColor = $dlg.BackColor; $steps.Tag = 2
+    $steps.Add_Paint({
+        param($s, $e)
+        $pp = $script:Pal; $g2 = $e.Graphics
+        $g2.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $names = @("Datei", "Spalten", "Prüfen", "Import"); $cur = [int]$s.Tag
+        $w = [int]($s.Width / 4); $f = $s.Font
+        for ($k = 0; $k -lt 4; $k++) {
+            $x0 = $k * $w; $d = [int](S 14); $cy = [int](($s.Height - $d) / 2)
+            $done = (($k + 1) -lt $cur); $act = (($k + 1) -eq $cur)
+            $fill = if ($done -or $act) { $pp.Accent } else { $pp.Border }
+            $bF = New-Object System.Drawing.SolidBrush($fill)
+            $g2.FillEllipse($bF, $x0 + 2, $cy, $d, $d); $bF.Dispose()
+            $col = if ($act) { $pp.Text } elseif ($done) { $pp.Muted } else { $pp.Muted }
+            $txt = if ($done) { [string][char]0x2713 + " " + $names[$k] } else { ([string]($k + 1)) + " " + $names[$k] }
+            $br = New-Object System.Drawing.SolidBrush($col)
+            $g2.DrawString($txt, $f, $br, [single]($x0 + $d + 6), [single]($cy - 1)); $br.Dispose()
+        }
+    })
+    $dlg.Controls.Add($steps)
     $guess = Get-CsvColumnGuess -Headers $csv.Headers
     $fields = Get-CsvFieldNames
     $combos = @{}
@@ -588,7 +611,8 @@ function Show-CsvImportDialog {
         }
         $cc.Sum.Text = "{0} Zeilen: {1} zum Import, {2} Cash-Bewegungen, {3} schon vorhanden, {4} ISIN offen, {5} übersprungen (Art/Datum/Stück fehlen)." -f $cc.Rows.Count, $nOk, $nCash, $nDup, $nIsin, @($cc.Rows | Where-Object { -not $_.Ok }).Count
     }
-    foreach ($cb in @($combos.Values) + @($cbCur)) { $cb.Add_SelectionChangeCommitted({ & $script:CsvCtl.Fill }) }
+    $script:CsvCtl.Steps = $steps
+    foreach ($cb in @($combos.Values) + @($cbCur)) { $cb.Add_SelectionChangeCommitted({ & $script:CsvCtl.Fill; $script:CsvCtl.Steps.Tag = 3; $script:CsvCtl.Steps.Invalidate() }) }
     $btnRes.Add_Click({
         $cc = $script:CsvCtl
         $isins = @($cc.Rows | Where-Object { Test-Isin $_.Ident } | ForEach-Object { $_.Ident } | Sort-Object -Unique | Where-Object { -not $cc.IsinMap.ContainsKey($_) })
