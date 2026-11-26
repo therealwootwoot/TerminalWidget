@@ -828,9 +828,9 @@ function Show-Toast {
         $tw = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $fontUi, [System.Drawing.Size]::Empty, $flags).Width
         $w = [math]::Min([int]($form.ClientSize.Width - (S 24)), [math]::Max((S 160), $tw + (S 36)))
         $h = S 32
-        $sb = 0
-        if ($null -ne $script:PnlStatusBar -and $script:PnlStatusBar.Visible) { $sb = $script:PnlStatusBar.Height }
-        $script:ToastPanel.SetBounds([int]($form.ClientSize.Width - $w - (S 12)), [int]($form.ClientSize.Height - $h - $sb - (S 12)), [int]$w, [int]$h)
+        # 9.0: top centre, so it no longer covers the action buttons at the bottom
+        $ty = [math]::Min((S 30), [math]::Max(0, $form.ClientSize.Height - $h))
+        $script:ToastPanel.SetBounds([int](($form.ClientSize.Width - $w) / 2), [int]$ty, [int]$w, [int]$h)
         $script:ToastPanel.Visible = $true
         $script:ToastPanel.BringToFront()
         $script:ToastPanel.Invalidate()
