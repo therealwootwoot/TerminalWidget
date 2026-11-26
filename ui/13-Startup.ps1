@@ -984,6 +984,27 @@ function Invoke-SmokeTest {
         if ($script:RingDone.Count -eq 0) { throw "no focus rings registered" }
         Set-ActiveTab -TabName "Portfolio"
     }
+    Invoke-SmokeStep "V7.5.1 menu bar" {
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "Chart"; & $pump
+        if (-not $script:MenuBar.Visible) { throw "menu bar hidden in Standard" }
+        if ($pnlHeader.Top -lt $script:MenuBar.Bottom) { throw "header under the menu bar: $($pnlHeader.Top) < $($script:MenuBar.Bottom)" }
+        if ($pnlNav.Top -lt $pnlHeader.Bottom) { throw "navigation overlaps the header" }
+        if ($viewChart.Top -lt $pnlNav.Bottom) { throw "view overlaps the navigation" }
+        if ($viewChart.Bottom -gt $form.ClientSize.Height) { throw "view below the window edge" }
+        $names = @($script:MenuBar.Items | ForEach-Object { $_.Text }) -join ","
+        if ($script:MenuBar.Items.Count -ne 5) { throw "menus: $names" }
+        foreach ($m in $script:MenuBar.Items) { $m.ShowDropDown(); & $pump; $m.HideDropDown(); & $pump }
+        $script:Config.PortSimOpen = $false; Update-PortSimLayout
+        $script:MbCalc.PerformClick(); & $pump
+        if (-not ($viewPortfolio.Visible -and $txtPortBuyAmt.Visible)) { throw "menu did not show the calculator" }
+        $script:MbCalc.PerformClick(); & $pump
+        if ($txtPortBuyAmt.Visible) { throw "menu did not close the calculator" }
+        Apply-Layout "Compact"; & $pump
+        if ($script:MenuBar.Visible -or $pnlHeader.Top -ne 0) { throw "menu bar / header wrong in Compact" }
+        Apply-Layout "Standard"; & $pump
+        if (-not $script:MenuBar.Visible -or $pnlHeader.Top -ne $script:MenuH) { throw "menu bar not restored" }
+        Set-ActiveTab -TabName "Chart"
+    }
     Invoke-SmokeStep "Watchlist groups" {
         Set-ActiveTab -TabName "Watchlist"; & $pump
         $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @() -Group "Tech" -Symbol "NVDA")
