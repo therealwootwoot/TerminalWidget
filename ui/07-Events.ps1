@@ -702,6 +702,56 @@ function Invoke-Transaction {
     return ""
 }
 
+# v7.5: focus ring for text fields and tables. A text box cannot paint its own frame, so its
+# parent draws it; a table draws it inside its own edge.
+$script:RingDone = New-Object 'System.Collections.Generic.HashSet[object]'
+$script:RingParentPaint = {
+    param($sender, $e)
+    try {
+        foreach ($k in $sender.Controls) {
+            if (($k -is [System.Windows.Forms.TextBox] -and $k.BorderStyle -ne [System.Windows.Forms.BorderStyle]::None -and $k.Focused -and $k.Visible) -or
+                ($k -is [System.Windows.Forms.NumericUpDown] -and $k.ContainsFocus -and $k.Visible)) {
+                $pen = New-Object System.Drawing.Pen($script:Pal.Accent, 2)
+                $e.Graphics.DrawRectangle($pen, ($k.Left - 1), ($k.Top - 1), ($k.Width + 1), ($k.Height + 1))
+                $pen.Dispose()
+            }
+        }
+    } catch { }
+}
+$script:RingFieldChanged = { param($sender, $e) if ($null -ne $sender.Parent) { $sender.Parent.Invalidate() } }
+$script:RingGridPaint = {
+    param($sender, $e)
+    if (-not $sender.Focused) { return }
+    try {
+        $pen = New-Object System.Drawing.Pen($script:Pal.Accent, 2)
+        $e.Graphics.DrawRectangle($pen, 1, 1, ($sender.ClientSize.Width - 2), ($sender.ClientSize.Height - 2))
+        $pen.Dispose()
+    } catch { }
+}
+$script:RingGridChanged = { param($sender, $e) $sender.Invalidate() }
+$script:RingForget = { param($sender, $e) [void]$script:RingDone.Remove($sender) }
+function Add-FocusRings {
+    param([System.Windows.Forms.Control]$Root)
+    try {
+        foreach ($k in @($Root.Controls)) {
+            if ($k -is [System.Windows.Forms.DataGridView]) {
+                if ($script:RingDone.Add($k)) {
+                    $k.Add_Disposed($script:RingForget)
+                    $k.Add_Paint($script:RingGridPaint)
+                    $k.Add_GotFocus($script:RingGridChanged); $k.Add_LostFocus($script:RingGridChanged)
+                    $k.Add_Scroll($script:RingGridChanged)
+                }
+            } elseif ($k -is [System.Windows.Forms.TextBox] -or $k -is [System.Windows.Forms.NumericUpDown]) {
+                if ($script:RingDone.Add($k)) {
+                    $k.Add_Disposed($script:RingForget)
+                    if ($script:RingDone.Add($Root)) { $Root.Add_Paint($script:RingParentPaint); $Root.Add_Disposed($script:RingForget) }
+                    $k.Add_Enter($script:RingFieldChanged); $k.Add_Leave($script:RingFieldChanged)
+                }
+            } elseif ($k.Controls.Count -gt 0) { Add-FocusRings $k }
+        }
+    } catch { Write-WidgetLog "Focus ring: $($_.Exception.Message)" "WARN" }
+}
+
 function Set-AccessibilityDefaults {
     # V7.1: accessible names for buttons / inputs without one (own text, else the label to the left or above)
     # and a tab order that follows the reading order (top to bottom, left to right) inside every container.
@@ -753,7 +803,7 @@ function New-DialogForm {
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
     $d.Add_HandleCreated($script:DialogChromeHandler)
     # v4.7: English mode translates the static texts once the dialog is built
-    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender })
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender; Add-FocusRings $sender })
     $d.Text = Tr $Title
     if ($Key) { Register-DialogPlacement -Dlg $d -Key $Key }
     return $d

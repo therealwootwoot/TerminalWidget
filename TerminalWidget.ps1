@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.3"
+$script:AppVersion    = "7.5"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -886,6 +886,8 @@ $defaultConfig = [PSCustomObject]@{
     RowDensity            = "Normal"          # v5.2: Compact / Normal / Comfortable list rows
     ZebraRows             = $false            # v5.2: every second list row slightly lighter
     ShowStatusBar         = $true             # V7.0: status bar at the bottom (data age, market, privacy mode)
+    PortSimOpen           = $false            # v7.5: top-up calculator opened
+    WatchDetail           = $true             # v7.5: detail panel in a very wide watchlist
     PerMonitorDpi         = $true             # V7.0: restart the widget when the window moves to a monitor with another scaling
     DayChangePill         = $false            # V7.0: day change as a coloured pill in the lists
     Animations            = $true             # V7.0: short fades (hover); also off when Windows animations are off

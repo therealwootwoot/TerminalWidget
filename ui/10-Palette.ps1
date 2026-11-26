@@ -1373,24 +1373,19 @@ function Show-CompactOptions {
     $p = $script:Pal
     $opts = [ordered]@{ "DayAbs" = "Tagesänderung absolut"; "Ext" = "Vor- / Nachbörse"; "Spark" = "Mini-Chart"; "Market" = "Marktstatus (nur Compact)"; "Depot" = "Depot heute statt Marktstatus (nur Compact)" }
     $cur = @(([string]$script:Config.CompactShow) -split ',' | ForEach-Object { $_.Trim() })
-    $dlg = New-DialogForm -Title "Compact / Ticker zeigt" -W (S 360) -H (S 240)
-    $y = S 14
+    # v7.5: standard dialog template (Esc / Abbrechen keeps the old choice)
+    $sd = New-StandardDialog -Title "Compact / Ticker zeigt" -W 400 -BodyH (28 * $opts.Count + 4)
+    $dlg = $sd.Dlg
+    $y = S 2
     $boxes = @{}
     foreach ($k in $opts.Keys) {
         $c = New-Object System.Windows.Forms.CheckBox
-        $c.SetBounds((S 16), $y, (S 330), (S 24)); $c.Text = $opts[$k]; $c.Checked = ($cur -contains $k)
+        $c.SetBounds(0, $y, $sd.Body.Width, (S 24)); $c.Text = $opts[$k]; $c.Checked = ($cur -contains $k)
         $c.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-        $dlg.Controls.Add($c)
+        $sd.Body.Controls.Add($c)
         $boxes[$k] = $c
         $y += S 28
     }
-    $ok = New-Object System.Windows.Forms.Button
-    $ok.SetBounds((S 252), ($y + (S 8)), (S 94), (S 28)); $ok.Text = "OK"
-    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $dlg.Controls.Add($ok)
-    $dlg.AcceptButton = $ok
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 360), ($y + (S 50)))
     $res = $dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form }))
     if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
         $script:Config.CompactShow = (@($opts.Keys | Where-Object { $boxes[$_].Checked }) -join ",")
