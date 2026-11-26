@@ -1,4 +1,4 @@
-﻿# TerminalWidget V7.0 – Design & UI (in progress)
+﻿# TerminalWidget V7.0 – Design & UI
 
 Design and UI only: no new data sources, no data format change. New config keys are added automatically; saved settings are never changed silently. Decisions: see the Powershell Widget project (roadmap-to-v7-decisions).
 

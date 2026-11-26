@@ -1257,7 +1257,7 @@ function Get-MarketStateColor {
         "REGULAR" { return $colGreen }
         "OPEN24"  { return $colGreen }
         "PRE"     { return $script:Pal.Warn }
-        "POST"    { return [System.Drawing.Color]::FromArgb(168, 85, 247) }
+        "POST"    { return $script:Pal.Violet }
         default   { return $script:Pal.Muted }
     }
 }

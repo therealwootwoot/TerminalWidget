@@ -17,7 +17,7 @@ function Render-ChartOverlay {
     if ($null -ne $script:DrawPending -and $null -ne $script:DrawMouse -and $n -ge 2) {
         $tmp = [PSCustomObject]@{ Kind = "T"; T1 = [long]$script:DrawPending.T; P1 = [double]$script:DrawPending.P; T2 = [long]$script:DrawMouse.T; P2 = [double]$script:DrawMouse.P; Cur = [string]$script:ChartCur }
         $pxT = Get-DrawingPixels -L $L -D $tmp
-        $rb = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(250, 204, 21), [float]1.5)
+        $rb = New-Object System.Drawing.Pen($script:Pal.Mark, [float]1.5)
         $rb.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
         $oy = [int]$L.OffsetY
         if ($script:DrawMode -eq "R") {
@@ -552,6 +552,30 @@ $script:BtnFade = @{}
 $script:BtnFadeTarget = @{}
 function Test-MotionOn {
     try { return ([bool]$script:Config.Animations -and [System.Windows.Forms.SystemInformation]::UIEffectsEnabled) } catch { return $false }
+}
+# V7.1: the big header price rolls from the old to the new value (150 ms, only when motion is on and the move is small)
+$script:PriceRoll = $null
+$script:PriceRollLast = @{ Key = ""; Value = [double]::NaN }
+$script:PriceRollTimer = New-Object System.Windows.Forms.Timer
+$script:PriceRollTimer.Interval = 25
+$script:PriceRollTimer.Add_Tick({
+    $r = $script:PriceRoll
+    if ($null -eq $r) { $script:PriceRollTimer.Stop(); return }
+    if ($r.Step -ge @($r.Values).Count) { $script:PriceRollTimer.Stop(); $script:PriceRoll = $null; return }
+    $lblLivePrice.Text = "{0:N2} {1}" -f [double]$r.Values[$r.Step], $r.Curr
+    $r.Step++
+    if ($r.Step -ge @($r.Values).Count) { $script:PriceRollTimer.Stop(); $script:PriceRoll = $null }
+})
+function Set-LivePriceText {
+    param([string]$Key, [double]$Price, [string]$Curr)
+    $from = [double]$script:PriceRollLast.Value
+    $same = ([string]$script:PriceRollLast.Key -eq $Key)
+    $script:PriceRollLast = @{ Key = $Key; Value = $Price }
+    $script:PriceRollTimer.Stop(); $script:PriceRoll = $null
+    $final = "{0:N2} {1}" -f $Price, $Curr
+    if (-not $same -or [double]::IsNaN($from) -or $from -eq $Price -or [math]::Abs($Price - $from) -gt ([math]::Abs($from) * 0.2) -or -not (Test-MotionOn)) { $lblLivePrice.Text = $final; return }
+    $script:PriceRoll = @{ Values = @(Get-RollValues -From $from -To $Price -Steps 5); Step = 0; Curr = $Curr }
+    $script:PriceRollTimer.Start()
 }
 $script:BtnFadeTimer = New-Object System.Windows.Forms.Timer
 $script:BtnFadeTimer.Interval = 20
@@ -1271,7 +1295,7 @@ $script:PnlStatusBar.Add_Paint({
     if ($null -ne $script:LastDataTime) { $age = ((Get-Date) - $script:LastDataTime).TotalSeconds; $stand = $script:LastDataTime.ToString("HH:mm:ss") }
     $mk = ""
     try { $mk = [string]$lblMarketStatus.Text } catch { }
-    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode))
+    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode) -ReqPerMin (Get-RequestsPerMinute))
     $txt = $parts -join "   |   "
     $tr = New-Object System.Drawing.Rectangle((S 12), 0, ($sender.Width - (S 24)), $sender.Height)
     [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $fontMono, $tr, $p.Muted, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
@@ -1554,11 +1578,32 @@ function Get-ChartLegendAt {
     return $null
 }
 
+function Test-PaneDividerHit {
+    # V7.1: the gap between chart and indicator pane is a drag handle
+    param($L, [int]$Y)
+    if ($null -eq $L -or $null -eq $L.RsiRect -or $null -eq $L.PaneTotal) { return $false }
+    $my = $Y - [int]$L.OffsetY
+    return ($my -ge ([int]$L.PriceRect.Bottom - (S 2)) -and $my -le ([int]$L.RsiRect.Top + (S 2)))
+}
+
+$script:PaneDrag = $null
 $script:ChartMouseMoveHandler = {
     param($sender, $e)
     # Hit-testing uses the geometry of the bitmap that is actually on screen
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
+    if ($null -ne $script:PaneDrag) {
+        $frac = (($e.Y - [int]$L.OffsetY) - [double]$L.PaneTop - ([double]$L.GapY / 2.0)) / [double]$L.PaneTotal
+        $frac = [math]::Max(0.35, [math]::Min(0.85, $frac))
+        if ([math]::Abs($frac - [double]$script:Config.PaneDivider) -gt 0.004 -and $script:PaneDrag.Sw.ElapsedMilliseconds -gt 40) {
+            $script:Config.PaneDivider = [math]::Round($frac, 3)
+            $script:PaneDrag.Sw.Restart()
+            Refresh-ChartView
+        }
+        return
+    }
+    if (Test-PaneDividerHit -L $L -Y $e.Y) { if ($sender.Cursor -ne [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS } }
+    elseif ($sender.Cursor -eq [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::Default }
     if ($null -ne $script:DrawPending) { $script:DrawMouse = Get-ChartPointAt -L $L -X $e.X -Y $e.Y; $sender.Invalidate() }
     Update-ChartLegendTip -Canvas $sender -L $L -X $e.X -Y $e.Y
     $lgh = Get-ChartLegendAt -L $L -X $e.X -Y $e.Y
@@ -1584,6 +1629,10 @@ $script:ChartMouseDownHandler = {
     param($sender, $e)
     $L = Get-CanvasLayout -Canvas $sender
     if ($null -eq $L) { return }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and (Test-PaneDividerHit -L $L -Y $e.Y)) {
+        $script:PaneDrag = @{ Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+        return
+    }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         if ($script:DrawMode) { Set-DrawMode ""; $script:CtxDrawing = $null; return }
         $script:CtxDrawing = Find-DrawingAt -L $L -X $e.X -Y $e.Y
@@ -1639,6 +1688,12 @@ $script:ChartMouseDownHandler = {
 }
 $script:ChartMouseUpHandler = {
     param($sender, $e)
+    if ($null -ne $script:PaneDrag) {
+        $script:PaneDrag = $null
+        Refresh-ChartView
+        try { Save-JsonState -Path $script:ConfigPath -Data $script:Config } catch { }
+        return
+    }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $script:Measure.Dragging = $false
         $zd = $script:ZoomDrag

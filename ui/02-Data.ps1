@@ -463,6 +463,14 @@ function Pump-FetchJobs {
 }
 $script:JobTimer.Add_Tick({ Pump-FetchJobs })
 
+$script:ReqLog = New-Object System.Collections.ArrayList
+function Get-RequestsPerMinute {
+    # V7.1: how many requests went out in the last minute (for the status bar)
+    $cut = (Get-Date).AddMinutes(-1)
+    while ($script:ReqLog.Count -gt 0 -and [datetime]$script:ReqLog[0] -lt $cut) { $script:ReqLog.RemoveAt(0) }
+    return [int]$script:ReqLog.Count
+}
+
 function Start-FetchJob {
     # Fire-and-forget fetch; $OnComplete runs later ON THE UI THREAD with
     # ($Box, $Context). $Box.Results maps url -> parsed JSON (or $null).
@@ -476,6 +484,7 @@ function Start-FetchJob {
         [int]$MaxConcurrency = 4
     )
     if ($script:IsClosing) { return }
+    try { $nowT = Get-Date; foreach ($u0 in @($Urls)) { [void]$script:ReqLog.Add($nowT) } } catch { }
     # v5.5: polling load for HEALTH (requests in the last hour)
     $nowR = Get-Date
     foreach ($u0 in @($Urls)) {
@@ -813,7 +822,7 @@ function Set-TransientStatus {
     $script:TransientStatus = $Text
     $script:TransientUntil  = (Get-Date).AddSeconds($Seconds)
     if ($null -ne $lblStatus) {
-        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        $lblStatus.ForeColor = $script:Pal.Busy
         $lblStatus.Text = $Text
     }
 }
@@ -957,7 +966,7 @@ function Refresh-AllMarketData {
 
 function Update-RefreshIndicator {
     if ($null -eq $btnRefreshNow -or $btnRefreshNow.IsDisposed) { return }
-    $btnRefreshNow.ForeColor = if ($script:IsRefreshing) { [System.Drawing.Color]::FromArgb(245, 158, 11) } else { $script:Pal.Accent }
+    $btnRefreshNow.ForeColor = if ($script:IsRefreshing) { $script:Pal.Busy } else { $script:Pal.Accent }
 }
 
 function Complete-MarketRefresh {

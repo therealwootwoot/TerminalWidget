@@ -1226,6 +1226,62 @@ function Invoke-SmokeTest {
         $script:Config.Theme = $saved
         if ($bad.Count -gt 0) { throw ($bad -join "; ") }
     } 5000
+    # V7.1: new controls, dialog template, pane divider hit test, GDI objects after repeated dialogs
+    Invoke-SmokeStep "V7.1 controls + template" {
+        if ('TwSegmentV7' -as [type]) {
+            $sg = New-Object TwSegmentV7; $sg.Size = New-Object System.Drawing.Size(200, 26); $sg.Items = [string[]]@("A", "B", "C")
+            $script:SmokeSegHit = 0
+            $sg.Add_SelectedIndexChanged({ $script:SmokeSegHit++ })
+            $sg.SelectedIndex = 2
+            if ($sg.SelectedIndex -ne 2 -or $script:SmokeSegHit -ne 1) { throw "segmented control: index $($sg.SelectedIndex), events $($script:SmokeSegHit)" }
+            $bm = New-Object System.Drawing.Bitmap 200, 26
+            $sg.DrawToBitmap($bm, (New-Object System.Drawing.Rectangle(0, 0, 200, 26))); $bm.Dispose(); $sg.Dispose()
+        } else { $script:SmokeNotes.Add("TwSegmentV7 not available (no compiler?)") }
+        if ('TwSliderV7' -as [type]) {
+            $sl = New-Object TwSliderV7; $sl.Minimum = 30; $sl.Maximum = 100; $sl.Step = 5; $sl.Size = New-Object System.Drawing.Size(150, 24)
+            $sl.Value = 500
+            if ($sl.Value -ne 100) { throw "slider did not clamp: $($sl.Value)" }
+            $bm = New-Object System.Drawing.Bitmap 150, 24
+            $sl.DrawToBitmap($bm, (New-Object System.Drawing.Rectangle(0, 0, 150, 24))); $bm.Dispose(); $sl.Dispose()
+        }
+        $sd = New-StandardDialog -Title "Test" -Subtitle "Untertitel" -W 400 -BodyH 32
+        if ($null -eq $sd.Ok -or $null -eq $sd.Err -or $sd.Dlg.AcceptButton -ne $sd.Ok) { throw "dialog template incomplete" }
+        $sd.Dlg.Tag.Validate = { param($t) if (-not $t) { "leer" } else { "" } }
+        if ((& $sd.Dlg.Tag.Validate "") -ne "leer") { throw "validation hook" }
+        $sd.Dlg.Dispose()
+        $fakeL = @{ PriceRect = (New-Object System.Drawing.Rectangle(10, 6, 300, 200)); RsiRect = (New-Object System.Drawing.Rectangle(10, 214, 300, 80)); PaneTotal = 288; PaneTop = 6; GapY = 8; OffsetY = 0 }
+        if (-not (Test-PaneDividerHit -L $fakeL -Y 209)) { throw "divider hit test (inside the gap)" }
+        if (Test-PaneDividerHit -L $fakeL -Y 100) { throw "divider hit test (inside the chart)" }
+    } 3000
+    Invoke-SmokeStep "Accessibility" {
+        Set-AccessibilityDefaults $form -NoTabOrder
+        $miss = @(); $small = @()
+        $scan = $null
+        $scan = {
+            param($c)
+            foreach ($k in @($c.Controls)) {
+                $isInput = ($k -is [System.Windows.Forms.Button] -or $k -is [System.Windows.Forms.TextBox] -or $k -is [System.Windows.Forms.ComboBox] -or $k -is [System.Windows.Forms.NumericUpDown])
+                if ($isInput -and $k.Visible -and [string]::IsNullOrEmpty($k.AccessibleName)) { $miss += ("{0}:{1}" -f $k.GetType().Name, $k.Name) }
+                if ($k -is [System.Windows.Forms.Button] -and $k.Visible -and ($k.Height -lt (S 20) -or $k.Width -lt (S 20))) { $small += ("{0} {1}x{2}" -f $k.Text, $k.Width, $k.Height) }
+                if ($k.Controls.Count -gt 0) { & $scan $k }
+            }
+        }
+        & $scan $form
+        $script:SmokeNotes.Add(("Accessibility: {0} inputs without a name, {1} buttons under 20 px" -f $miss.Count, $small.Count))
+        if ($small.Count -gt 0) { $script:SmokeNotes.Add("Small buttons: " + (($small | Select-Object -First 8) -join "; ")) }
+        if ($miss.Count -gt 0) { $script:SmokeNotes.Add("Unnamed: " + (($miss | Select-Object -First 8) -join "; ")) }
+    } 1000
+    Invoke-SmokeStep "GDI handles" {
+        if (-not ('TwSmokeGdi' -as [type])) { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class TwSmokeGdi { [DllImport("user32.dll")] public static extern uint GetGuiResources(IntPtr h, uint f); }' }
+        $hp = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        $g0 = [TwSmokeGdi]::GetGuiResources($hp, 0)
+        for ($i = 0; $i -lt 4; $i++) { Show-SettingsDialog; & $pump }
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); & $pump
+        $g1 = [TwSmokeGdi]::GetGuiResources($hp, 0)
+        $script:SmokeNotes.Add("GDI objects: $g0 -> $g1 after 4 settings windows")
+        if (($g1 - $g0) -gt 2500) { throw "GDI objects grew from $g0 to $g1" }
+    } 900
     # v5.3: settings pages, style findable, search, markers, reset, preview, Ctrl+K, settings file
     Invoke-SmokeStep "Settings pages" {
         $styleBefore = [string]$script:Config.UiStyle

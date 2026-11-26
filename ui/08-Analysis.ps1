@@ -481,6 +481,36 @@ function Draw-AllocationBars {
         $pctW = S 120
         $x0 = $labW + (S 8)
         $x1 = $W - $pctW
+        # V7.1: donut on the right when there is room (slices = the same groups, small ones merged into "Rest")
+        $donutW = 0
+        if ($W -ge (S 620) -and $H -ge (S 150)) {
+            $donutW = [math]::Min((S 230), $H - (S 8))
+            $x1 = $W - $pctW - $donutW - (S 12)
+            $slices = @(Get-DonutSlices -Items @($groups | ForEach-Object { [PSCustomObject]@{ Name = [string]$_.Key; Value = [double]$_.Pct } }) -MinPct 3 -MaxSlices 8)
+            if ($slices.Count -gt 0) {
+                $pal8 = @(Get-SeriesPalette -Count 8)
+                $dx = $W - $donutW - (S 8); $dy = [int](($H - ($donutW - (S 24))) / 2); $dd = $donutW - (S 24)
+                $rect = New-Object System.Drawing.RectangleF([float]$dx, [float]$dy, [float]$dd, [float]$dd)
+                $ci = 0
+                foreach ($sl in $slices) {
+                    $col = $pal8[$ci % 8]; $ci++
+                    $sb = New-Object System.Drawing.SolidBrush($col)
+                    $sw = [float][math]::Max(0.5, $sl.Sweep - 1.2)
+                    $g.FillPie($sb, [int]$rect.X, [int]$rect.Y, [int]$rect.Width, [int]$rect.Height, [float]($sl.Start - 90 + 0.6), $sw)
+                    $sb.Dispose()
+                }
+                # hole
+                $hb = New-Object System.Drawing.SolidBrush($p.Card)
+                $hole = [int]($dd * 0.58)
+                $g.FillEllipse($hb, [int]($dx + ($dd - $hole) / 2), [int]($dy + ($dd - $hole) / 2), $hole, $hole)
+                $hb.Dispose()
+                $cap = [string]$slices[0].Name; if ($cap.Length -gt 14) { $cap = $cap.Substring(0, 13) + "…" }
+                $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = [System.Drawing.StringAlignment]::Center; $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $cr = New-Object System.Drawing.RectangleF([float]($dx + ($dd - $hole) / 2), [float]($dy + ($dd - $hole) / 2), [float]$hole, [float]$hole)
+                $g.DrawString(("{0:N0} %`n{1}" -f $slices[0].Pct, $cap), $fontUi, $brT, $cr, $sf)
+                $sf.Dispose()
+            }
+        }
         $maxPct = [math]::Max(1.0, (@($groups | ForEach-Object { [double]$_.Pct }) | Sort-Object -Descending)[0])
         $y = S 8
         foreach ($gr in $groups) {
@@ -752,7 +782,7 @@ function Update-AnalysisRisk {
         for ($j = 0; $j -lt $cm.Syms.Count; $j++) {
             $x = $cm.M[$i, $j]
             if ($i -eq $j -or [double]::IsNaN($x)) { $cg.Rows[$ri].Cells[$j].Style.ForeColor = $script:Pal.Muted; continue }
-            $tint = if ($x -ge 0) { $colRed } else { [System.Drawing.Color]::FromArgb(59, 130, 246) }
+            $tint = if ($x -ge 0) { $colRed } else { $script:Pal.Blue }
             $cg.Rows[$ri].Cells[$j].Style.BackColor = Get-BlendColor -A $tint -B $script:Pal.Card -T ([math]::Min(0.6, [math]::Abs($x) * 0.6))
             $cnts = $cm.Counts
             $nCommon = $cnts[$i, $j]
@@ -1091,7 +1121,7 @@ function Update-AnalysisBench {
         $ppy = Get-PeriodsPerYear -Dates $dd
         $hist = Get-FxHistoryMap
         $fb = @{}; foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
-        $colors = @($script:Pal.Accent, $script:Pal.Warn, [System.Drawing.Color]::FromArgb(168, 85, 247), [System.Drawing.Color]::FromArgb(236, 72, 153), [System.Drawing.Color]::FromArgb(34, 211, 238), [System.Drawing.Color]::FromArgb(132, 204, 22), [System.Drawing.Color]::FromArgb(148, 163, 184))
+        $colors = @($script:Pal.Accent, $script:Pal.Warn, $script:Pal.Violet, $script:Pal.Pink, $script:Pal.Cyan, $script:Pal.Lime, $script:Pal.Neutral)
         $lines = @()
         $full = Get-TwrIndex -Value ([double[]]$sr.Value) -Invested ([double[]]$sr.Invested) -Dividends ([double[]]$sr.Dividends)
         $win = Get-TwrIndex -Value ([double[]]$sr.Value) -Invested ([double[]]$sr.Invested) -Dividends ([double[]]$sr.Dividends) -Start $st
@@ -1146,7 +1176,7 @@ function Update-AnalysisBench {
     $ac.Dim = $savedDim
     foreach ($r in @(Get-SectorComparison -Groups $groups -Reference $script:SectorRef)) {
         $i = $sg.Rows.Add((Tr $r.Sector), ("{0:N1}%" -f $r.Depot), $(if ([double]::IsNaN([double]$r.Ref)) { "-" } else { "{0:N1}%" -f $r.Ref }), $(if ([double]::IsNaN([double]$r.Diff)) { "-" } else { "{0:+0.0;-0.0}" -f $r.Diff }))
-        if (-not [double]::IsNaN([double]$r.Diff) -and [math]::Abs([double]$r.Diff) -ge 5) { $sg.Rows[$i].Cells[3].Style.ForeColor = $(if ($r.Diff -gt 0) { $script:Pal.Warn } else { [System.Drawing.Color]::FromArgb(59, 130, 246) }) }
+        if (-not [double]::IsNaN([double]$r.Diff) -and [math]::Abs([double]$r.Diff) -ge 5) { $sg.Rows[$i].Cells[3].Style.ForeColor = $(if ($r.Diff -gt 0) { $script:Pal.Warn } else { $script:Pal.Blue }) }
     }
     if ($null -eq $script:SectorRef) { $sg.Columns[2].HeaderText = $(if ($script:SectorRefLoading) { Tr "MSCI World (lädt)" } else { Tr "MSCI World (n/v)" }) } else { $sg.Columns[2].HeaderText = "MSCI World" }
 }

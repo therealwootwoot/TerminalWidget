@@ -2692,6 +2692,11 @@ Describe "Design tokens (V7.0)" {
 }
 
 Describe "Status bar and toasts (V7.0)" {
+    It "shows the request rate when it is known (V7.1)" {
+        $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 5 -Market "Börse offen" -ReqPerMin 12)
+        $p[2] | Should -Be "12 Abfragen/min"
+        @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 5).Count | Should -Be 1
+    }
     It "lists data age, market and privacy mode" {
         $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 30 -Market "Börse offen" -Privacy $true)
         $p.Count | Should -Be 3
@@ -2741,5 +2746,56 @@ Describe "Analyse key figure tiles (V7.0)" {
     }
     It "shows a dash when the XIRR is unknown" {
         (@(Get-AnalysisKpiTiles -Value 100 -Invested 100 -Dividends 0 -Xirr ([double]::NaN)) | Where-Object { $_.Id -eq "Xirr" }).Text | Should -Be "-"
+    }
+}
+
+Describe "V7.1 helpers" {
+    It "rolls a number towards the target and ends exactly there" {
+        $r = @(Get-RollValues -From 100 -To 110 -Steps 5)
+        $r.Count | Should -Be 5
+        $r[0] | Should -BeGreaterThan 100
+        $r[0] | Should -BeLessThan 110
+        $r[4] | Should -Be 110
+        ($r[1] - $r[0]) | Should -BeLessThan ($r[0] - 100)
+    }
+    It "builds donut slices that add up to 360 degrees and merges small shares" {
+        $s = @(Get-DonutSlices -Items @(@{Name="A";Value=50},@{Name="B";Value=45},@{Name="C";Value=2},@{Name="D";Value=3}) -MinPct 4)
+        ($s | ForEach-Object { $_.Name }) -join "," | Should -Be "A,B,Rest"
+        (($s | Measure-Object -Property Sweep -Sum).Sum) | Should -BeGreaterThan 359.99
+        $s[0].Start | Should -Be 0
+        @(Get-DonutSlices -Items @()).Count | Should -Be 0
+    }
+    It "caps the number of donut slices" {
+        $items = 1..12 | ForEach-Object { [PSCustomObject]@{ Name = "T$_"; Value = 10 } }
+        @(Get-DonutSlices -Items $items -MinPct 0 -MaxSlices 6).Count | Should -Be 6
+    }
+    It "places a value among peers" {
+        $d = Get-DotPlotLayout -Value 20 -Peers @(10, 30, 40)
+        $d.Rank | Should -Be 2
+        $d.Pos | Should -BeGreaterThan 0.3
+        $d.Pos | Should -BeLessThan 0.4
+        $d.Median | Should -Be 25
+        (Get-DotPlotLayout -Value 5 -Peers @(5, 5)).Pos | Should -Be 0.5
+    }
+    It "computes the valuation band and its state" {
+        $b = Get-ValuationBand -Multiples @(10, 12, 14, 16, 18, 20, 22) -Eps 5 -Price 40
+        $b.Mid | Should -Be 80
+        $b.State | Should -Be "cheap"
+        (Get-ValuationBand -Multiples @(10, 12, 14, 16, 18, 20, 22) -Eps 5 -Price 200).State | Should -Be "expensive"
+        Get-ValuationBand -Multiples @(10, 12) -Eps 5 -Price 40 | Should -BeNullOrEmpty
+    }
+    It "lays out the chart panes" {
+        $l = Get-PaneLayout -Total 400 -PaneCount 2 -Divider 0.7
+        $l.Main | Should -Be 280
+        $l.Pane | Should -Be 60
+        (Get-PaneLayout -Total 400 -PaneCount 2 -Divider 0.99).Main | Should -Be 304
+        (Get-PaneLayout -Total 150 -PaneCount 3 -Divider 0.7).Pane | Should -Be 48
+        (Get-PaneLayout -Total 400 -PaneCount 0).Main | Should -Be 400
+    }
+    It "lays out segments so that they fill the width" {
+        $s = @(Get-SegmentLayout -Labels @("1T", "1W", "1M", "Alles") -Width 300)
+        $s.Count | Should -Be 4
+        ($s[3].X + $s[3].W) | Should -Be 300
+        $s[3].W | Should -BeGreaterThan $s[0].W
     }
 }

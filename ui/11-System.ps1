@@ -168,6 +168,61 @@ function Invoke-SettingsPreview {
     $cfg.RowDensity = switch ([string]$sc.Rows.SelectedItem) { "Kompakt" { "Compact" } "Bequem" { "Comfortable" } default { "Normal" } }
     $cfg.ZebraRows  = [bool]$sc.Zebra.Checked
     try { Apply-ThemeToAllControls } catch { Write-WidgetLog "Settings preview: $($_.Exception.Message)" "WARN" }
+    $pvp = $script:SettingsPreviewPanel
+    if ($null -ne $pvp -and -not $pvp.IsDisposed) { $pvp.Invalidate() }
+}
+
+function Draw-SettingsPreview {
+    # V7.1: a small sample (card, price, pill, button, toggle) in the current style / theme / accent
+    param([System.Drawing.Graphics]$g, [int]$W, [int]$H)
+    $p = $script:Pal; $sp = $script:UiSpec
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    $g.Clear($p.BodyBg)
+    $rr = [float][math]::Max(2, [int]$sp.BtnRadius)
+    $bp = New-Object System.Drawing.Pen($p.Border, [float]1)
+    $outline = New-RoundedPath (New-Object System.Drawing.RectangleF(0.5, 0.5, [float]($W - 1), [float]($H - 1))) ([float](S 8))
+    $g.DrawPath($bp, $outline); $outline.Dispose()
+    # card
+    $card = New-Object System.Drawing.RectangleF([float](S 10), [float](S 10), [float](S 200), [float]($H - (S 20)))
+    $cp = New-RoundedPath $card $rr
+    $cb = New-Object System.Drawing.SolidBrush($p.Card); $g.FillPath($cb, $cp); $g.DrawPath($bp, $cp); $cb.Dispose(); $cp.Dispose()
+    $ba = New-Object System.Drawing.SolidBrush($p.Accent); $bt = New-Object System.Drawing.SolidBrush($p.Text); $bm = New-Object System.Drawing.SolidBrush($p.Muted)
+    $g.DrawString("NVDA", $fontTicker, $ba, [float]($card.X + (S 10)), [float]($card.Y + (S 6)))
+    $g.DrawString("123,45 EUR", $fontUiBold, $bt, [float]($card.X + (S 10)), [float]($card.Y + (S 26)))
+    $upC = $colGreen
+    if ([bool]$sp.Fresh) {
+        $pill = New-Object System.Drawing.RectangleF([float]($card.X + (S 110)), [float]($card.Y + (S 26)), [float](S 74), [float](S 18))
+        $pp = New-RoundedPath $pill ([float](S 9))
+        $pb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(48, $upC.R, $upC.G, $upC.B)); $g.FillPath($pb, $pp); $pb.Dispose(); $pp.Dispose()
+    }
+    $ub = New-Object System.Drawing.SolidBrush($upC)
+    $g.DrawString("+1,2 %", $fontUi, $ub, [float]($card.X + (S 120)), [float]($card.Y + (S 27)))
+    $g.DrawString("Beispiel", $fontUi, $bm, [float]($card.X + (S 10)), [float]($card.Y + (S 46)))
+    $ub.Dispose()
+    # button
+    $btn = New-Object System.Drawing.RectangleF([float](S 230), [float](S 14), [float](S 96), [float](S 28))
+    $bpth = New-RoundedPath $btn $rr
+    $g.FillPath($ba, $bpth); $bpth.Dispose()
+    $ob = New-Object System.Drawing.SolidBrush($p.OnAccent)
+    $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = [System.Drawing.StringAlignment]::Center; $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $g.DrawString("Aktion", $fontUi, $ob, $btn, $sf); $ob.Dispose()
+    # secondary button
+    $btn2 = New-Object System.Drawing.RectangleF([float](S 230), [float](S 48), [float](S 96), [float](S 28))
+    $b2 = New-RoundedPath $btn2 $rr
+    $ib = New-Object System.Drawing.SolidBrush($p.Input); $g.FillPath($ib, $b2); $g.DrawPath($bp, $b2); $ib.Dispose(); $b2.Dispose()
+    $g.DrawString("Zweitaktion", $fontUi, $bt, $btn2, $sf); $sf.Dispose()
+    # toggle (on)
+    $tr = New-Object System.Drawing.RectangleF([float](S 344), [float](S 16), [float](S 36), [float](S 20))
+    $tp = New-RoundedPath $tr ([float](S 10)); $g.FillPath($ba, $tp); $tp.Dispose()
+    $kb = New-Object System.Drawing.SolidBrush($p.Text); $g.FillEllipse($kb, [float]($tr.Right - (S 17)), [float]($tr.Y + (S 3)), [float](S 14), [float](S 14)); $kb.Dispose()
+    $g.DrawString("An", $fontUi, $bt, [float](S 386), [float]($tr.Y + (S 1)))
+    # toggle (off)
+    $tr2 = New-Object System.Drawing.RectangleF([float](S 344), [float](S 46), [float](S 36), [float](S 20))
+    $tp2 = New-RoundedPath $tr2 ([float](S 10)); $ob2 = New-Object System.Drawing.SolidBrush($p.Border); $g.FillPath($ob2, $tp2); $ob2.Dispose(); $tp2.Dispose()
+    $kb2 = New-Object System.Drawing.SolidBrush($p.Text); $g.FillEllipse($kb2, [float]($tr2.X + (S 3)), [float]($tr2.Y + (S 3)), [float](S 14), [float](S 14)); $kb2.Dispose()
+    $g.DrawString("Aus", $fontUi, $bm, [float](S 386), [float]($tr2.Y + (S 1)))
+    $ba.Dispose(); $bt.Dispose(); $bm.Dispose(); $bp.Dispose()
 }
 
 function Get-SettingsPaletteEntries {
@@ -315,7 +370,7 @@ function Show-SettingsDialog {
         return $l
     }
     $addNum = {
-        param([string]$Label, [double]$Min, [double]$Max, [double]$Value, [string]$Tip = "", [string]$TipKey = "", [double]$Step = 1, [string]$Key = "", $Default = $null, [int]$Decimals = 0, [string]$Words = "")
+        param([string]$Label, [double]$Min, [double]$Max, [double]$Value, [string]$Tip = "", [string]$TipKey = "", [double]$Step = 1, [string]$Key = "", $Default = $null, [int]$Decimals = 0, [string]$Words = "", [switch]$Slider)
         $l = & $mkLabel $Label $Tip $TipKey
         $n = New-Object System.Windows.Forms.NumericUpDown
         $n.Location = New-Object System.Drawing.Point($IX, $lay.Y)
@@ -332,12 +387,27 @@ function Show-SettingsDialog {
         $n.TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right
         $lay.Host.Controls.Add($n)
         if ($Tip -or $TipKey) { Set-DynTip $n $Tip $TipKey }
+        # V7.1: slider next to the number field (both stay in sync)
+        if ($Slider -and $Decimals -eq 0 -and ('TwSliderV7' -as [type])) {
+            $sl = New-Object TwSliderV7
+            $sl.Minimum = [int]$Min; $sl.Maximum = [int]$Max; $sl.Step = [int][math]::Max(1, $Step)
+            $sl.Value = [int]$n.Value
+            $sl.Location = New-Object System.Drawing.Point($IX, ($lay.Y - 1))
+            $sl.Size = New-Object System.Drawing.Size((S 150), (S 24))
+            $n.Location = New-Object System.Drawing.Point(($IX + (S 160)), $lay.Y)
+            $n.Size = New-Object System.Drawing.Size((S 76), (S 22))
+            $sl.Tag = $n; $n.Tag = $sl
+            $sl.Add_ValueChanged({ param($s, $e) if ([int]$s.Tag.Value -ne $s.Value) { $s.Tag.Value = [decimal]$s.Value } })
+            $n.Add_ValueChanged({ param($s, $e) if ($null -ne $s.Tag -and [int]$s.Value -ne $s.Tag.Value) { $s.Tag.Value = [int]$s.Value } })
+            $lay.Host.Controls.Add($sl)
+            if ($Tip -or $TipKey) { Set-DynTip $sl $Tip $TipKey }
+        }
         & $register $n $l $Key $Default $Words
         $lay.Y += S 30
         return $n
     }
     $addCombo = {
-        param([string]$Label, [string[]]$Items, [string]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "", [int]$Width = 0)
+        param([string]$Label, [string[]]$Items, [string]$Value, [string]$Tip = "", [string]$TipKey = "", [string]$Key = "", $Default = $null, [string]$Words = "", [int]$Width = 0, [switch]$Segmented)
         $l = & $mkLabel $Label $Tip $TipKey
         # V7.0: styled items (rounded hover, check mark)
         if ('TwComboV7' -as [type]) { $cb = New-Object TwComboV7; $cb.ItemHeight = S 20 } else { $cb = New-Object System.Windows.Forms.ComboBox }
@@ -350,7 +420,21 @@ function Show-SettingsDialog {
         foreach ($it in $Items) { [void]$cb.Items.Add($it) }
         $cb.SelectedIndex = [math]::Max(0, $cb.Items.IndexOf($Value))
         $lay.Host.Controls.Add($cb)
-        if ($Tip -or $TipKey) { Set-DynTip $cb $Tip $TipKey }
+        # V7.1: a few short choices as a segmented control; the combo box stays (hidden) as the value holder
+        if ($Segmented -and ('TwSegmentV7' -as [type])) {
+            $sg = New-Object TwSegmentV7
+            $sg.Font = $fontUi
+            $sg.Location = New-Object System.Drawing.Point($IX, ($lay.Y - 1))
+            $sg.Size = New-Object System.Drawing.Size($(if ($Width -gt 0) { $Width } else { [math]::Min($IW, (S 230)) }), (S 26))
+            $sg.Items = [string[]]@($Items)
+            $sg.SelectedIndex = $cb.SelectedIndex
+            $sg.Tag = $cb; $cb.Tag = $sg
+            $sg.Add_SelectedIndexChanged({ param($s, $e) if ($s.Tag.SelectedIndex -ne $s.SelectedIndex) { $s.Tag.SelectedIndex = $s.SelectedIndex } })
+            $cb.Add_SelectedIndexChanged({ param($s, $e) if ($null -ne $s.Tag -and $s.Tag.SelectedIndex -ne $s.SelectedIndex) { $s.Tag.SelectedIndex = $s.SelectedIndex } })
+            $cb.Visible = $false
+            $lay.Host.Controls.Add($sg)
+            if ($Tip -or $TipKey) { Set-DynTip $sg $Tip $TipKey }
+        } elseif ($Tip -or $TipKey) { Set-DynTip $cb $Tip $TipKey }
         & $register $cb $l $Key $Default $Words
         $lay.Y += S 30
         return $cb
@@ -418,7 +502,7 @@ function Show-SettingsDialog {
     # ================= Darstellung =================
     & $beginPage "Display"
     & $addSection "Sprache"
-    $cbLang = & $addCombo -Label "Sprache" -Items @("Deutsch", "English") -Value $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) -Tip "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart." -Key "Language" -Default "Deutsch" -Words "Language Englisch"
+    $cbLang = & $addCombo -Label "Sprache" -Items @("Deutsch", "English") -Segmented -Value $(if ([string]$cfg.Language -eq "EN") { "English" } else { "Deutsch" }) -Tip "English: Fenster, Knöpfe, Spalten und Befehle auf Englisch (Meldungen und Glossar bleiben Deutsch). Wirkt nach einem Neustart." -Key "Language" -Default "Deutsch" -Words "Language Englisch"
     & $addSection "Farben für Plus / Minus"
     $cbUd = & $addCombo -Label "Farben für Plus / Minus" -Items (@(@((Get-UpDownSchemes).Keys) + @("Eigene"))) -Value ([string]$cfg.UpDownScheme) -Tip "Farbenblind = Blau / Orange. Eigene = frei wählen." -TipKey "COLORS" -Key "UpDownScheme" -Default ([string]$dc.UpDownScheme) -Words "grün rot farbenblind"
     $chkArrow = & $addCheck -Label "Pfeile vor Veränderungen anzeigen" -Value ([bool]$cfg.ShowArrows) -Tip "Zusätzlich zur Farbe, z. B. für Farbsehschwäche" -TipKey "COLORS" -Key "ShowArrows" -Default ([bool]$dc.ShowArrows)
@@ -441,8 +525,8 @@ function Show-SettingsDialog {
     $nRsi   = & $addNum -Label "RSI-Periode" -Min 2 -Max 100 -Value ([int]$cfg.RsiPeriod) -TipKey "RSI" -Key "RsiPeriod" -Default ([int]$dc.RsiPeriod) -Words "Indikatoren"
     $nRsiOb = & $addNum -Label "RSI überkauft ab" -Min 51 -Max 99 -Value ([int]$cfg.RsiOverbought) -TipKey "RSI" -Key "RsiOverbought" -Default ([int]$dc.RsiOverbought) -Words "Indikatoren"
     $nRsiOs = & $addNum -Label "RSI überverkauft bis" -Min 1 -Max 49 -Value ([int]$cfg.RsiOversold) -TipKey "RSI" -Key "RsiOversold" -Default ([int]$dc.RsiOversold) -Words "Indikatoren"
-    $cbMa   = & $addCombo -Label "Gleitender Durchschnitt" -Items @("SMA", "EMA") -Value ([string]$cfg.MaType) -Tip "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" -TipKey "EMA" -Key "MaType" -Default ([string]$dc.MaType) -Words "Indikatoren"
-    $cbLow  = & $addCombo -Label "Unteres Feld im Chart" -Items @("RSI", "MACD") -Value ([string]$cfg.LowerPanel) -TipKey "MACD" -Key "LowerPanel" -Default ([string]$dc.LowerPanel) -Words "Indikatoren"
+    $cbMa   = & $addCombo -Label "Gleitender Durchschnitt" -Items @("SMA", "EMA") -Segmented -Value ([string]$cfg.MaType) -Tip "SMA = einfacher Durchschnitt, EMA = gewichtet die letzten Kurse stärker" -TipKey "EMA" -Key "MaType" -Default ([string]$dc.MaType) -Words "Indikatoren"
+    $cbLow  = & $addCombo -Label "Unteres Feld im Chart" -Items @("RSI", "MACD") -Segmented -Value ([string]$cfg.LowerPanel) -TipKey "MACD" -Key "LowerPanel" -Default ([string]$dc.LowerPanel) -Words "Indikatoren"
 
     # ================= Design (style first: it has to be findable) =================
     & $beginPage "Design"
@@ -473,12 +557,21 @@ function Show-SettingsDialog {
     }
     $lay.Y += S 66
     & $addNote "Auch ohne dieses Fenster: Befehl STYLE, Layout-Menü (oben rechts) und Tray-Menü." 1 | Out-Null
+    & $addSection "Vorschau"
+    $pvPanel = New-Object System.Windows.Forms.Panel
+    $pvPanel.SetBounds($X0, $lay.Y, (S 456), (S 84))
+    $pvPanel.BackColor = $p.BodyBg
+    Enable-DoubleBuffering -Control $pvPanel
+    $pvPanel.Add_Paint({ param($s, $e) try { Draw-SettingsPreview -g $e.Graphics -W $s.Width -H $s.Height } catch { } })
+    $lay.Host.Controls.Add($pvPanel)
+    $script:SettingsPreviewPanel = $pvPanel
+    $lay.Y += S 96
     & $addSection "Farben"
     $cbTheme  = & $addCombo -Label "Theme" -Items @(Get-ThemeNames) -Value ([string]$cfg.Theme) -TipKey "THEME" -Key "Theme" -Default ([string]$dc.Theme) -Words "dunkel hell dark light graphite Farbschema"
     $cbAccent = & $addCombo -Label "Akzentfarbe" -Items @("Sky", "Amber", "Violet", "Windows", "Eigene") -Value ([string]$cfg.AccentColor) -Tip "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen" -Key "AccentColor" -Default ([string]$dc.AccentColor) -Words "Accent"
     & $addSection "Listen und Fenster"
     $rdMap = @{ "Compact" = "Kompakt"; "Normal" = "Normal"; "Comfortable" = "Bequem" }
-    $cbRows = & $addCombo -Label "Zeilenhöhe der Listen" -Items @("Kompakt", "Normal", "Bequem") -Value $rdMap[[string]$cfg.RowDensity] -Tip "Höhe der Zeilen in Watchlist, Portfolio, News und Analyse" -Key "RowDensity" -Default $rdMap[[string]$dc.RowDensity] -Words "Zeilen Dichte"
+    $cbRows = & $addCombo -Label "Zeilenhöhe der Listen" -Items @("Kompakt", "Normal", "Bequem") -Segmented -Value $rdMap[[string]$cfg.RowDensity] -Tip "Höhe der Zeilen in Watchlist, Portfolio, News und Analyse" -Key "RowDensity" -Default $rdMap[[string]$dc.RowDensity] -Words "Zeilen Dichte"
     $chkZebra = & $addCheck -Label "Zebra-Zeilen (jede zweite Zeile heller)" -Value ([bool]$cfg.ZebraRows) -Key "ZebraRows" -Default ([bool]$dc.ZebraRows)
     $chkIcons = & $addCheck -Label "Symbole auf Knöpfen und in Menüs" -Value ([bool]$cfg.UseIcons) -Tip $(if ($script:IconFont) { "Schrift: $($script:IconFont)" } else { "Segoe Fluent Icons / MDL2 Assets nicht gefunden - es bleibt beim Text" }) -Key "UseIcons" -Default ([bool]$dc.UseIcons) -Words "Icons"
     $chkRound = & $addCheck -Label "Abgerundete Fensterecken (Windows 11)" -Value ([bool]$cfg.RoundCorners) -Key "RoundCorners" -Default ([bool]$dc.RoundCorners)
@@ -487,7 +580,7 @@ function Show-SettingsDialog {
     & $beginPage "Layout"
     & $addSection "Layout"
     $cbLayout = & $addCombo -Label "Layout" -Items @(Get-LayoutNames) -Value ([string]$cfg.Layout) -Tip "Auch über den Layout-Button rechts oben oder Taste L" -TipKey "LAYOUT" -Key "Layout" -Default ([string]$dc.Layout)
-    $nOpacity = & $addNum -Label "Deckkraft (%)" -Min 30 -Max 100 -Value ([int]$cfg.Opacity) -TipKey "OPACITY" -Step 5 -Key "Opacity" -Default ([int]$dc.Opacity) -Words "transparent durchsichtig"
+    $nOpacity = & $addNum -Label "Deckkraft (%)" -Slider -Min 30 -Max 100 -Value ([int]$cfg.Opacity) -TipKey "OPACITY" -Step 5 -Key "Opacity" -Default ([int]$dc.Opacity) -Words "transparent durchsichtig"
     & $addSection "Terminal-Layout"
     $chkTWatch = & $addCheck -Label "Terminal: Watchlist und Alarme anzeigen" -Value ([bool]$cfg.TerminalShowWatch) -TipKey "LAYOUT" -Key "TerminalShowWatch" -Default ([bool]$dc.TerminalShowWatch)
     $chkTPort  = & $addCheck -Label "Terminal: Portfolio anzeigen" -Value ([bool]$cfg.TerminalShowPortfolio) -TipKey "LAYOUT" -Key "TerminalShowPortfolio" -Default ([bool]$dc.TerminalShowPortfolio)
@@ -495,7 +588,7 @@ function Show-SettingsDialog {
     & $addSection "Compact- und Ticker-Leiste"
     $chkTape  = & $addCheck -Label "Laufleiste (Watchlist) im Compact-Layout" -Value ([bool]$cfg.CompactTape) -Key "CompactTape" -Default ([bool]$dc.CompactTape)
     $tsMap = @{ "Slow" = "Langsam"; "Normal" = "Normal"; "Fast" = "Schnell" }
-    $cbTapeSp = & $addCombo -Label "Laufleiste Tempo" -Items @("Langsam", "Normal", "Schnell") -Value $tsMap[[string]$cfg.TapeSpeed] -Tip "Geschwindigkeit der Laufleiste im Compact-Layout (Maus darüber = Pause)" -Key "TapeSpeed" -Default $tsMap[[string]$dc.TapeSpeed]
+    $cbTapeSp = & $addCombo -Label "Laufleiste Tempo" -Items @("Langsam", "Normal", "Schnell") -Segmented -Value $tsMap[[string]$cfg.TapeSpeed] -Tip "Geschwindigkeit der Laufleiste im Compact-Layout (Maus darüber = Pause)" -Key "TapeSpeed" -Default $tsMap[[string]$dc.TapeSpeed]
     [void](& $addButton -Text "Compact / Ticker zeigt ..." -Tip "Was die schmale Leiste anzeigt: Tagesänderung absolut, Vor-/Nachbörse, Mini-Chart, Marktstatus oder das Depot-Ergebnis von heute" -Act { Show-CompactOptions -Owner $script:SettingsCtl.Dlg })
     & $addSection "Fenster"
     $chkTop  = & $addCheck -Label "Immer im Vordergrund" -Value ([bool]$cfg.TopMost) -TipKey "PIN" -Key "TopMost" -Default ([bool]$dc.TopMost)
@@ -568,7 +661,7 @@ function Show-SettingsDialog {
     $chkKwWatch = & $addCheck -Label "Alarm-Wörter auch für Watchlist-Ticker" -Value ([bool]$cfg.NewsKeywordWatch) -Key "NewsKeywordWatch" -Default ([bool]$dc.NewsKeywordWatch)
     & $addSection "Signal-Wechsel (Ticker-Analyse)"
     $saMap = @{ "Depot" = "Depot"; "Alle" = "Depot + Watchlist"; "Aus" = "Aus" }
-    $cbSigAl = & $addCombo -Label "Hinweis bei Signal-Wechsel" -Items @("Depot", "Depot + Watchlist", "Aus") -Value $saMap[[string]$cfg.SignalAlerts] -Tip "Einmal am Tag: Signal wird überwiegend positiv / negativ, Kurs fällt unter die Unterstützung oder steigt über den Widerstand" -Key "SignalAlerts" -Default "Depot" -Words "Signal Alarm Unterstützung Widerstand"
+    $cbSigAl = & $addCombo -Label "Hinweis bei Signal-Wechsel" -Items @("Depot", "Depot + Watchlist", "Aus") -Segmented -Width (S 300) -Value $saMap[[string]$cfg.SignalAlerts] -Tip "Einmal am Tag: Signal wird überwiegend positiv / negativ, Kurs fällt unter die Unterstützung oder steigt über den Widerstand" -Key "SignalAlerts" -Default "Depot" -Words "Signal Alarm Unterstützung Widerstand"
 
     # ================= Depot =================
     & $beginPage "Depot"

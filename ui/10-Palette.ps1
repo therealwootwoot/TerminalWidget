@@ -220,27 +220,18 @@ function Switch-Depot {
 
 function Read-TextInput {
     # Small input box; returns the text or $null when cancelled
-    param([string]$Title, [string]$Prompt, [string]$Value = "")
+    param([string]$Title, [string]$Prompt, [string]$Value = "", [scriptblock]$Validate = $null)
     $p = $script:Pal
-    $dlg = New-DialogForm -Title $Title -W (S 380) -H (S 130)
-    $l = New-Object System.Windows.Forms.Label
-    $l.SetBounds((S 14), (S 12), (S 352), (S 20)); $l.Text = $Prompt
-    $dlg.Controls.Add($l)
+    # V7.1: standard dialog template (title, subtitle, inline error, primary button right)
+    $sd = New-StandardDialog -Title $Title -Subtitle $Prompt -W 400 -BodyH 32
+    $dlg = $sd.Dlg
     $t = New-Object System.Windows.Forms.TextBox
-    $t.SetBounds((S 14), (S 38), (S 352), (S 24)); $t.Text = $Value
+    $t.SetBounds(0, (S 4), $sd.Body.Width, (S 24)); $t.Text = $Value
     $t.BackColor = $p.Input; $t.ForeColor = $p.Text; $t.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $dlg.Controls.Add($t)
-    $ok = New-Object System.Windows.Forms.Button
-    $ok.SetBounds((S 172), (S 86), (S 94), (S 28)); $ok.Text = "OK"
-    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $dlg.Controls.Add($ok)
-    $ca = New-Object System.Windows.Forms.Button
-    $ca.SetBounds((S 272), (S 86), (S 94), (S 28)); $ca.Text = "Abbrechen"
-    Style-FlatButton -Btn $ca -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
-    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $dlg.Controls.Add($ca)
-    $dlg.AcceptButton = $ok; $dlg.CancelButton = $ca
+    $sd.Body.Controls.Add($t)
+    $dlg.Tag.Input = $t; $dlg.Tag.Validate = $Validate
+    $t.Add_TextChanged({ param($s, $e) $f = $s.FindForm(); if ($null -ne $f -and $null -ne $f.Tag) { $f.Tag.Err.Text = "" } })
+    $dlg.Add_Shown({ param($s, $e) try { $s.Tag.Input.Focus(); $s.Tag.Input.SelectAll() } catch { } })
     $res = $dlg.ShowDialog($form)
     $v = $t.Text.Trim()
     $dlg.Dispose()
@@ -249,7 +240,7 @@ function Read-TextInput {
 }
 
 function New-Depot {
-    $name = Read-TextInput -Title "Neues Depot" -Prompt "Name des Depots (z. B. Zweitbroker, Übungsdepot):"
+    $name = Read-TextInput -Title "Neues Depot" -Prompt "Name des Depots (z. B. Zweitbroker, Übungsdepot)" -Validate { param($t) $v = $t.Trim(); if (-not $v) { "Bitte einen Namen eingeben." } elseif ($v.Length -gt 40) { "Höchstens 40 Zeichen." } else { "" } }
     if (-not $name) { return }
     $base = ConvertTo-DepotId $name
     $id = $base; $n = 2

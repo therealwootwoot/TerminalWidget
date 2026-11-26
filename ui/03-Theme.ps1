@@ -395,6 +395,15 @@ function Get-ThemeColors {
     $p["OnAccent"]      = [System.Drawing.Color]::FromArgb($st.OnAccent[0], $st.OnAccent[1], $st.OnAccent[2])
     $dis = Get-MixRgb -A (& $toRgb $p.Muted) -B (& $toRgb $p.Card) -T 0.55
     $p["Disabled"]      = [System.Drawing.Color]::FromArgb($dis[0], $dis[1], $dis[2])
+    # V7.1: fixed data colours as tokens (busy = amber, mark = ruler / drawings, series colours for charts and legends)
+    $p["Busy"]    = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $p["Mark"]    = $(if ($light) { [System.Drawing.Color]::FromArgb(202, 138, 4) } else { [System.Drawing.Color]::FromArgb(250, 204, 21) })
+    $p["Violet"]  = [System.Drawing.Color]::FromArgb(168, 85, 247)
+    $p["Pink"]    = [System.Drawing.Color]::FromArgb(236, 72, 153)
+    $p["Cyan"]    = [System.Drawing.Color]::FromArgb(34, 211, 238)
+    $p["Lime"]    = [System.Drawing.Color]::FromArgb(132, 204, 22)
+    $p["Blue"]    = [System.Drawing.Color]::FromArgb(59, 130, 246)
+    $p["Neutral"] = [System.Drawing.Color]::FromArgb(148, 163, 184)
     return $p
 }
 
@@ -410,6 +419,33 @@ $script:Pal = Get-ThemeColors
 # v5.2: design numbers of the chosen style (radii, gaps, row height ...)
 $script:UiSpec = Get-UiSpec -Style ([string]$script:Config.UiStyle) -Density ([string]$script:Config.RowDensity)
 $script:IconFont = if ($script:InstalledFonts -contains "Segoe Fluent Icons") { "Segoe Fluent Icons" } elseif ($script:InstalledFonts -contains "Segoe MDL2 Assets") { "Segoe MDL2 Assets" } else { "" }
+function Get-SeriesPalette {
+    # V7.1: categorical colours for donut / legend, derived from the accent (hue steps), so every theme stays consistent
+    param([int]$Count = 8)
+    $a = $script:Pal.Accent
+    $h0 = [double]$a.GetHue()
+    $dark = ($script:Pal.BodyBg.GetBrightness() -lt 0.5)
+    $s = 0.55; $v = $(if ($dark) { 0.90 } else { 0.72 })
+    $out = @()
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($i -eq 0) { $out += $a; continue }
+        $h = (($h0 + 360.0 / $Count * $i) % 360.0)
+        $c = $v * $s; $x = $c * (1 - [math]::Abs((($h / 60.0) % 2) - 1)); $m = $v - $c
+        switch ([int][math]::Floor($h / 60.0)) {
+            0 { $r = $c; $g = $x; $b = 0 } 1 { $r = $x; $g = $c; $b = 0 } 2 { $r = 0; $g = $c; $b = $x }
+            3 { $r = 0; $g = $x; $b = $c } 4 { $r = $x; $g = 0; $b = $c } default { $r = $c; $g = 0; $b = $x }
+        }
+        $out += [System.Drawing.Color]::FromArgb([int](($r + $m) * 255), [int](($g + $m) * 255), [int](($b + $m) * 255))
+    }
+    return $out
+}
+
+function New-ThemedCombo {
+    # V7.1: drop-down with rounded closed box and styled items (falls back to the plain combo box)
+    if ('TwComboV7' -as [type]) { $c = New-Object TwComboV7; $c.ItemHeight = S 18; return $c }
+    return (New-Object System.Windows.Forms.ComboBox)
+}
+
 function Update-MenuRenderer {
     # V7.0: colours of the shared menu renderer follow the theme
     try {
@@ -428,6 +464,19 @@ function Update-MenuRenderer {
             [TwComboV7]::TextC = $p.Text
             [TwComboV7]::AccentC = $p.Accent
         }
+        if ('TwSegmentV7' -as [type]) {
+            [TwSegmentV7]::AccentC = $p.Accent
+            [TwSegmentV7]::TrackC = $p.Input
+            [TwSegmentV7]::TextC = $p.Text
+            [TwSegmentV7]::MutedC = $p.Muted
+            [TwSegmentV7]::OnTextC = $p.OnAccent
+        }
+        if ('TwSliderV7' -as [type]) {
+            [TwSliderV7]::AccentC = $p.Accent
+            [TwSliderV7]::TrackC = $p.Border
+            [TwSliderV7]::KnobC = $p.Text
+        }
+        if ('TwComboV7' -as [type]) { [TwComboV7]::BorderC = $p.Border }
         if ('TwToggleV7' -as [type]) {
             [TwToggleV7]::OnC = $p.Accent
             [TwToggleV7]::OffC = $p.Border
@@ -650,7 +699,15 @@ function Render-ChartAndRsi {
     $totalH    = $Bounds.Height - $padTop - $padBot - $gapY
     if ($plotWidth -lt 80 -or $totalH -lt 90) { return }
 
-    $priceH = if ($showRsi) { [int]([math]::Floor($totalH * 0.72)) } else { $totalH }
+    # V7.1: the divider between chart and indicator pane can be dragged (Config.PaneDivider = share of the main chart)
+    $priceH = $totalH
+    if ($showRsi) {
+        $dv = 0.72
+        try { $dv = [double]$script:Config.PaneDivider } catch { $dv = 0.72 }
+        if ($dv -lt 0.35 -or $dv -gt 0.85) { $dv = 0.72 }
+        $priceH = [int]([math]::Floor($totalH * $dv))
+        if (($totalH - $priceH) -lt (S 42)) { $priceH = [math]::Max(1, $totalH - (S 42)) }
+    }
     $rsiH   = $totalH - $priceH
 
     $priceRect = New-Object System.Drawing.Rectangle($padLeft, $padTop, $plotWidth, $priceH)
@@ -1216,6 +1273,11 @@ function Render-ChartAndRsi {
     if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
+        if ($fresh) {
+            # V7.1: indicator pane as a rounded card
+            $cp = New-RoundedPath (New-Object System.Drawing.RectangleF([float]$rsiRect.X, [float]$rsiRect.Y, [float]$rsiRect.Width, [float]$rsiRect.Height)) ([float](S 6))
+            $g.FillPath($c["panelBrush"], $cp); $cp.Dispose()
+        }
         $mAll = $script:ActiveMacd
         if ($null -ne $mAll -and @($mAll.Macd).Count -eq $totalN) {
             $vM = Get-ArraySlice $mAll.Macd $s0 $s1
@@ -1266,6 +1328,11 @@ function Render-ChartAndRsi {
     } elseif ($showRsi -and $rsiH -ge (S 42)) {
         $rsiRect = New-Object System.Drawing.Rectangle($padLeft, ($padTop + $priceH + $gapY), $plotWidth, $rsiH)
         if (-not $fresh) { $g.FillRectangle($c["panelBrush"], $rsiRect); $g.DrawRectangle($c["framePen"], $rsiRect) }
+        if ($fresh) {
+            # V7.1: indicator pane as a rounded card
+            $cp = New-RoundedPath (New-Object System.Drawing.RectangleF([float]$rsiRect.X, [float]$rsiRect.Y, [float]$rsiRect.Width, [float]$rsiRect.Height)) ([float](S 6))
+            $g.FillPath($c["panelBrush"], $cp); $cp.Dispose()
+        }
 
         $obVal = [double]$script:Config.RsiOverbought
         $osVal = [double]$script:Config.RsiOversold
@@ -1340,6 +1407,9 @@ function Render-ChartAndRsi {
         CmpSym         = $cmpSym
         PriceRect      = $priceRect
         RsiRect        = $rsiRectL
+        PaneTop        = $padTop
+        PaneTotal      = $totalH
+        GapY           = $gapY
         BottomAxis     = $bottomAxisAnchor
         MinP           = $minP
         SpanP          = $spanP

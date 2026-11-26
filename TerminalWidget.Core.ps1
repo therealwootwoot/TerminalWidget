@@ -4560,7 +4560,7 @@ function Get-FundamentalRows {
                 }
             }
         }
-        $rows += [PSCustomObject]@{ Key = $k; Name = $f[1]; Value = (Format-FundamentalValue -X $x -Kind $kind -Currency $cur); Peer = (Format-FundamentalValue -X $med -Kind $kind -Currency $cur); PeerCount = $pv.Count; Score = $sc; Note = $note }
+        $rows += [PSCustomObject]@{ Key = $k; Name = $f[1]; Value = (Format-FundamentalValue -X $x -Kind $kind -Currency $cur); Peer = (Format-FundamentalValue -X $med -Kind $kind -Currency $cur); PeerCount = $pv.Count; Score = $sc; Note = $note; X = $x; PeerValues = @($pv) }
     }
     return $rows
 }
@@ -4734,7 +4734,7 @@ function Get-AccentStates {
 
 function Get-StatusBarParts {
     # V7.0: the pieces of the status bar at the bottom of the window
-    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false)
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1)
     $parts = @()
     if ($Stand) {
         $a = ""
@@ -4745,6 +4745,7 @@ function Get-StatusBarParts {
     }
     else { $parts += "Noch keine Daten" }
     if ($Market) { $parts += $Market }
+    if ($ReqPerMin -ge 0) { $parts += ("{0} Abfragen/min" -f $ReqPerMin) }
     if ($Privacy) { $parts += "Privat-Modus" }
     return $parts
 }
@@ -4794,6 +4795,102 @@ function Get-AnalysisKpiTiles {
     return $tiles
 }
 
+function Get-DonutSlices {
+    # V7.1: slices of the allocation donut. Small shares are merged into "Rest".
+    # Start / Sweep in degrees, clockwise from 12 o'clock (GDI+ angle = Start - 90).
+    param($Items, [double]$MinPct = 3.0, [int]$MaxSlices = 8)
+    $list = @($Items | Where-Object { $null -ne $_ -and [double]$_.Value -gt 0 } | Sort-Object { [double]$_.Value } -Descending)
+    $total = 0.0
+    foreach ($i in $list) { $total += [double]$i.Value }
+    if ($list.Count -eq 0 -or $total -le 0) { return @() }
+    $keep = @(); $rest = 0.0
+    foreach ($i in $list) {
+        $pct = [double]$i.Value / $total * 100.0
+        $full = ($list.Count -gt $MaxSlices -and $keep.Count -ge ($MaxSlices - 1))
+        if ($pct -lt $MinPct -or $full) { $rest += [double]$i.Value } else { $keep += [PSCustomObject]@{ Name = [string]$i.Name; Value = [double]$i.Value } }
+    }
+    if ($rest -gt 0) { $keep += [PSCustomObject]@{ Name = "Rest"; Value = $rest } }
+    $out = @(); $angle = 0.0
+    foreach ($k in $keep) {
+        $sw = $k.Value / $total * 360.0
+        $out += [PSCustomObject]@{ Name = $k.Name; Value = $k.Value; Pct = ($k.Value / $total * 100.0); Start = $angle; Sweep = $sw }
+        $angle += $sw
+    }
+    return $out
+}
+
+function Get-DotPlotLayout {
+    # V7.1: position of one value among peer values on a 0..1 axis (dot plot). Rank 1 = lowest.
+    param([double]$Value, [double[]]$Peers)
+    $ps = @($Peers | Where-Object { -not [double]::IsNaN($_) })
+    $all = $ps + @($Value)
+    $min = ($all | Measure-Object -Minimum).Minimum
+    $max = ($all | Measure-Object -Maximum).Maximum
+    $span = $max - $min
+    $pos = { param([double]$x) if ($span -le 0) { return 0.5 } else { return ($x - $min) / $span } }
+    $sorted = @($all | Sort-Object)
+    $n = $sorted.Count
+    if ($n % 2 -eq 1) { $median = $sorted[[int](($n - 1) / 2)] } else { $median = ($sorted[$n / 2 - 1] + $sorted[$n / 2]) / 2.0 }
+    $rank = 1
+    foreach ($p in $ps) { if ($p -lt $Value) { $rank++ } }
+    return [PSCustomObject]@{ Min = $min; Max = $max; Pos = (& $pos $Value); PeerPos = @($ps | ForEach-Object { & $pos $_ }); Median = $median; MedianPos = (& $pos $median); Rank = $rank; Count = $n }
+}
+
+function Get-ValuationBand {
+    # V7.1: fair-value band from the history of one multiple (e.g. P/E) and the current earnings per share.
+    # Low / Mid / High = 20th / 50th / 80th percentile of the multiple * EPS. State compares the price with the band.
+    param([double[]]$Multiples, [double]$Eps, [double]$Price)
+    $m = @($Multiples | Where-Object { -not [double]::IsNaN($_) -and $_ -gt 0 } | Sort-Object)
+    if ($m.Count -lt 5 -or $Eps -le 0) { return $null }
+    $pct = { param([double]$q) $idx = ($m.Count - 1) * $q; $lo = [math]::Floor($idx); $hi = [math]::Ceiling($idx); return $m[[int]$lo] + ($m[[int]$hi] - $m[[int]$lo]) * ($idx - $lo) }
+    $low = (& $pct 0.2) * $Eps; $mid = (& $pct 0.5) * $Eps; $high = (& $pct 0.8) * $Eps
+    $state = "fair"
+    if ($Price -lt $low) { $state = "cheap" } elseif ($Price -gt $high) { $state = "expensive" }
+    return [PSCustomObject]@{ Low = $low; Mid = $mid; High = $high; State = $state }
+}
+
+function Get-PaneLayout {
+    # V7.1: heights of the chart (main) and the indicator panes below it. Divider = share of the main chart
+    # (clamped); the panes share the rest equally, each at least MinPane px.
+    param([int]$Total, [int]$PaneCount, [double]$Divider = 0.7, [int]$MinPane = 48)
+    if ($PaneCount -le 0) { return [PSCustomObject]@{ Main = $Total; Pane = 0; Count = 0; DividerY = $Total } }
+    $d = [math]::Min(0.85, [math]::Max(0.35, $Divider))
+    $main = [int][math]::Round($Total * $d)
+    $pane = [int][math]::Floor(($Total - $main) / $PaneCount)
+    if ($pane -lt $MinPane) { $pane = $MinPane; $main = [math]::Max(0, $Total - $pane * $PaneCount) }
+    return [PSCustomObject]@{ Main = $main; Pane = $pane; Count = $PaneCount; DividerY = $main }
+}
+
+function Get-SegmentLayout {
+    # V7.1: widths of the segments of a segmented control, proportional to the text, summing to Width.
+    param([string[]]$Labels, [int]$Width, [int]$Pad = 16, [int]$CharPx = 7)
+    $n = @($Labels).Count
+    if ($n -eq 0) { return @() }
+    $raw = @($Labels | ForEach-Object { $_.Length * $CharPx + 2 * $Pad })
+    $sum = ($raw | Measure-Object -Sum).Sum
+    $out = @(); $used = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($i -eq $n - 1) { $w = $Width - $used } else { $w = [int][math]::Floor($raw[$i] / $sum * $Width) }
+        $out += [PSCustomObject]@{ X = $used; W = $w }
+        $used += $w
+    }
+    return $out
+}
+
+function Get-RollValues {
+    # V7.1: intermediate values of a number roll-over (ease-out); the last value is exactly To
+    param([double]$From, [double]$To, [int]$Steps = 6)
+    if ($Steps -lt 1) { return @($To) }
+    $out = @()
+    for ($i = 1; $i -le $Steps; $i++) {
+        $t = $i / [double]$Steps
+        $e = 1.0 - [math]::Pow(1.0 - $t, 3)
+        $out += ($From + ($To - $From) * $e)
+    }
+    $out[$out.Count - 1] = $To
+    return $out
+}
+
 function Get-TokenMap {
     # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
     return [ordered]@{
@@ -4814,6 +4911,14 @@ function Get-TokenMap {
         "accent.subtle"   = "AccentSubtle"
         "accent.text"     = "OnAccent"
         "warning"         = "Warn"
+        "busy"            = "Busy"
+        "mark"            = "Mark"
+        "series.violet"   = "Violet"
+        "series.pink"     = "Pink"
+        "series.cyan"     = "Cyan"
+        "series.lime"     = "Lime"
+        "series.blue"     = "Blue"
+        "series.neutral"  = "Neutral"
     }
 }
 
@@ -4961,7 +5066,7 @@ function Get-PortableSettingKeys {
         "NewsRefreshMinutes", "NewsMoveThreshold", "NewsKeywords", "NewsKeywordWatch", "NewsMuted",
         "TooltipMode", "TooltipDelayMs", "HoverCards",
         "Currency", "AutoCurrency", "RiskFreePct",
-        "ChartType", "ShowVolume", "ShowRsi", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
+        "ChartType", "ShowVolume", "ShowRsi", "PaneDivider", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
         "UserLayouts", "GridLayouts",
         "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds"
     )

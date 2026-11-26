@@ -391,6 +391,7 @@ function Invoke-LayoutMenuTag {
 $btnTray.Add_Click({ $form.Hide() })
 function Show-MainWindow {
     $form.Show()
+    if (-not $script:MainA11yDone) { $script:MainA11yDone = $true; Set-AccessibilityDefaults $form -NoTabOrder }
     # back to maximized if it was maximized (was: always "Normal")
     $form.WindowState = if ([bool]$script:Config.WindowMaximized -and -not [bool]$script:Config.CompactMode) { [System.Windows.Forms.FormWindowState]::Maximized } else { [System.Windows.Forms.FormWindowState]::Normal }
     $form.Activate()
@@ -573,7 +574,7 @@ function Draw-ChartDrawings {
     $dl = $script:Drawings[([string]$script:Config.ActiveTicker).ToUpper()]
     if ($null -eq $dl -or $dl.Count -eq 0 -or $L.N -lt 2) { return }
     $pr = $L.PriceRect
-    $col = [System.Drawing.Color]::FromArgb(250, 204, 21)
+    $col = $script:Pal.Mark
     $pen = New-Object System.Drawing.Pen($col, [float]1.5)
     $fibPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(160, $col.R, $col.G, $col.B), [float]1)
     $fibPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
@@ -1134,7 +1135,7 @@ $script:HoverPending = $null
 $pnlHover = New-Object System.Windows.Forms.Panel
 $pnlHover.Size = New-Object System.Drawing.Size((S 300), (S 172))
 $pnlHover.Visible = $false
-$pnlHover.BackColor = $script:Pal.HeaderBg
+$pnlHover.BackColor = $script:Pal.Card
 Enable-DoubleBuffering -Control $pnlHover
 $form.Controls.Add($pnlHover)
 $script:HoverTimer = New-Object System.Windows.Forms.Timer
@@ -1151,6 +1152,12 @@ $script:HoverTimer.Add_Tick({
     if ($x + $pnlHover.Width -gt $form.ClientSize.Width - (S 4)) { $x = $pt.X - $pnlHover.Width - (S 12) }
     if ($y + $pnlHover.Height -gt $form.ClientSize.Height - (S 4)) { $y = $pt.Y - $pnlHover.Height - (S 8) }
     $pnlHover.Location = New-Object System.Drawing.Point([math]::Max(0, $x), [math]::Max(0, $y))
+    try {
+        $rp = New-RoundedPath (New-Object System.Drawing.RectangleF(0, 0, [float]$pnlHover.Width, [float]$pnlHover.Height)) ([float](S 8))
+        $oldRg = $pnlHover.Region
+        $pnlHover.Region = New-Object System.Drawing.Region($rp)
+        $rp.Dispose(); if ($null -ne $oldRg) { $oldRg.Dispose() }
+    } catch { }
     $pnlHover.Visible = $true
     $pnlHover.BringToFront()
     $pnlHover.Invalidate()
@@ -1187,9 +1194,11 @@ $pnlHover.Add_Paint({
     $w = $sender.Width; $h = $sender.Height
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
-    $g.Clear($p.HeaderBg)
-    $bp = New-Object System.Drawing.Pen($p.Accent, [float]1)
-    $g.DrawRectangle($bp, 0, 0, $w - 1, $h - 1); $bp.Dispose()
+    # V7.1: info card = card surface, strong border, rounded corners (same look as the toasts and menus)
+    $g.Clear($p.Card)
+    $bpath = New-RoundedPath (New-Object System.Drawing.RectangleF(0.5, 0.5, [float]($w - 1), [float]($h - 1))) ([float](S 8))
+    $bp = New-Object System.Drawing.Pen($p.Border, [float]1)
+    $g.DrawPath($bp, $bpath); $bp.Dispose(); $bpath.Dispose()
     if ($null -eq $q) { return }
     $txt = New-Object System.Drawing.SolidBrush($p.Text)
     $mut = New-Object System.Drawing.SolidBrush($p.Muted)

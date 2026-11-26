@@ -245,7 +245,7 @@ function Update-TrayIcon {
     try {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $g.Clear([System.Drawing.Color]::Transparent)
-        $colr = switch ($Key) { "up" { $colGreen } "down" { $colRed } default { [System.Drawing.Color]::FromArgb(148, 163, 184) } }
+        $colr = switch ($Key) { "up" { $colGreen } "down" { $colRed } default { $script:Pal.Neutral } }
         $br = New-Object System.Drawing.SolidBrush($colr)
         if ($Key -eq "up") {
             $g.FillPolygon($br, [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF(8, 1)), (New-Object System.Drawing.PointF(15, 14)), (New-Object System.Drawing.PointF(1, 14))))
@@ -401,7 +401,7 @@ function Update-AllUiViews {
         $sign = if ($q.ChangePct -ge 0) { "+" } else { "" }
         $col  = if ($q.ChangePct -ge 0) { $colGreen } else { $colRed }
 
-        $lblLivePrice.Text = "{0:N2} {1}" -f $dispPrice, $curr
+        Set-LivePriceText -Key $sym -Price ([double]$dispPrice) -Curr $curr
         # v4.0: a quote from the cache of the last session is shown grey
         $fromCache = [bool]$q.FromCache
         $lblLivePrice.ForeColor = if ($fromCache) { $p.Muted } else { $p.Text }
@@ -693,6 +693,42 @@ function Invoke-Transaction {
     return ""
 }
 
+function Set-AccessibilityDefaults {
+    # V7.1: accessible names for buttons / inputs without one (own text, else the label to the left or above)
+    # and a tab order that follows the reading order (top to bottom, left to right) inside every container.
+    param([System.Windows.Forms.Control]$Root, [switch]$NoTabOrder)
+    try {
+        $walk = {
+            param($c)
+            $kids = @($c.Controls)
+            foreach ($k in $kids) {
+                if ([string]::IsNullOrEmpty($k.AccessibleName)) {
+                    $n = ""
+                    if ($k -is [System.Windows.Forms.Button] -or $k -is [System.Windows.Forms.CheckBox]) { $n = [string]$k.Text }
+                    elseif ($k -is [System.Windows.Forms.TextBox] -or $k -is [System.Windows.Forms.ComboBox] -or $k -is [System.Windows.Forms.NumericUpDown] -or $k -is [System.Windows.Forms.DataGridView]) {
+                        $best = $null
+                        foreach ($lb in $kids) {
+                            if ($lb -isnot [System.Windows.Forms.Label] -or [string]::IsNullOrWhiteSpace($lb.Text)) { continue }
+                            $sameRow = ([math]::Abs($lb.Top - $k.Top) -le (S 8) -and $lb.Left -lt $k.Left)
+                            $above = ($lb.Bottom -le ($k.Top + (S 2)) -and ($k.Top - $lb.Bottom) -le (S 24) -and [math]::Abs($lb.Left - $k.Left) -le (S 40))
+                            if ($sameRow -or $above) { if ($null -eq $best -or $lb.Left -gt $best.Left) { $best = $lb } }
+                        }
+                        if ($null -ne $best) { $n = [string]$best.Text }
+                    }
+                    $n = $n.Trim().TrimEnd(":").Trim()
+                    if ($n) { $k.AccessibleName = $n }
+                }
+                if ($k.Controls.Count -gt 0) { & $walk $k }
+            }
+            if ($NoTabOrder) { return }
+            $ord = @($kids | Where-Object { $_.TabStop } | Sort-Object @{ Expression = { [int][math]::Floor($_.Top / [double](S 8)) } }, @{ Expression = { $_.Left } })
+            $ix = 0
+            foreach ($k in $ord) { try { $k.TabIndex = $ix } catch { }; $ix++ }
+        }
+        & $walk $Root
+    } catch { }
+}
+
 function New-DialogForm {
     # v5.5: Key = remember position (and size, if sizable) under this name
     param([string]$Title, [int]$W, [int]$H, [string]$Key = "")
@@ -708,10 +744,56 @@ function New-DialogForm {
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
     $d.Add_HandleCreated($script:DialogChromeHandler)
     # v4.7: English mode translates the static texts once the dialog is built
-    $d.Add_Shown({ param($sender, $e) Apply-Language $sender })
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender })
     $d.Text = Tr $Title
     if ($Key) { Register-DialogPlacement -Dlg $d -Key $Key }
     return $d
+}
+
+function New-StandardDialog {
+    # V7.1: one dialog template - title + subtitle, 16 px margins (4 px grid), primary button bottom right,
+    # Enter = OK, Esc = cancel, inline error line instead of pop-up messages.
+    # Returns Dlg, Body (panel for the content, Body width = W - 32), Ok, Cancel, Err. Validation: set $r.Dlg.Tag.Validate = { param($text) "" or error text }.
+    param([string]$Title, [string]$Subtitle = "", [int]$W = 400, [int]$BodyH = 60, [string]$OkText = "OK", [string]$CancelText = "Abbrechen", [string]$Key = "")
+    $p = $script:Pal
+    $headH = if ($Subtitle) { S 60 } else { S 40 }
+    $bodyPx = S $BodyH
+    $d = New-DialogForm -Title $Title -W (S $W) -H ($headH + $bodyPx + (S 76)) -Key $Key
+    $lt = New-Object System.Windows.Forms.Label
+    $lt.SetBounds((S 16), (S 14), ((S $W) - (S 32)), (S 22)); $lt.Font = $fontUiBold; $lt.Text = $Title; $lt.AutoEllipsis = $true
+    $d.Controls.Add($lt)
+    if ($Subtitle) {
+        $ls = New-Object System.Windows.Forms.Label
+        $ls.SetBounds((S 16), (S 36), ((S $W) - (S 32)), (S 18)); $ls.ForeColor = $p.Muted; $ls.Text = $Subtitle; $ls.AutoEllipsis = $true
+        $d.Controls.Add($ls)
+    }
+    $body = New-Object System.Windows.Forms.Panel
+    $body.SetBounds((S 16), $headH, ((S $W) - (S 32)), $bodyPx); $body.BackColor = $d.BackColor
+    $d.Controls.Add($body)
+    $err = New-Object System.Windows.Forms.Label
+    $err.SetBounds((S 16), ($headH + $bodyPx + (S 4)), ((S $W) - (S 32)), (S 18)); $err.ForeColor = $colRed; $err.Text = ""; $err.AutoEllipsis = $true
+    $d.Controls.Add($err)
+    $y = $headH + $bodyPx + (S 28)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.SetBounds(((S $W) - (S 16) - (S 96)), $y, (S 96), (S 28)); $ok.Text = $OkText
+    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.OnAccent -BorderColor $p.Accent
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $d.Controls.Add($ok)
+    $ca = New-Object System.Windows.Forms.Button
+    $ca.SetBounds(((S $W) - (S 16) - (S 96) - (S 8) - (S 96)), $y, (S 96), (S 28)); $ca.Text = $CancelText
+    Style-FlatButton -Btn $ca -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
+    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $d.Controls.Add($ca)
+    $d.AcceptButton = $ok; $d.CancelButton = $ca
+    $d.Tag = @{ Validate = $null; Err = $err; Input = $null }
+    $d.Add_FormClosing({
+        param($s, $e)
+        if ($s.DialogResult -ne [System.Windows.Forms.DialogResult]::OK -or $null -eq $s.Tag -or $null -eq $s.Tag.Validate) { return }
+        $txt = if ($null -ne $s.Tag.Input) { [string]$s.Tag.Input.Text } else { "" }
+        $msg = [string](& $s.Tag.Validate $txt)
+        if ($msg) { $e.Cancel = $true; $s.Tag.Err.Text = $msg; $s.DialogResult = [System.Windows.Forms.DialogResult]::None }
+    })
+    return [PSCustomObject]@{ Dlg = $d; Body = $body; Ok = $ok; Cancel = $ca; Err = $err }
 }
 
 # ---- v5.5: dialogs open where they were closed (if that screen still exists) ----
