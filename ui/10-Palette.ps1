@@ -553,7 +553,17 @@ function Show-CsvImportDialog {
     $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $dlg.Controls.Add($g)
     $lSum = New-Object System.Windows.Forms.Label
-    $lSum.SetBounds((S 12), (S 594), (S 700), (S 34)); $lSum.Anchor = $aBL -bor [System.Windows.Forms.AnchorStyles]::Right; $lSum.ForeColor = $p.Muted
+    $lBrk = New-Object System.Windows.Forms.Label
+    $lBrk.SetBounds((S 12), (S 603), (S 52), (S 18)); $lBrk.Anchor = $aBL; $lBrk.Text = "Broker:"
+    $dlg.Controls.Add($lBrk)
+    $cbBrk = New-Object System.Windows.Forms.ComboBox
+    $cbBrk.SetBounds((S 66), (S 600), (S 160), (S 24)); $cbBrk.Anchor = $aBL
+    $cbBrk.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
+    $cbBrk.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $cbBrk.BackColor = $p.Input; $cbBrk.ForeColor = $p.Text
+    foreach ($bn in @(Get-BrokerNames $script:Transactions.ToArray())) { [void]$cbBrk.Items.Add($bn) }
+    $dlg.Controls.Add($cbBrk)
+    Set-DynTip $cbBrk "Gilt für alle importierten Buchungen, deren Zeile keinen eigenen Broker nennt"
+    $lSum.SetBounds((S 240), (S 594), (S 540), (S 40)); $lSum.Anchor = $aBL -bor [System.Windows.Forms.AnchorStyles]::Right; $lSum.ForeColor = $p.Muted
     $dlg.Controls.Add($lSum)
     $btnImp = New-Object System.Windows.Forms.Button
     $btnImp.SetBounds((S 794), (S 598), (S 94), (S 28)); $btnImp.Anchor = $aBR
@@ -568,13 +578,13 @@ function Show-CsvImportDialog {
     $dlg.Controls.Add($btnCa)
     $dlg.CancelButton = $btnCa
 
-    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Imported = 0; Guess = $guess; CashN = 0 }
+    $script:CsvCtl = @{ Dlg = $dlg; Grid = $g; Csv = $csv; Combos = $combos; Cur = $cbCur; Suf = $cbSuf; Sum = $lSum; Reb = $chkReb; Rows = @(); IsinMap = @{}; File = (Split-Path -Leaf $ofd.FileName); Broker = $cbBrk; Imported = 0; Guess = $guess; CashN = 0 }
     $script:CsvCtl.Fill = {
         $cc = $script:CsvCtl
         $map = @{}
         foreach ($f in $cc.Combos.Keys) { $map[$f] = $cc.Combos[$f].SelectedIndex - 1 }
         # v5.5: automatic extras (currency of the total, exchange rate, more fee columns)
-        foreach ($f in @("AmountCurrency", "TaxCurrency", "Rate", "FeeExtra")) { if ($cc.Guess.ContainsKey($f)) { $map[$f] = $cc.Guess[$f] } }
+        foreach ($f in @("AmountCurrency", "TaxCurrency", "Rate", "FeeExtra", "Broker")) { if ($cc.Guess.ContainsKey($f)) { $map[$f] = $cc.Guess[$f] } }
         $cc.Rows = @(ConvertFrom-BrokerRows -Rows $cc.Csv.Rows -Map $map -DefaultCurrency ([string]$cc.Cur.SelectedItem))
         $existing = $script:Transactions.ToArray()
         $cc.Grid.Rows.Clear()
@@ -657,6 +667,7 @@ function Show-CsvImportDialog {
                 Id = [Guid]::NewGuid().ToString("N"); Date = $b.Date; Ticker = $sym; Type = $b.Type
                 Shares = [double]$b.Shares; Price = [double]$b.Price; Fee = [double]$b.Fee; Currency = $b.Currency
                 Realized = 0.0; Note = "CSV-Import " + $cc.File
+                Broker = $(if ($b.Broker) { [string]$b.Broker } else { $cc.Broker.Text.Trim() })
             })
             [void]$syms.Add($sym)
             $n++
@@ -1254,7 +1265,7 @@ function Invoke-SavingsPlans {
                 $amt = Get-SavingsPlanAmount -Plan $pl -Date $d   # v5.5: yearly increase
                 $sh = ($amt - [double]$pl.Fee) / $px
                 if ($sh -le 0) { continue }
-                $err = Invoke-Transaction -Type "Kauf" -Ticker $pl.Ticker -Shares $sh -Price $px -Fee ([double]$pl.Fee) -Currency ([string]$pl.Currency) -Date $d -Note ("Sparplan {0:N2} {1}" -f $amt, $pl.Currency)
+                $err = Invoke-Transaction -Type "Kauf" -Ticker $pl.Ticker -Shares $sh -Price $px -Fee ([double]$pl.Fee) -Currency ([string]$pl.Currency) -Date $d -Note ("Sparplan {0:N2} {1}" -f $amt, $pl.Currency) -Broker (Get-LastBroker -Transactions @($script:Transactions | Where-Object { $_.Ticker -eq ([string]$pl.Ticker).ToUpper() }) -Ticker ([string]$pl.Ticker).ToUpper())
                 if ($err) { Write-WidgetLog "Savings plan $($pl.Ticker) $d : $err" "WARN"; break }
                 $pl.LastBooked = $d
                 $booked++

@@ -1321,6 +1321,46 @@ function Invoke-SmokeTest {
         if ([string]$script:Config.ActiveTab -ne "Chart") { throw "chart tab not shown" }
         Switch-ActiveTicker -NewTicker $keepTicker -SkipResolve $true; & $pump
     } 6000
+    Invoke-SmokeStep "V10.4 broker" {
+        $saved = @($script:Transactions.ToArray())
+        try {
+            $script:Transactions.Clear()
+            $year = (Get-Date).Year
+            Add-TransactionRecord -Type "Kauf" -Ticker "NVDA" -Shares 10 -Price 100 -Fee 1 -Currency "EUR" -Date "$year-01-10" -Broker "Flatex"
+            Add-TransactionRecord -Type "Kauf" -Ticker "MSFT" -Shares 5 -Price 300 -Fee 7.5 -Currency "EUR" -Date "$year-02-11" -Broker "Hausbank" -Note "Smoke Sparplan"
+            Add-TransactionRecord -Type "Verkauf" -Ticker "NVDA" -Shares 2 -Price 140 -Fee 1 -Currency "EUR" -Date "$year-03-12" -Realized 79
+            & $probeRun { Show-TransactionHistory } {
+                $h = $script:TxHist
+                if ($null -eq $h) { return "window not open" }
+                if ($h.Grid.Rows.Count -ne 3) { return "rows $($h.Grid.Rows.Count)" }
+                $h.BrokerF.SelectedIndex = 1
+                if ($h.Grid.Rows.Count -ne 1) { return "no-broker filter: $($h.Grid.Rows.Count)" }
+                $h.BrokerF.SelectedIndex = 0; $h.Find.Text = "sparplan"
+                if ($h.Grid.Rows.Count -ne 1) { return "search: $($h.Grid.Rows.Count)" }
+                $h.Find.Text = ""
+                & $script:SmokeShot "25-history-broker" $h.Dlg
+                return ""
+            } 2500
+            & $probeRun { Show-TransactionDialog -Ticker "NVDA" } {
+                if ($null -eq $script:TxDlg) { return "window not open" }
+                if ($script:TxDlg.Broker.Text -ne "Flatex") { return "broker not preset: '$($script:TxDlg.Broker.Text)'" }
+                & $script:SmokeShot "26-booking-broker" $script:TxDlg.Dlg
+                return ""
+            } 2000
+            & $probeRun { Show-GoalsCostsDialog } {
+                $gc = $script:GoalCtl
+                if ($null -eq $gc) { return "window not open" }
+                $gc.Group.SelectedIndex = 1
+                if ($gc.Grid.Rows.Count -lt 3) { return "broker rows $($gc.Grid.Rows.Count)" }
+                & $script:SmokeShot "27-costs-per-broker" $gc.Dlg
+                return ""
+            } 2500
+        } finally {
+            $script:Transactions.Clear()
+            foreach ($t in $saved) { $script:Transactions.Add($t) }
+            Save-Transactions
+        }
+    } 14000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

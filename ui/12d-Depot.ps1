@@ -46,6 +46,32 @@ function Get-FeeRows {
     return @{ Rows = $out; Approx = $approx; Base = $base }
 }
 
+function Get-BrokerFeeRows {
+    # all depots together, per year and broker (10.4)
+    $base = [string]$script:Config.Currency
+    $fb = @{}
+    foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
+    $priv = [bool]$script:Config.PrivacyMode
+    $money = { param([double]$v) Protect-Amount -Text ("{0:N2}" -f $v) -On $priv }
+    $all = @(foreach ($d in @(Get-DepotList)) { (Get-DepotBookings -Id ([string]$d.Id)).Transactions })
+    $rows = @(); $approx = $false
+    foreach ($r in @(Get-BrokerFeeOverview -Transactions $all -Base $base -History (Get-FxHistoryMap) -FallbackFromEur $fb)) {
+        if ($r.Approx) { $approx = $true }
+        $name = if ($r.Broker) { $r.Broker } else { Tr "(ohne Broker)" }
+        $rows += ,@([string]$r.Year, $name, [string]$r.Orders, (& $money $r.Volume), (& $money $r.Fees), (& $money $r.PerOrder), ("{0:N2} %" -f $r.Pct))
+    }
+    return @{ Rows = $rows; Approx = $approx; Base = $base }
+}
+
+function Set-GoalsGridMode {
+    # same seven columns, other headings
+    param([bool]$ByBroker)
+    $g = $script:GoalCtl.Grid
+    $heads = if ($ByBroker) { @("Jahr", "Broker", "Orders", "Volumen", "Ordergebühren", "je Order", "vom Volumen") }
+             else { @("Jahr", "Depot", "Orders", "Ordergebühren", "Kontogebühren", "Kosten gesamt", "Zinsen") }
+    for ($i = 0; $i -lt $heads.Count; $i++) { $g.Columns[$i].HeaderText = Tr $heads[$i] }
+}
+
 # ==============================================================================
 # goals
 # ==============================================================================
@@ -96,10 +122,13 @@ function Update-GoalsView {
     $gc.Lbl3.Text = (Tr "Dieses Jahr gebucht: {0}") -f (Protect-Amount -Text ("{0:N2} {1}" -f $got, $base) -On $priv)
     if ($fc.Loading -gt 0) { $gc.Lbl3.Text += "   |   " + ((Tr "Prognose unvollständig: {0} von {1} Positionen ohne Dividendendaten") -f $fc.Loading, $fc.Positions) }
 
-    $fr = Get-FeeRows
+    $byBroker = ($gc.Group.SelectedIndex -eq 1)
+    Set-GoalsGridMode $byBroker
+    $fr = if ($byBroker) { Get-BrokerFeeRows } else { Get-FeeRows }
     $gc.Grid.Rows.Clear()
     foreach ($r in @($fr.Rows)) { [void]$gc.Grid.Rows.Add([object[]]$r) }
-    $gc.Note.Text = (Tr "Beträge in {0}. Gebühren aus Buchungen und Cash-Konto, Zinsen aus dem Cash-Konto.") -f $fr.Base
+    $gc.Note.Text = if ($byBroker) { (Tr "Beträge in {0}. Nur Käufe und Verkäufe, alle Depots. Broker vergibst du in der Transaktionshistorie.") -f $fr.Base }
+                    else { (Tr "Beträge in {0}. Gebühren aus Buchungen und Cash-Konto, Zinsen aus dem Cash-Konto.") -f $fr.Base }
     if ($fr.Approx) { $gc.Note.Text += " " + (Tr "Teilweise mit heutigem Wechselkurs gerechnet (Tageskurse lädt die Analyse).") }
 }
 
@@ -125,7 +154,9 @@ function Show-GoalsCostsDialog {
     $g1 = & $mk 76
     $g2 = & $mk 118
     $l3 = New-V8Label $dlg "" (S 12) (S 158) (S 736) -Muted
-    [void](New-V8Label $dlg (Tr "Kosten und Zinsen je Jahr und Depot") (S 12) (S 188) (S 400))
+    [void](New-V8Label $dlg (Tr "Kosten und Zinsen je Jahr") (S 12) (S 188) (S 400))
+    $cbGroup = New-V8Combo $dlg @((Tr "je Depot"), (Tr "je Broker")) (Tr "je Depot") (S 598) (S 183) (S 150)
+    $cbGroup.AccessibleName = Tr "Gruppierung"
     $g = New-V8Grid $dlg (S 12) (S 210) (S 736) (S 254)
     $cols = @(@("Year", "Jahr", 50), @("Depot", "Depot", 120), @("Orders", "Orders", 50), @("OrderFees", "Ordergebühren", 90), @("AccFees", "Kontogebühren", 90), @("Fees", "Kosten gesamt", 90), @("Interest", "Zinsen", 80))
     foreach ($c in $cols) { Add-V8Column $g $c[0] $c[1] $c[2] -ReadOnly }
@@ -133,7 +164,8 @@ function Show-GoalsCostsDialog {
     $note = New-V8Label $dlg "" (S 12) (S 472) (S 620) (S 40) -Muted
     $no = New-V8Button $dlg (Tr "Schließen") (S 652) (S 482) (S 96)
     $no.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $dlg.CancelButton = $no
-    $script:GoalCtl = @{ Dlg = $dlg; T1 = $t1; T2 = $t2; Lbl1 = $g1[0]; Bar1 = $g1[1]; Lbl2 = $g2[0]; Bar2 = $g2[1]; Lbl3 = $l3; Grid = $g; Note = $note }
+    $script:GoalCtl = @{ Dlg = $dlg; T1 = $t1; T2 = $t2; Lbl1 = $g1[0]; Bar1 = $g1[1]; Lbl2 = $g2[0]; Bar2 = $g2[1]; Lbl3 = $l3; Grid = $g; Note = $note; Group = $cbGroup }
+    $cbGroup.Add_SelectedIndexChanged({ Update-GoalsView })
     $bSave.Add_Click({
         $vals = @()
         foreach ($tb in @($script:GoalCtl.T1, $script:GoalCtl.T2)) {
