@@ -662,6 +662,13 @@ $form.Add_Shown({
     $script:StartupDone = $true
     Add-FocusRings $form
     Update-PrivacyIndicator
+    if ([bool]$script:Config.OverviewOnStart -and -not $script:SmokeMode -and -not [string]$script:Config.ReopenAnalysis) {
+        # a moment later, so the first quotes are there
+        $script:OverviewTimer = New-Object System.Windows.Forms.Timer
+        $script:OverviewTimer.Interval = 1500
+        $script:OverviewTimer.Add_Tick({ $script:OverviewTimer.Stop(); Show-OverviewDialog })
+        $script:OverviewTimer.Start()
+    }
     # v5.0: back to where you were: full-page list, open Analyse window
     if ([string]$script:Config.Layout -eq "Terminal" -and [string]$script:Config.TerminalFull -in @("Portfolio", "Watchlist", "News")) { Set-TerminalFull ([string]$script:Config.TerminalFull) }
     if ([string]$script:Config.ReopenAnalysis -and -not $script:SmokeMode) {
@@ -1292,6 +1299,28 @@ function Invoke-SmokeTest {
         $script:Config.Theme = $keepT; $script:Pal = Get-ThemeColors
         return ""
     } 2500 } 4000
+    Invoke-SmokeStep "V10.2 overview clicks + privacy" {
+        $keepTicker = [string]$script:Config.ActiveTicker
+        $keepGoal = $script:Config.GoalDepotValue
+        $script:Config.GoalDepotValue = 10000.0
+        $script:SmokePicked = ""
+        & $probeRun { Show-OverviewDialog } {
+            if ($null -eq $script:Ov) { return "window not open" }
+            Set-PrivacyMode $true; $script:Ov.Canvas.Refresh(); & $script:SmokeShot "24-overview-privacy" $script:Ov.Dlg; Set-PrivacyMode $false
+            $script:Ov.Canvas.Refresh()
+            $hit = @($script:Ov.Hits.ToArray() | Where-Object { $_.Kind -eq "Ticker" -and $_.Arg -ne [string]$script:Config.ActiveTicker })[0]
+            if ($null -eq $hit) { return "no other ticker row" }
+            $script:SmokePicked = [string]$hit.Arg
+            $kind = Invoke-OverviewClick -At (New-Object System.Drawing.Point(($hit.R.X + 5), ($hit.R.Y + 5)))
+            if ($kind -ne "Ticker") { return "click hit '$kind'" }
+            return ""
+        } 2500
+        $script:Config.GoalDepotValue = $keepGoal
+        & $pump
+        if ([string]$script:Config.ActiveTicker -ne $script:SmokePicked) { throw "click did not switch to $($script:SmokePicked): $($script:Config.ActiveTicker)" }
+        if ([string]$script:Config.ActiveTab -ne "Chart") { throw "chart tab not shown" }
+        Switch-ActiveTicker -NewTicker $keepTicker -SkipResolve $true; & $pump
+    } 6000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
