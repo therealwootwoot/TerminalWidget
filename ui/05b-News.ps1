@@ -773,12 +773,12 @@ function Show-FeedManager {
     }
     & $addCol "On" "An" 34 $true "Nur eingeschaltete Quellen werden abgefragt und angezeigt"
     & $addCol "Name" "Name" 130 $false "Leer = Titel des Feeds"
-    & $addCol "Url" "Adresse" 270 $false "RSS oder Atom. {ticker} oder {name} = eine Abfrage je Ticker (höchstens 15)"
+    & $addCol "Url" "Adresse" 252 $false "RSS oder Atom. {ticker} oder {name} = eine Abfrage je Ticker (höchstens 15)"
     & $addCol "Group" "Gruppe" 80 $false "z. B. Österreich, Firma, Markt - im Menü Quellen: Nur Gruppe"
     & $addCol "Ticker" "Ticker" 70 $false "Feste Zuordnung. Bei {ticker}/{name}: für welche Ticker (mit Komma), leer = Depot + Watchlist"
-    & $addCol "Minutes" "Min." 40 $false "Eigenes Abfrage-Intervall in Minuten (ab 5), leer = Einstellung"
-    & $addCol "Age" "Tage" 40 $false "Älteste Meldung in Tagen, leer = 14"
-    & $addCol "Notify" "Hinweis" 52 $true "Darf Stichwort-Hinweise auslösen"
+    & $addCol "Minutes" "Min." 48 $false "Eigenes Abfrage-Intervall in Minuten (ab 5), leer = Einstellung"
+    & $addCol "Age" "Tage" 48 $false "Älteste Meldung in Tagen, leer = 14"
+    & $addCol "Notify" "Hinweis" 68 $true "Darf Stichwort-Hinweise auslösen"
     & $addCol "Status" "Status" 200 $false "Ergebnis der letzten Abfrage oder des Tests"
     $g.Columns["Status"].ReadOnly = $true
     $g.Columns["Status"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill

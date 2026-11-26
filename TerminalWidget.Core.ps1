@@ -3083,7 +3083,7 @@ function Get-NewsKey {
         $base = $link; $query = ""
         $q = $link.IndexOf('?')
         if ($q -ge 0) { $base = $link.Substring(0, $q); $query = $link.Substring($q + 1) }
-        $keep = @($query -split '&' | Where-Object { $_ -and $_ -notmatch '^(utm_[^=]*|utm|fbclid|gclid|mc_cid|mc_eid|cmpid|ncid|ocid|\.tsrc|guccounter|guce_[^=]*)(=|$)' } | Sort-Object)
+        $keep = @($query -split '&' | Where-Object { $_ -and $_ -notmatch '^(utm_[^=]*|utm|fbclid|gclid|mc_cid|mc_eid|cmpid|ncid|ocid|src|\.tsrc|guccounter|guce_[^=]*)(=|$)' } | Sort-Object)
         $key = $base.TrimEnd('/')
         if ($keep.Count -gt 0) { $key += "?" + ($keep -join "&") }
         return $key.ToLowerInvariant()
