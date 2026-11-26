@@ -267,7 +267,7 @@ function Show-SettingsDialog {
     $ch = if ([int]$cfg.SettingsH -gt 0) { [int]$cfg.SettingsH } else { S 560 }
     $dlg.ClientSize = New-Object System.Drawing.Size([math]::Min($cw, $wa.Width - (S 24)), [math]::Min($ch, $wa.Height - (S 48)))
     $dlg.Add_HandleCreated($script:DialogChromeHandler)
-    $dlg.Add_Shown({ param($sender, $e) Add-FocusRings $sender; Set-ScrollBarTheme $sender })
+    $dlg.Add_Shown({ param($sender, $e) Add-FocusRings $sender })
 
     # ---- frame: content (fill), page list (left), button bar (bottom) ----
     $host0 = New-Object System.Windows.Forms.Panel

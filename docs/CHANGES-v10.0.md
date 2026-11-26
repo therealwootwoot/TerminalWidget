@@ -12,4 +12,7 @@ Die Übersicht nutzt nur bereits geladene Daten und löst keine zusätzlichen Ab
 
 ## Außerdem
 - Kurzmeldungen erscheinen in der freien Mitte der Menüleiste und verdecken keine Kurse.
-- Bildlaufleisten in Tabellen werden auch dann dunkel, wenn sie erst später erscheinen.
+- Korrektur zu 9.0: Die Bildlaufleisten sind in den dunklen Themes weiterhin hell. Der Versuch in 9.0 hat auf dem Windows-Testrechner nicht funktioniert und wurde entfernt.
+
+## Noch offen
+- Broker je Buchung, Ziele für alle Depots, bessere Alarme, weitere Analyse-Kacheln.
