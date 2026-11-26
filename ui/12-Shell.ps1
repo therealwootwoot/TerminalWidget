@@ -820,7 +820,7 @@ $dgvWatchlist.Add_ColumnHeaderMouseClick({
     if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     Step-GridSort -Sort $script:WlSort -Col ($sender.Columns[$e.ColumnIndex].Name) -TextCols @("Sym")
     Set-GridSortGlyph -Grid $dgvWatchlist -Sort $script:WlSort
-    $lblWlTitle.Text = if ($script:WlSort.Col) { "Watchlist (sortiert - 3. Klick = eigene Reihenfolge)" } else { "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" }
+    $lblWlTitle.Text = if ($script:WlSort.Col) { "Watchlist (sortiert)" } else { "Watchlist" }
     Refresh-WatchlistAndAlerts
 })
 
@@ -866,11 +866,11 @@ $dgvPortfolio.Add_SelectionChanged({
         if ($sym -and $script:Portfolio.ContainsKey($sym)) {
             $p = $script:Portfolio[$sym]
             $txtPortTicker.Text = $sym
-            $txtPortShares.Text = $p.Shares.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-            $txtPortAvg.Text    = $p.AvgPrice.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            $txtPortShares.Text = (Format-EditNumber $p.Shares)
+            $txtPortAvg.Text    = (Format-EditNumber $p.AvgPrice)
             Select-CurrencyInCombo -Combo $cmbPortCurr -Code $p.Currency
-            $txtPortBuyAmt.Text = if ($p.BuyAmount -gt 0) { $p.BuyAmount.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { "" }
-            $txtPortTarget.Text = if ($p.TargetAvg -gt 0) { $p.TargetAvg.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { "" }
+            $txtPortBuyAmt.Text = if ($p.BuyAmount -gt 0) { (Format-EditNumber $p.BuyAmount) } else { "" }
+            $txtPortTarget.Text = if ($p.TargetAvg -gt 0) { (Format-EditNumber $p.TargetAvg) } else { "" }
             Update-NachkaufSimulation
         }
     }

@@ -80,7 +80,8 @@ function Render-ChartOverlay {
     # RSI pane: horizontal line + value tag at the mouse
     if ($inRsi -and $rr.Height -gt 0 -and [string]$script:Config.LowerPanel -ne "MACD") {
         $g.DrawLine($c["crossPen"], $rr.Left, $my, $rr.Right, $my)
-        $rVal = (($rr.Bottom - $my) / [double]$rr.Height) * 100.0
+        $rp = if ($null -ne $L.RsiPlot) { $L.RsiPlot } else { $rr }
+        $rVal = [math]::Max(0.0, [math]::Min(100.0, (($rp.Bottom - $my) / [double]$rp.Height) * 100.0))
         $rTag = New-Object System.Drawing.Rectangle(($rr.Right + 2), ($my - [int]($tagH / 2)), $tagW, $tagH)
         Fill-RoundedRect -g $g -Brush $c["crossTagBg"] -Rect $rTag -Radius ([float](S 4))
         $g.DrawString(("{0:N1}" -f $rVal), $fontBadge, $c["crossTagFg"], ($rTag.Left + 3), ($rTag.Top + 2))
@@ -914,7 +915,7 @@ Set-Tip $picCompactSpark "" "SPARK"
 # ------------------------------------------------------------------------------
 $pnlTape = New-Object System.Windows.Forms.Panel
 $pnlTape.Location = New-Object System.Drawing.Point(0, (S 48))
-$pnlTape.Size = New-Object System.Drawing.Size((S 698), (S 22))
+$pnlTape.Size = New-Object System.Drawing.Size((S 760), (S 22))
 $pnlTape.BackColor = $script:Pal.HeaderBg
 $pnlTape.Visible = $false
 $pnlTape.Cursor = [System.Windows.Forms.Cursors]::Hand
@@ -1064,7 +1065,7 @@ $picCompactSpark.Add_Paint({
 
 # Right-Aligned Header Controls
 $btnCurrency = New-Object System.Windows.Forms.Button
-$btnCurrency.Location = New-Object System.Drawing.Point((S 544), (S 11))
+$btnCurrency.Location = New-Object System.Drawing.Point((S 536), (S 11))
 $btnCurrency.Size = New-Object System.Drawing.Size((S 62), (S 26))
 Style-FlatButton -Btn $btnCurrency -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Accent
 $btnCurrency.Font = $fontUiBold
@@ -1073,16 +1074,16 @@ $pnlHeader.Controls.Add($btnCurrency)
 Set-Tip $btnCurrency "Währung (Taste W). Auto = jeder Kurs und der Chart in der Währung des Tickers (ABBN.SW in CHF, SAP.DE in EUR); Depotwerte bleiben in der Basiswährung. EUR/USD/CHF/GBP = alles in dieser Währung (wird auch Basiswährung)." "FX"
 
 $btnPin = New-Object System.Windows.Forms.Button
-$btnPin.Location = New-Object System.Drawing.Point((S 612), (S 11))
-$btnPin.Size = New-Object System.Drawing.Size((S 44), (S 26))
+$btnPin.Location = New-Object System.Drawing.Point((S 604), (S 11))
+$btnPin.Size = New-Object System.Drawing.Size((S 36), (S 26))
 $btnPin.Font = $fontUiBold
 $btnPin.Text = "Pin"
 $pnlHeader.Controls.Add($btnPin)
 Set-Tip $btnPin "Immer im Vordergrund (Always on Top)" "PIN"
 
 $btnCompact = New-Object System.Windows.Forms.Button
-$btnCompact.Location = New-Object System.Drawing.Point((S 662), (S 11))
-$btnCompact.Size = New-Object System.Drawing.Size((S 74), (S 26))
+$btnCompact.Location = New-Object System.Drawing.Point((S 646), (S 11))
+$btnCompact.Size = New-Object System.Drawing.Size((S 90), (S 26))
 Style-FlatButton -Btn $btnCompact -BgColor $script:Pal.Input -FgColor $script:Pal.Text -BorderColor $script:Pal.Border
 $btnCompact.Font = $fontUi
 $btnCompact.Text = "Standard $script:DropArrow"

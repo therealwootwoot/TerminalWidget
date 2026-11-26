@@ -20,9 +20,9 @@ function Update-MainLayout {
     # Header: right-hand buttons stick to the right edge
     $pnlHeader.Width = $W
     $btnTray.Left     = $W - (S 38)
-    $btnCompact.Left  = $W - (S 118)
-    $btnPin.Left      = $W - (S 168)
-    $btnCurrency.Left = $W - (S 236)
+    $btnCompact.Left  = $W - (S 134)
+    $btnPin.Left      = $W - (S 176)
+    $btnCurrency.Left = $W - (S 244)
     $lstCurrencyDropdown.Left = $btnCurrency.Left
     $nameW = [math]::Max((S 80), $btnCurrency.Left - (S 394))
     $lblHeaderName.Width   = $nameW
@@ -557,7 +557,7 @@ function Apply-Layout {
         $pnlNav.Visible = $false
         Set-ViewVisibility @{}
 
-        $barW = if ($isTicker) { S 576 } else { S 698 }
+        $barW = if ($isTicker) { S 600 } else { S 760 }
         $pnlHeader.Size = New-Object System.Drawing.Size($barW, (S 48))
         $lblHeaderName.Visible   = $false
         $picCompactSpark.Visible = $true
@@ -569,12 +569,12 @@ function Apply-Layout {
         $csM = @(([string]$script:Config.CompactShow) -split ',' | ForEach-Object { $_.Trim() })
         $lblMarketStatus.Visible = (-not $isTicker) -and (($csM -contains "Market") -or ($csM -contains "Depot"))
         $lblMarketStatus.Location = New-Object System.Drawing.Point((S 470), (S 16))
-        $lblMarketStatus.Size     = New-Object System.Drawing.Size((S 124), (S 17))
+        $lblMarketStatus.Size     = New-Object System.Drawing.Size((S 162), (S 17))
         $btnCurrency.Visible = $false
         $btnPin.Visible      = $false
-        $btnCompact.Location = New-Object System.Drawing.Point($(if ($isTicker) { S 470 } else { S 598 }), (S 11))
-        $btnCompact.Size     = New-Object System.Drawing.Size((S 64), (S 26))
-        $btnTray.Location    = New-Object System.Drawing.Point($(if ($isTicker) { S 538 } else { S 666 }), (S 11))
+        $btnCompact.Location = New-Object System.Drawing.Point($(if ($isTicker) { S 470 } else { S 636 }), (S 11))
+        $btnCompact.Size     = New-Object System.Drawing.Size((S 88), (S 26))
+        $btnTray.Location    = New-Object System.Drawing.Point($(if ($isTicker) { S 564 } else { S 728 }), (S 11))
         # Optional ticker tape (watchlist + portfolio) below the compact bar
         $useTape = (-not $isTicker) -and [bool]$script:Config.CompactTape
         $pnlTape.SetBounds(0, (S 48), $barW, (S 22))
@@ -594,8 +594,8 @@ function Apply-Layout {
         $lblMarketStatus.Size     = New-Object System.Drawing.Size((S 150), (S 17))
         $btnCurrency.Visible = $true
         $btnPin.Visible      = $true
-        $btnCompact.Location = New-Object System.Drawing.Point((S 662), (S 11))
-        $btnCompact.Size     = New-Object System.Drawing.Size((S 74), (S 26))
+        $btnCompact.Location = New-Object System.Drawing.Point((S 646), (S 11))
+        $btnCompact.Size     = New-Object System.Drawing.Size((S 90), (S 26))
         $btnTray.Location    = New-Object System.Drawing.Point((S 742), (S 11))
 
         $pnlNav.Visible = $true

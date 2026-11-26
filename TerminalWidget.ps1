@@ -657,7 +657,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.1"
+$script:AppVersion    = "7.1.1"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1715,16 +1715,18 @@ function Set-EventEntry {
 
 # V7.0: the former single script is split into ui\*.ps1 parts. They are dot-sourced in order,
 # so everything runs in this script's scope exactly as before.
-. (Join-Path (Join-Path $script:ScriptDir "ui") "02-Data.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "03-Theme.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "04-ChartRender.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "05-ChartViews.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "06-MainWindow.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "07-Events.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "08-Analysis.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "09-Dialogs.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "10-Palette.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "11-System.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "12-Shell.ps1")
-. (Join-Path (Join-Path $script:ScriptDir "ui") "13-Startup.ps1")
+# v7.1.1: load time per part goes to the log and to HEALTH. 13-Startup runs the
+# message loop, so its load time is not measured; "window shown after" covers it.
+$script:StartupParts = New-Object System.Collections.Generic.List[string]
+Write-WidgetLog ("Startup: main script ready after {0} ms" -f $script:StartWatch.ElapsedMilliseconds)
+foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "13-Startup")) {
+    $twPartStart = $script:StartWatch.ElapsedMilliseconds
+    if ($twPart -eq "13-Startup") { Write-WidgetLog ("Startup: parts 02-12 loaded after {0} ms" -f $twPartStart) }
+    . (Join-Path (Join-Path $script:ScriptDir "ui") "$twPart.ps1")
+    if ($twPart -ne "13-Startup") {
+        $twPartMs = $script:StartWatch.ElapsedMilliseconds - $twPartStart
+        $script:StartupParts.Add(("{0} {1} ms" -f $twPart, $twPartMs))
+        Write-WidgetLog ("Startup part {0}: {1} ms" -f $twPart, $twPartMs)
+    }
+}
 if ($script:SmokeMode) { exit ([int]$script:SmokeExit) }

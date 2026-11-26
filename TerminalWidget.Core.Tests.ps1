@@ -2799,3 +2799,33 @@ Describe "V7.1 helpers" {
         $s[3].W | Should -BeGreaterThan $s[0].W
     }
 }
+
+Describe "V7.1.1 fixes" {
+    It "formats numbers for input fields with the system decimal separator" {
+        $de = [System.Globalization.CultureInfo]::GetCultureInfo("de-AT")
+        $us = [System.Globalization.CultureInfo]::GetCultureInfo("en-US")
+        Format-EditNumber -Value 59.4 -Culture $de | Should -Be "59,4"
+        Format-EditNumber -Value 59.4 -Culture $us | Should -Be "59.4"
+        Format-EditNumber -Value 40 -Culture $de | Should -Be "40"
+        Format-EditNumber -Value 1234.567 -Culture $de | Should -Be "1234,567"
+    }
+    It "reads a formatted input number back unchanged" {
+        $de = [System.Globalization.CultureInfo]::GetCultureInfo("de-AT")
+        foreach ($v in @(59.4, 0.12345678, 1234.567, 1000000, 40)) {
+            Parse-DecimalInput (Format-EditNumber -Value $v -Culture $de) | Should -Be $v
+        }
+    }
+    It "counts only log errors of the running process" {
+        $lines = @(
+            "2026-11-24 13:00:00 [INFO] Script start (PID 11, PowerShell 5.1)",
+            "2026-11-24 13:00:01 [ERROR] old",
+            "2026-11-26 05:52:25 [INFO] Script start (PID 22, PowerShell 5.1)",
+            "2026-11-26 05:52:26 [INFO] fine")
+        Get-LogErrorCount -Lines $lines -ProcessId 22 | Should -Be 0
+        Get-LogErrorCount -Lines ($lines + "2026-11-26 06:00:00 [ERROR] new") -ProcessId 22 | Should -Be 1
+    }
+    It "counts all errors when the start line is no longer in the tail" {
+        Get-LogErrorCount -Lines @("x [ERROR] a", "x [INFO] b", "x [ERROR] c") -ProcessId 22 | Should -Be 2
+        Get-LogErrorCount -Lines @() -ProcessId 22 | Should -Be 0
+    }
+}

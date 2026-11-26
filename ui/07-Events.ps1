@@ -313,7 +313,13 @@ function Update-StatusLine {
         $shown = @($pairs | Select-Object -First 3 | ForEach-Object { "{0} {1:N4}" -f $_.Pair, $_.Rate })
         # Time of the last successful refresh, NOT a clock
         $stand = if ($null -ne $script:LastDataTime) { $script:LastDataTime.ToString("HH:mm:ss") } else { "--:--:--" }
-        $txt = if ($shown.Count -gt 0) { ($shown -join " | ") + " | Stand $stand" } else { "Stand $stand" }
+        # v7.1.1: show only as many pairs as fit (all rates stay in the tooltip)
+        $nShow = $shown.Count
+        do {
+            $txt = if ($nShow -gt 0) { (@($shown)[0..($nShow - 1)] -join " | ") + " | Stand $stand" } else { "Stand $stand" }
+            $tooWide = $lblStatus.Width -gt 0 -and [System.Windows.Forms.TextRenderer]::MeasureText($txt, $lblStatus.Font).Width -gt $lblStatus.Width
+            $nShow--
+        } while ($tooWide -and $nShow -ge 0)
         $tip = "Wechselkurse (Anzeige in $($script:Config.Currency)):"
         foreach ($fp in $pairs) { $tip += "`r`n  {0,-8} {1:N4}{2}" -f $fp.Pair, $fp.Rate, $(if ($fp.Live) { "" } else { "  (Fallback)" }) }
         $tip += "`r`nStand = Uhrzeit der letzten erfolgreichen Datenaktualisierung (gelb = veraltet)"
@@ -527,11 +533,11 @@ function Switch-ActiveTicker {
     $txtPortTicker.Text  = $clean
     if ($script:Portfolio.ContainsKey($clean)) {
         $p = $script:Portfolio[$clean]
-        $txtPortShares.Text = $p.Shares.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-        $txtPortAvg.Text    = $p.AvgPrice.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        $txtPortShares.Text = (Format-EditNumber $p.Shares)
+        $txtPortAvg.Text    = (Format-EditNumber $p.AvgPrice)
         Select-CurrencyInCombo -Combo $cmbPortCurr -Code $p.Currency
-        $txtPortBuyAmt.Text = if ($p.BuyAmount -gt 0) { $p.BuyAmount.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { "" }
-        $txtPortTarget.Text = if ($p.TargetAvg -gt 0) { $p.TargetAvg.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { "" }
+        $txtPortBuyAmt.Text = if ($p.BuyAmount -gt 0) { (Format-EditNumber $p.BuyAmount) } else { "" }
+        $txtPortTarget.Text = if ($p.TargetAvg -gt 0) { (Format-EditNumber $p.TargetAvg) } else { "" }
     } else {
         $txtPortShares.Text = ""; $txtPortAvg.Text = ""; $txtPortBuyAmt.Text = ""; $txtPortTarget.Text = ""
         $cIdx = $cmbPortCurr.Items.IndexOf($script:Config.Currency)
