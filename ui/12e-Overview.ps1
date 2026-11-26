@@ -54,6 +54,8 @@ function Get-OverviewData {
         Day = $day; DayPct = $(if ($prev -gt 0) { $day / $prev * 100.0 } else { [double]::NaN })
         Missing = $missing; Cached = $cached; Trend = $trend
         Watch = @($watch | Sort-Object @{ Expression = { [math]::Abs($_.DayPct) }; Descending = $true })
+        Dates = @(Get-EventCalendar -Events $script:Events -Symbols @(@($script:Portfolio.Keys) + @($script:Config.Watchlist)) -Days 45)
+        Goal = $(if ($missing -eq 0 -and $cached -eq 0) { Get-GoalProgress -Current $total -Target ([double]$script:Config.GoalDepotValue) } else { $null })
         News = @($script:NewsItems | Where-Object { $null -ne $_ -and $_.Title } | Sort-Object Time -Descending | Select-Object -First 12)
     }
 }
@@ -127,8 +129,15 @@ function Write-OvHero {
     $plPct = if ($D.Cost -gt 0) { $pl / $D.Cost * 100.0 } else { 0.0 }
     $plTxt = "{0}: {1}  ({2:+0.0;-0.0;0.0}%)" -f (Tr "Gesamt"), (Protect-Amount -Text ("{0:+#,##0.00;-#,##0.00;0.00} {1}" -f $pl, $D.Base) -On $priv), $plPct
     Write-OvText $G $plTxt $fontUi $(if ($pl -ge 0) { $colGreen } else { $colRed }) $x ($R.Y + (S 120)) $left (S 18)
-    if ($D.Missing -gt 0) { Write-OvText $G ((Tr "{0} ohne Kurs: zum Einstand gerechnet") -f $D.Missing) $fontUi $p.Warn $x ($R.Y + (S 138)) $left (S 16) }
-    elseif ($D.Cached -gt 0) { Write-OvText $G (Tr "Gespeicherte Kurse, Aktualisierung läuft") $fontUi $p.Warn $x ($R.Y + (S 138)) $left (S 16) }
+    # goal of the active depot (Portfolio > Ziele und Kosten); only with live prices for everything
+    if ($null -ne $D.Goal) {
+        $gy = $R.Y + (S 142); $gw = [math]::Min((S 260), $left - (S 90))
+        $tb = New-Object System.Drawing.SolidBrush($p.Input); $G.FillRectangle($tb, $x, ($gy + (S 6)), $gw, (S 5)); $tb.Dispose()
+        $fb = New-Object System.Drawing.SolidBrush($(if ($D.Goal.Reached) { $colGreen } else { $p.Accent })); $G.FillRectangle($fb, $x, ($gy + (S 6)), [int]($gw * $D.Goal.BarPct / 100.0), (S 5)); $fb.Dispose()
+        Write-OvText $G ((Tr "Ziel {0:N0}%") -f $D.Goal.Pct) $fontUi $p.Muted ($x + $gw + (S 8)) $gy (S 90) (S 16)
+    }
+    if ($D.Missing -gt 0) { Write-OvText $G ((Tr "{0} ohne Kurs: zum Einstand gerechnet") -f $D.Missing) $fontUi $p.Warn $x ($R.Y + (S 142)) $left (S 16) }
+    elseif ($D.Cached -gt 0) { Write-OvText $G (Tr "Gespeicherte Kurse, Aktualisierung läuft") $fontUi $p.Warn $x ($R.Y + (S 142)) $left (S 16) }
 
     # 5-day trend with a soft area below the line
     $cx = $x + $left + (S 16); $cw = $R.Right - $cx - (S 16)
@@ -223,7 +232,7 @@ function Write-OvAllocation {
 function Write-OvWatch {
     param($G, [System.Drawing.Rectangle]$R, $D)
     $p = $script:Pal
-    Write-OvCard $G $R (Tr "Watchlist in Bewegung") (Tr "ohne Depotwerte")
+    Write-OvCard $G $R (Tr "Watchlist in Bewegung") ""
     $rowH = S 28; $y = $R.Y + (S 38)
     $fit = [math]::Max(0, [int][math]::Floor(($R.Bottom - (S 8) - $y) / $rowH))
     foreach ($it in @($D.Watch | Select-Object -First $fit)) {
@@ -232,11 +241,32 @@ function Write-OvWatch {
         Add-OvHit $x $y $w $rowH "Ticker" $it.Sym
         Write-OvText $G $it.Sym $fontUiBold $p.Text ($x + (S 8)) $y (S 84) $rowH
         if ($w -ge (S 330) -and $null -ne $it.Spark) { Draw-MiniSparkline -g $G -Rect (New-Object System.Drawing.Rectangle(($x + (S 96)), ($y + (S 3)), (S 70), ($rowH - (S 6)))) -Values $it.Spark }
-        Write-OvText $G ("{0:N2} {1}" -f $it.Price, $it.Currency) $fontUi $p.Muted ($x + $w - (S 210)) $y (S 114) $rowH "Right"
+        $nameEnd = if ($w -ge (S 330)) { S 172 } else { S 96 }
+        if ($w - (S 92) - $nameEnd -ge (S 70)) { Write-OvText $G ("{0:N2} {1}" -f $it.Price, $it.Currency) $fontUi $p.Muted ($x + $nameEnd) $y ($w - (S 96) - $nameEnd) $rowH "Right" }
         Write-OvPill $G $it.DayPct ($x + $w - (S 86)) ($y + (S 4)) (S 80) (S 20)
         $y += $rowH
     }
     if ($D.Watch.Count -eq 0) { Write-OvText $G (Tr "Noch keine Kurse") $fontUi $p.Muted $R.X $R.Y $R.Width $R.Height "Center" }
+}
+
+function Write-OvDates {
+    param($G, [System.Drawing.Rectangle]$R, $D)
+    $p = $script:Pal
+    Write-OvCard $G $R (Tr "Nächste Termine")
+    $rowH = S 40; $y = $R.Y + (S 38)
+    $fit = [math]::Max(0, [int][math]::Floor(($R.Bottom - (S 8) - $y) / $rowH))
+    foreach ($it in @($D.Dates | Select-Object -First $fit)) {
+        $x = $R.X + (S 8); $w = $R.Width - (S 16)
+        Write-OvHover $G $x $y $w $rowH
+        Add-OvHit $x $y $w $rowH "Ticker" $it.Ticker
+        $when = if ($it.Days -eq 0) { Tr "heute" } elseif ($it.Days -eq 1) { Tr "morgen" } else { (Tr "in {0} T") -f $it.Days }
+        $soon = ($it.Days -le 7 -and $it.Kind -eq "Quartalszahlen")
+        Write-OvText $G $it.Ticker $fontUiBold $p.Text ($x + (S 8)) ($y + (S 2)) ($w - (S 90)) (S 20)
+        Write-OvText $G $when $fontUiBold $(if ($soon) { $p.Warn } else { $p.Muted }) ($x + $w - (S 84)) ($y + (S 2)) (S 76) (S 20) "Right"
+        Write-OvText $G ("{0}  ·  {1}" -f (Tr $it.Kind), (Format-IsoDateDe $it.Date)) $fontUi $p.Muted ($x + (S 8)) ($y + (S 20)) ($w - (S 16)) (S 18)
+        $y += $rowH
+    }
+    if ($D.Dates.Count -eq 0) { Write-OvText $G (Tr "Keine Termine in 45 Tagen bekannt") $fontUi $p.Muted ($R.X + (S 8)) $R.Y ($R.Width - (S 16)) $R.Height "Center" }
 }
 
 function Write-OvNews {
@@ -276,8 +306,31 @@ function Write-Overview {
     $rx = $m + $leftW + $gap
     Write-OvPositions  $G (New-Object System.Drawing.Rectangle($m, $top, $leftW, $midH)) $d
     Write-OvAllocation $G (New-Object System.Drawing.Rectangle($rx, $top, $rightW, $midH)) $d
-    Write-OvWatch      $G (New-Object System.Drawing.Rectangle($m, ($top + $midH + $gap), $leftW, $lowH)) $d
-    Write-OvNews       $G (New-Object System.Drawing.Rectangle($rx, ($top + $midH + $gap), $rightW, $lowH)) $d
+    # bottom row: watchlist, dates, news
+    $ly = $top + $midH + $gap
+    $w1 = [int](($inner - 2 * $gap) * 0.31); $w2 = [int](($inner - 2 * $gap) * 0.26); $w3 = $inner - 2 * $gap - $w1 - $w2
+    Write-OvWatch $G (New-Object System.Drawing.Rectangle($m, $ly, $w1, $lowH)) $d
+    Write-OvDates $G (New-Object System.Drawing.Rectangle(($m + $w1 + $gap), $ly, $w2, $lowH)) $d
+    Write-OvNews  $G (New-Object System.Drawing.Rectangle(($m + $w1 + $w2 + 2 * $gap), $ly, $w3, $lowH)) $d
+}
+
+function Invoke-OverviewClick {
+    param([System.Drawing.Point]$At)
+    $ov = $script:Ov
+    if ($null -eq $ov) { return "" }
+    foreach ($h in $ov.Hits.ToArray()) {
+        if (-not $h.R.Contains($At)) { continue }
+        if ($h.Kind -eq "Ticker") { $ov.Pick = [string]$h.Arg; $ov.Dlg.Close() }
+        elseif ($h.Kind -eq "News") { Open-NewsItem $h.Arg }
+        return $h.Kind
+    }
+    return ""
+}
+
+function Set-OverviewOnStart {
+    param([bool]$On)
+    $script:Config.OverviewOnStart = $On
+    Save-Config
 }
 
 function Show-OverviewDialog {
@@ -315,14 +368,7 @@ function Show-OverviewDialog {
     })
     $cv.Add_MouseClick({
         param($sender, $e)
-        $ov = $script:Ov
-        if ($null -eq $ov -or $e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
-        foreach ($h in $ov.Hits.ToArray()) {
-            if (-not $h.R.Contains($e.Location)) { continue }
-            if ($h.Kind -eq "Ticker") { $ov.Pick = [string]$h.Arg; $ov.Dlg.Close() }
-            elseif ($h.Kind -eq "News") { Open-NewsItem $h.Arg }
-            return
-        }
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { [void](Invoke-OverviewClick -At $e.Location) }
     })
     $dlg.Add_KeyDown({
         param($sender, $e)
@@ -351,4 +397,12 @@ $miOverview = New-Object System.Windows.Forms.ToolStripMenuItem((Tr "Übersicht"
 $miOverview.ShortcutKeyDisplayString = "F6"
 $miOverview.Add_Click({ Show-OverviewDialog })
 $mbView.DropDownItems.Insert(0, $miOverview)
-$mbView.DropDownItems.Insert(1, (New-Object System.Windows.Forms.ToolStripSeparator))
+$script:MbOverviewStart = New-Object System.Windows.Forms.ToolStripMenuItem((Tr "Übersicht beim Start öffnen"))
+$script:MbOverviewStart.Add_Click({ Set-OverviewOnStart (-not [bool]$script:Config.OverviewOnStart) })
+$mbView.DropDownItems.Insert(1, $script:MbOverviewStart)
+$mbView.DropDownItems.Insert(2, (New-Object System.Windows.Forms.ToolStripSeparator))
+$mbView.Add_DropDownOpening({ $script:MbOverviewStart.Checked = [bool]$script:Config.OverviewOnStart })
+# tray: reachable while the widget is hidden
+$miTrayOverview = New-Object System.Windows.Forms.ToolStripMenuItem((Tr "Übersicht (F6)"))
+$miTrayOverview.Add_Click({ if (-not $form.Visible) { $form.Show() }; Show-OverviewDialog })
+$trayMenu.Items.Insert(1, $miTrayOverview)

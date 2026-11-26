@@ -1518,7 +1518,8 @@ function Show-TickerAnalysis {
     $fnote.SetBounds($rx, (S 596), (S 516), (S 20)); $fnote.Anchor = $aB -bor $aL -bor $aR; $fnote.ForeColor = $p.Muted; $fnote.AutoEllipsis = $true
     $dlg.Controls.Add($fnote)
     $disc = New-Object System.Windows.Forms.Label
-    $disc.SetBounds((S 12), (S 626), (S 900), (S 20)); $disc.Anchor = $aB -bor $aL -bor $aR; $disc.ForeColor = $p.Muted
+    $disc.SetBounds((S 12), (S 626), (S 696), (S 20))   # 10.2: was S 900 and covered both buttons left of "Schliessen"
+    $disc.AutoEllipsis = $true; $disc.Anchor = $aB -bor $aL -bor $aR; $disc.ForeColor = $p.Muted
     $disc.Text = "Zusammenfassung klassischer Indikatoren und Kennzahlen - keine Anlageberatung."
     $dlg.Controls.Add($disc)
     $ok = New-Object System.Windows.Forms.Button

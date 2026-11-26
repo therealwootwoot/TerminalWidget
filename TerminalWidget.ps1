@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "10.0"
+$script:AppVersion    = "10.2"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1066,6 +1066,7 @@ $defaultConfig = [PSCustomObject]@{
     # v8.0: goals (display currency, 0 = no goal)
     GoalDepotValue        = 0.0
     GoalDividendYear      = 0.0
+    OverviewOnStart       = $false             # 10.2
 }
 
 # v5.3: untouched copy of the defaults ("changed" markers, reset page, settings import)
