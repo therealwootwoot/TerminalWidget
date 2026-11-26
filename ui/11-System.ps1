@@ -275,7 +275,7 @@ function Show-SettingsDialog {
     $dlg.Controls.Add($host0)
     $nav = New-Object System.Windows.Forms.ListBox
     $nav.Dock = [System.Windows.Forms.DockStyle]::Left
-    $nav.Width = S 214
+    $nav.Width = S 244
     $nav.BorderStyle = [System.Windows.Forms.BorderStyle]::None
     $nav.BackColor = $p.Card
     $nav.ForeColor = $p.Text
@@ -769,9 +769,9 @@ function Show-SettingsDialog {
         $fg = if ($q.Trim() -and $n -eq 0 -and -not $titleHit) { $pl.Border } elseif ($sel) { $pl.Text } else { $pl.Muted }
         $chg = @($sc.Reg | Where-Object { $_.Page -eq $id -and $_.Changed }).Count
         $fl = [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
-        $rT = New-Object System.Drawing.Rectangle(($e.Bounds.X + (S 14)), $e.Bounds.Y, ($e.Bounds.Width - (S 52)), $e.Bounds.Height)
+        $rT = New-Object System.Drawing.Rectangle(($e.Bounds.X + (S 14)), $e.Bounds.Y, ($e.Bounds.Width - (S 40)), $e.Bounds.Height)
         [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string]$sender.Items[$e.Index], $(if ($sel) { $fontUiBold } else { $fontUi }), $rT, $fg, $fl)
-        $rN = New-Object System.Drawing.Rectangle(($e.Bounds.Right - (S 40)), $e.Bounds.Y, (S 32), $e.Bounds.Height)
+        $rN = New-Object System.Drawing.Rectangle(($e.Bounds.Right - (S 26)), $e.Bounds.Y, (S 20), $e.Bounds.Height)
         $flR = $fl -bor [System.Windows.Forms.TextFormatFlags]::Right
         if ($q.Trim() -and $n -gt 0) { [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string]$n, $fontUiBold, $rN, $pl.Accent, $flR) }
         elseif (-not $q.Trim() -and $chg -gt 0) { [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, [string][char]0x25CF, $fontUi, $rN, $pl.Accent, $flR) }
@@ -1290,6 +1290,7 @@ function Get-HealthChecks {
     }
     # v5.5: start time, memory, polling load
     if ($null -ne $script:StartupMs) { & $add "Startzeit" $(if ([int]$script:StartupMs -gt 15000) { "WARN" } else { "INFO" }) ("{0:N1} s bis zum Fenster" -f ([int]$script:StartupMs / 1000.0)) }
+    if ($script:StartupParts) { & $add "Startzeit je Teil" "INFO" ($script:StartupParts -join ", ") }
     try {
         $pr0 = [System.Diagnostics.Process]::GetCurrentProcess()
         $mb = $pr0.WorkingSet64 / 1MB
@@ -1301,8 +1302,8 @@ function Get-HealthChecks {
     # log
     if (Test-Path $script:LogPath) {
         $lf = Get-Item $script:LogPath
-        $errN = @(Get-Content -Path $script:LogPath -Tail 400 -ErrorAction SilentlyContinue | Where-Object { $_ -match '\[ERROR\]' }).Count
-        & $add "Log" $(if ($errN -gt 0) { "WARN" } else { "OK" }) ("{0:N0} KB, {1} Fehler in den letzten 400 Zeilen" -f ($lf.Length / 1KB), $errN)
+        $errN = Get-LogErrorCount -Lines @(Get-Content -Path $script:LogPath -Tail 400 -ErrorAction SilentlyContinue) -ProcessId $PID
+        & $add "Log" $(if ($errN -gt 0) { "WARN" } else { "OK" }) ("{0:N0} KB, {1} Fehler seit diesem Start (max. 400 Zeilen)" -f ($lf.Length / 1KB), $errN)
     }
     return $checks.ToArray()
 }
@@ -1410,6 +1411,25 @@ function Show-GlossaryDialog {
     $dlg.Dispose()
 }
 
+function Set-DarkScrollBars {
+    # v7.1.1: scrollbars follow dark themes (Windows 10 1809+; otherwise unchanged)
+    param([System.Windows.Forms.Control]$Control)
+    if (-not [int]$script:Pal.DwmDark) { return }
+    try {
+        if (-not ("TwUxThemeV71" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class TwUxThemeV71 {
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    public static extern int SetWindowTheme(IntPtr hWnd, string subApp, string subId);
+}
+"@ -ErrorAction Stop
+        }
+        [void][TwUxThemeV71]::SetWindowTheme($Control.Handle, "DarkMode_Explorer", [NullString]::Value)
+    } catch { Write-WidgetLog "Dark scrollbars not available: $($_.Exception.Message)" "WARN" }
+}
+
 # v5.0: the help outgrew a message box - scrollable, resizable window
 function Show-HelpTextDialog {
     param([string]$Title, [string]$Text)
@@ -1418,6 +1438,7 @@ function Show-HelpTextDialog {
     $dlg = New-DialogForm -Title $Title -W ([math]::Min((S 640), $wa.Width - 40)) -H ([math]::Min((S 640), $wa.Height - 60))
     $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 420), (S 300))
+    if ($null -ne $form.Icon) { $dlg.Icon = $form.Icon }   # v7.1.1: not the default Windows icon
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.Multiline = $true; $tb.ReadOnly = $true; $tb.WordWrap = $false
     $tb.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
@@ -1426,6 +1447,7 @@ function Show-HelpTextDialog {
     $tb.Text = ($Text -replace "`r?`n", "`r`n")
     $tb.SetBounds((S 12), (S 10), ($dlg.ClientSize.Width - (S 24)), ($dlg.ClientSize.Height - (S 56)))
     $tb.Anchor = [System.Windows.Forms.AnchorStyles]"Top, Bottom, Left, Right"
+    $tb.Add_HandleCreated({ param($sender, $e) Set-DarkScrollBars $sender })
     $dlg.Controls.Add($tb)
     $ok = New-Object System.Windows.Forms.Button
     $ok.Text = "Schließen"

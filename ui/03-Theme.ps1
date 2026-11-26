@@ -1268,6 +1268,7 @@ function Render-ChartAndRsi {
 
     $bottomAxisAnchor = $priceRect.Bottom
     $rsiRectL = $null
+    $rsiPlotL = $null
 
     # Optional RSI Sub-Panel (v4.6: or MACD)
     if ($showRsi -and $rsiH -ge (S 42) -and [string]$script:Config.LowerPanel -eq "MACD") {
@@ -1336,9 +1337,12 @@ function Render-ChartAndRsi {
 
         $obVal = [double]$script:Config.RsiOverbought
         $osVal = [double]$script:Config.RsiOversold
-        $yOb = [int]($rsiRect.Bottom - (($obVal / 100.0) * $rsiRect.Height))
-        $y50 = [int]($rsiRect.Bottom - (0.50 * $rsiRect.Height))
-        $yOs = [int]($rsiRect.Bottom - (($osVal / 100.0) * $rsiRect.Height))
+        # v7.1.1: values are drawn below the label row, with room for the line at 0 and 100
+        $rsiPlot = New-Object System.Drawing.Rectangle($rsiRect.X, ($rsiRect.Y + (S 17)), $rsiRect.Width, ($rsiRect.Height - (S 19)))
+        $rsiPlotL = $rsiPlot
+        $yOb = [int]($rsiPlot.Bottom - (($obVal / 100.0) * $rsiPlot.Height))
+        $y50 = [int]($rsiPlot.Bottom - (0.50 * $rsiPlot.Height))
+        $yOs = [int]($rsiPlot.Bottom - (($osVal / 100.0) * $rsiPlot.Height))
 
         $g.DrawLine($c["obPen"], $rsiRect.Left, $yOb, $rsiRect.Right, $yOb)
         $g.DrawLine($c["gridPen"], $rsiRect.Left, $y50, $rsiRect.Right, $y50)
@@ -1357,7 +1361,7 @@ function Render-ChartAndRsi {
                 if (-not [double]::IsNaN($rv)) {
                     $clamped = [math]::Max(0.0, [math]::Min(100.0, $rv))
                     $rx = $rsiRect.Left + (($i / [double]($n - 1)) * $rsiRect.Width)
-                    $ry = $rsiRect.Bottom - (($clamped / 100.0) * $rsiRect.Height)
+                    $ry = $rsiPlot.Bottom - (($clamped / 100.0) * $rsiPlot.Height)
                     $validRsiPts.Add((New-Object System.Drawing.PointF([float]$rx, [float]$ry)))
                     $lastRsiVal = $rv
                 }
@@ -1407,6 +1411,7 @@ function Render-ChartAndRsi {
         CmpSym         = $cmpSym
         PriceRect      = $priceRect
         RsiRect        = $rsiRectL
+        RsiPlot        = $rsiPlotL
         PaneTop        = $padTop
         PaneTotal      = $totalH
         GapY           = $gapY

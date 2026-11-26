@@ -197,9 +197,9 @@ $cmbPortSort.BackColor = $script:Pal.Input
 $cmbPortSort.ForeColor = $script:Pal.Text
 $cmbPortSort.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $cmbPortSort.Font = $fontUi
-[void]$cmbPortSort.Items.Add("Sort: Positionswert (ab)")
-[void]$cmbPortSort.Items.Add("Sort: Gesamt G/V % (ab)")
-[void]$cmbPortSort.Items.Add("Sort: Tagesänderung %")
+[void]$cmbPortSort.Items.Add("Sort: Wert (ab)")
+[void]$cmbPortSort.Items.Add("Sort: G/V % (ab)")
+[void]$cmbPortSort.Items.Add("Sort: Tag %")
 [void]$cmbPortSort.Items.Add("Sort: Ticker (A-Z)")
 $cmbPortSort.SelectedIndex = 0
 $viewPortfolio.Controls.Add($cmbPortSort)
@@ -481,7 +481,7 @@ $lblWlTitle.Size = New-Object System.Drawing.Size((S 228), (S 20))
 $lblWlTitle.AutoEllipsis = $true
 $lblWlTitle.Font = $fontUiBold
 $lblWlTitle.ForeColor = $script:Pal.Accent
-$lblWlTitle.Text = "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)"
+$lblWlTitle.Text = "Watchlist"
 $viewWatch.Controls.Add($lblWlTitle)
 Set-Tip $lblWlTitle "Ziehen = Reihenfolge, Entf = Löschen, Rechtsklick auf einen Ticker = Aktionen und Gruppen"
 
@@ -1375,7 +1375,7 @@ Set-Tip $btnDelAlert "Markierten Alarm löschen (Entf in der Liste)"
 # Row 2: note + automatic re-arm
 $txtAlertNote = New-Object System.Windows.Forms.TextBox
 $txtAlertNote.Location = New-Object System.Drawing.Point((S 496), (S 66))
-$txtAlertNote.Size = New-Object System.Drawing.Size((S 96), (S 24))
+$txtAlertNote.Size = New-Object System.Drawing.Size((S 66), (S 24))
 $txtAlertNote.BackColor = $script:Pal.Input
 $txtAlertNote.ForeColor = $script:Pal.Text
 $txtAlertNote.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
@@ -1386,8 +1386,8 @@ Set-Tip $txtAlertNote "Notiz zum Alarm (optional, erscheint im Hinweis)"
 
 # v4.3: expiry
 $cmbAlertExp = New-Object System.Windows.Forms.ComboBox
-$cmbAlertExp.Location = New-Object System.Drawing.Point((S 596), (S 66))
-$cmbAlertExp.Size = New-Object System.Drawing.Size((S 68), (S 24))
+$cmbAlertExp.Location = New-Object System.Drawing.Point((S 566), (S 66))
+$cmbAlertExp.Size = New-Object System.Drawing.Size((S 96), (S 24))
 $cmbAlertExp.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $cmbAlertExp.BackColor = $script:Pal.Input
 $cmbAlertExp.ForeColor = $script:Pal.Text

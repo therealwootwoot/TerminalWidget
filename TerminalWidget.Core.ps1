@@ -645,6 +645,30 @@ function Parse-DecimalInput {
     return 0.0
 }
 
+function Format-EditNumber {
+    # v7.1.1: number for an input field - decimal separator of the system, no
+    # grouping, so Parse-DecimalInput reads it back unchanged
+    param([double]$Value, [System.Globalization.CultureInfo]$Culture = [System.Globalization.CultureInfo]::CurrentCulture)
+    $t = $Value.ToString("0.##########", [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($Culture.NumberFormat.NumberDecimalSeparator -eq ",") { return $t.Replace(".", ",") }
+    return $t
+}
+
+function Get-LogErrorCount {
+    # v7.1.1: errors since the start of this process. Without its start line in
+    # the given lines (long session), all of them belong to this session.
+    param($Lines, [int]$ProcessId)
+    $all = @($Lines)
+    $from = 0
+    $marker = "Script start (PID {0}," -f $ProcessId
+    for ($i = $all.Count - 1; $i -ge 0; $i--) {
+        if (([string]$all[$i]).Contains($marker)) { $from = $i; break }
+    }
+    $n = 0
+    for ($i = $from; $i -lt $all.Count; $i++) { if (([string]$all[$i]) -match '\[ERROR\]') { $n++ } }
+    return $n
+}
+
 function Format-RearmLabel {
     param([int]$Min)
     if ($Min -ge 1440) { return ("{0}T" -f [int]($Min / 1440)) }
