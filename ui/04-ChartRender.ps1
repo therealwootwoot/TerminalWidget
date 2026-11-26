@@ -503,8 +503,10 @@ $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 # 9.0: scroll bars follow the theme (they stayed white in the dark themes)
 try {
     if (-not ('TwUxTheme90' -as [type])) {
-        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class TwUxTheme90 { [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hWnd, string app, string idList); }' -ErrorAction Stop
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class TwUxTheme90 { [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hWnd, string app, string idList); [DllImport("uxtheme.dll", EntryPoint = "#135")] public static extern int SetPreferredAppMode(int mode); [DllImport("uxtheme.dll", EntryPoint = "#136")] public static extern void FlushMenuThemes(); }' -ErrorAction Stop
     }
+    # without this Windows ignores "DarkMode_Explorer"; the export exists from build 18362 on (1 = allow dark)
+    if ([Environment]::OSVersion.Version.Build -ge 18362) { [void][TwUxTheme90]::SetPreferredAppMode(1); [TwUxTheme90]::FlushMenuThemes() }
 } catch { Write-WidgetLog "Dark scroll bars unavailable: $($_.Exception.Message)" "WARN" }
 
 function Set-ScrollBarTheme {
