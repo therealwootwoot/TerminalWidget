@@ -181,7 +181,7 @@ function Update-AnalysisModel {
             $totXirr = Get-Xirr -Dates ([string[]]$d) -Amounts ([double[]]$a)
         }
     }
-    $firstFlow = if ($allD.Count -gt 0 -and $tot.Booked -gt 0) { [string](@($allD.ToArray()) | Sort-Object)[0] } else { "" }
+    $firstFlow = if ($allD.Count -gt 0 -and $tot.Booked -gt 0) { Get-EarliestDate -Dates ([string[]]$allD.ToArray()) } else { "" }
     $xirrNote = Get-XirrNote -Xirr $totXirr -FirstDate $firstFlow -Today $today
     $benchXirr = [double]::NaN
     $benchVal = [double]::NaN

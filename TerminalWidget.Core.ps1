@@ -1233,7 +1233,7 @@ function Get-DataMigrationAction {
 function Get-DataFileNames {
     # v5.5: cash, savings plans, drawings and notes travel with export / import too
     return @("config.json", "portfolio.json", "alerts.json", "transactions.json", "intraday_cache.json", "quote_cache.json", "profiles.json", "events.json", "alert-log.json",
-        "cash.json", "savingsplans.json", "drawings.json", "notes.json")
+        "cash.json", "savingsplans.json", "drawings.json", "notes.json", "news.json")
 }
 
 # ------------------------------------------------------------------------------
@@ -3038,9 +3038,15 @@ function ConvertFrom-YahooNews {
         if ($link -notmatch '^https?://') { $link = "" }
         $t = [DateTime]::MinValue
         if ($null -ne $n.providerPublishTime) { try { $t = [DateTimeOffset]::FromUnixTimeSeconds([long]$n.providerPublishTime).LocalDateTime } catch { } }
+        $img = ""
+        try {
+            $res = @($n.thumbnail.resolutions | Where-Object { $null -ne $_ -and [string]$_.url -match '^https://' } | Sort-Object { [int]$_.width })
+            if ($res.Count -gt 0) { $img = [string]$res[$res.Count - 1].url }
+        } catch { }
         $out += [PSCustomObject]@{
             Title = [string]$n.title; Publisher = [string]$n.publisher; Link = $link; Time = $t
             Tickers = @(@($n.relatedTickers) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            Summary = ""; Image = $img
         }
     }
     return @($out | Sort-Object -Property Time -Descending)
@@ -3068,10 +3074,20 @@ function Get-NewsSymbols {
 }
 
 function Get-NewsKey {
-    # De-duplication key: the link without query / anchor, else the title
+    # De-duplication key: the link without anchor and tracking parameters, else the
+    # title. v7.7: other query parameters stay (article.php?id=1 is not ?id=2).
     param($Item)
     $link = [string]$Item.Link
-    if ($link) { return ($link -replace '[?#].*$', '').TrimEnd('/').ToLowerInvariant() }
+    if ($link) {
+        $link = $link -replace '#.*$', ''
+        $base = $link; $query = ""
+        $q = $link.IndexOf('?')
+        if ($q -ge 0) { $base = $link.Substring(0, $q); $query = $link.Substring($q + 1) }
+        $keep = @($query -split '&' | Where-Object { $_ -and $_ -notmatch '^(utm_[^=]*|utm|fbclid|gclid|mc_cid|mc_eid|cmpid|ncid|ocid|\.tsrc|guccounter|guce_[^=]*)(=|$)' } | Sort-Object)
+        $key = $base.TrimEnd('/')
+        if ($keep.Count -gt 0) { $key += "?" + ($keep -join "&") }
+        return $key.ToLowerInvariant()
+    }
     return "t:" + (([string]$Item.Title).Trim() -replace '\s+', ' ').ToLowerInvariant()
 }
 
@@ -3100,6 +3116,7 @@ function Merge-NewsFeed {
                 $e = [PSCustomObject]@{
                     Key = $key; Title = ([string]$n.Title).Trim(); Publisher = [string]$n.Publisher
                     Link = [string]$n.Link; Time = $t; Syms = New-Object System.Collections.Generic.List[string]
+                    Summary = [string]$n.Summary; Image = [string]$n.Image
                 }
                 $map[$key] = $e
                 $order.Add($key)
@@ -3116,6 +3133,7 @@ function Merge-NewsFeed {
         $out += [PSCustomObject]@{
             Key = $e.Key; Title = $e.Title; Publisher = $e.Publisher; Link = $e.Link; Time = $e.Time
             Syms = @($e.Syms | Sort-Object)
+            Summary = $e.Summary; Image = $e.Image; Sources = @("yahoo"); Also = @()
         }
     }
     $sorted = @($out | Sort-Object -Property @{ Expression = { $_.Time }; Descending = $true }, @{ Expression = { $_.Title }; Descending = $false })
@@ -4858,6 +4876,15 @@ function Get-ChipLayout {
     return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
 }
 
+function Get-EarliestDate {
+    # v7.7: the earliest "yyyy-MM-dd" of a list, "" for an empty one. The @() matters:
+    # with exactly one entry, ($list | Sort-Object)[0] is the first CHARACTER.
+    param([string[]]$Dates = @())
+    $s = @(@($Dates) | Where-Object { $_ } | Sort-Object)
+    if ($s.Count -eq 0) { return "" }
+    return [string]$s[0]
+}
+
 function Get-XirrNote {
     # v7.3: why the return p.a. shows "-" ("" when there is a value). Needs 30 days since the first booking.
     param([double]$Xirr, [string]$FirstDate = "", [string]$Today = "", [int]$MinDays = 30)
@@ -5163,7 +5190,9 @@ function Get-PortableSettingKeys {
         "Currency", "AutoCurrency", "RiskFreePct",
         "ChartType", "ShowVolume", "ShowRsi", "PaneDivider", "ShowSma", "ShowVwap", "ShowBollinger", "ShowExtended", "ShowPrevClose", "LogScale",
         "UserLayouts", "GridLayouts",
-        "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds"
+        "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds",
+        "NewsSources", "NewsSourcesMigrated", "NewsYahoo", "NewsYahooNotify", "NewsViewHidden", "NewsAliases",
+        "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers"
     )
 }
 
@@ -5285,6 +5314,13 @@ function Get-DiagnosticConfig {
     }
     foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
+    }
+    # v7.7: feed addresses may carry personal tokens or tickers
+    if ($null -ne $c.PSObject.Properties["NewsSources"]) {
+        $c.NewsSources = @(@($c.NewsSources) | Where-Object { $null -ne $_ } | ForEach-Object { [PSCustomObject]@{ Host = (Get-ProviderOfUrl ([string]$_.Url -replace '\{[a-z]+\}', 'x')); On = $_.On } })
+    }
+    foreach ($k in @("NewsFeeds", "NewsAliases")) {
+        if ($null -ne $c.PSObject.Properties[$k] -and [string]$c.$k) { $c.$k = "(entfernt)" }
     }
     return $c
 }
@@ -5733,7 +5769,10 @@ function ConvertFrom-RssFeed {
             $ln = $e.SelectSingleNode("*[local-name()='link'][@rel='alternate' or not(@rel)]")
             $link = if ($null -ne $ln) { [string]$ln.GetAttribute("href") } else { "" }
             $tn = $e.SelectSingleNode("*[local-name()='updated' or local-name()='published']")
-            $out += [PSCustomObject]@{ Title = ([string]$e.SelectSingleNode("*[local-name()='title']").InnerText).Trim(); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $tn) { & $parseT $tn.InnerText } else { [DateTime]::MinValue }); Tickers = @() }
+            $sn = $e.SelectSingleNode("*[local-name()='summary']")
+            if ($null -eq $sn) { $sn = $e.SelectSingleNode("*[local-name()='content' and namespace-uri()=namespace-uri(..)]") }
+            $body = if ($null -ne $sn) { [string]$sn.InnerText } else { "" }
+            $out += [PSCustomObject]@{ Title = ([string]$e.SelectSingleNode("*[local-name()='title']").InnerText).Trim(); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $tn) { & $parseT $tn.InnerText } else { [DateTime]::MinValue }); Tickers = @(); Summary = (ConvertTo-PlainSummary $body); Image = (Get-FeedItemImage -Node $e -Html $body) }
         }
         return @($out | Where-Object { $_.Title })
     }
@@ -5745,7 +5784,10 @@ function ConvertFrom-RssFeed {
         $tn = $it.SelectSingleNode("*[local-name()='title']"); $lk = $it.SelectSingleNode("*[local-name()='link']")
         $dn = $it.SelectSingleNode("*[local-name()='pubDate' or local-name()='date']")
         $link = if ($null -ne $lk) { ([string]$lk.InnerText).Trim() } else { "" }
-        $out += [PSCustomObject]@{ Title = $(if ($null -ne $tn) { ([string]$tn.InnerText).Trim() } else { "" }); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $dn) { & $parseT $dn.InnerText } else { [DateTime]::MinValue }); Tickers = @() }
+        $sn = $it.SelectSingleNode("*[local-name()='description']")
+        if ($null -eq $sn) { $sn = $it.SelectSingleNode("*[local-name()='encoded']") }
+        $body = if ($null -ne $sn) { [string]$sn.InnerText } else { "" }
+        $out += [PSCustomObject]@{ Title = $(if ($null -ne $tn) { ([string]$tn.InnerText).Trim() } else { "" }); Publisher = $(if ($pub) { $pub } else { $Fallback }); Link = $(if ($link -match '^https?://') { $link } else { "" }); Time = $(if ($null -ne $dn) { & $parseT $dn.InnerText } else { [DateTime]::MinValue }); Tickers = @(); Summary = (ConvertTo-PlainSummary $body); Image = (Get-FeedItemImage -Node $it -Html $body) }
     }
     return @($out | Where-Object { $_.Title })
 }
@@ -6069,4 +6111,472 @@ function Test-ProviderCacheFresh {
     # provider_cache.json entries: @{ Day; Data } - refreshed once a day
     param($Entry, [string]$Day)
     return ($null -ne $Entry -and [string]$Entry.Day -eq $Day)
+}
+
+# ==============================================================================
+# v7.7: selectable news sources, matching, reading (pure logic)
+# A source: Id, Url, Name, On, Notify, Group, Ticker, Minutes (0 = global),
+# MaxAgeDays (0 = 14). "yahoo" is the built-in source id.
+# ==============================================================================
+function ConvertTo-NewsSource {
+    # any object (config JSON, OPML row, dialog row) -> a clean source, $null without a web address
+    param($In)
+    if ($null -eq $In) { return $null }
+    $url = ([string]$In.Url).Trim()
+    if ($url -notmatch '^https?://[^\s]+$') { return $null }
+    $int = { param($v, [int]$min, [int]$max) $x = 0; if (-not [int]::TryParse(([string]$v).Trim(), [ref]$x) -or $x -le 0) { return 0 }; return [math]::Max($min, [math]::Min($max, $x)) }
+    $bool = { param($v, [bool]$def) if ($null -eq $v -or [string]$v -eq "") { return $def }; if ($v -is [bool]) { return $v }; return ([string]$v -eq "True") }
+    $id = ([string]$In.Id).Trim()
+    if (-not $id -or $id -eq "yahoo") { $id = "f" + [Guid]::NewGuid().ToString("N").Substring(0, 10) }
+    return [PSCustomObject]@{
+        Id = $id; Url = $url; Name = ([string]$In.Name).Trim()
+        On = (& $bool $In.On $true); Notify = (& $bool $In.Notify $true)
+        Group = ([string]$In.Group).Trim(); Ticker = ([string]$In.Ticker).Trim().ToUpperInvariant()
+        Minutes = (& $int $In.Minutes 5 1440); MaxAgeDays = (& $int $In.MaxAgeDays 1 90)
+    }
+}
+
+function ConvertTo-NewsSourceList {
+    # clean list: invalid rows dropped, each address once, unique ids, at most Max
+    param($List, [int]$Max = 30)
+    $out = @()
+    $urls = New-Object System.Collections.Generic.HashSet[string]
+    $ids = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($e in @($List)) {
+        $s = ConvertTo-NewsSource $e
+        if ($null -eq $s -or -not $urls.Add($s.Url)) { continue }
+        if (-not $ids.Add($s.Id)) { $s.Id = "f" + [Guid]::NewGuid().ToString("N").Substring(0, 10); [void]$ids.Add($s.Id) }
+        $out += $s
+        if ($out.Count -ge $Max) { break }
+    }
+    return @($out)
+}
+
+function Add-LegacyNewsFeeds {
+    # the v5.7 text setting -> sources, added behind the existing ones (all switched on)
+    param($Sources, [string]$Text)
+    $new = @(@(ConvertTo-FeedList $Text) | ForEach-Object { [PSCustomObject]@{ Url = $_ } })
+    return @(ConvertTo-NewsSourceList (@($Sources) + $new))
+}
+
+function Get-NewsSourceLabel {
+    param($Source)
+    if ($Source.Name) { return [string]$Source.Name }
+    $h = (Get-ProviderOfUrl ([string]$Source.Url -replace '\{[a-z]+\}', 'x')) -replace '^RSS: ', ''
+    return $h
+}
+
+function Get-CompanyShortName {
+    # "ABB Ltd" -> "ABB", "NVIDIA Corporation" -> "NVIDIA" (for {name} in feed templates)
+    param([string]$Name)
+    $n = ([string]$Name).Trim()
+    $n = $n -replace '(?i)[\s,]+(inc|corp|corporation|incorporated|ag|se|plc|nv|n\.v|sa|s\.a|co|ltd|limited|group|holding|holdings|company|class [abc])\.?(?=\s|,|$)', ''
+    return $n.Trim(" ,.".ToCharArray())
+}
+
+function Get-NewsFeedRequests {
+    # sources -> requests @(@{ Url; Id; Ticker }). {ticker} / {name} make one request per
+    # ticker; the Ticker field then limits the list (comma separated), else it is a fixed ticker.
+    param($Sources, [string[]]$Symbols = @(), [hashtable]$Names = @{}, [int]$MaxPerTemplate = 15, [int]$Max = 60)
+    $out = @()
+    foreach ($s in @($Sources)) {
+        if ($null -eq $s -or -not $s.On) { continue }
+        if ([string]$s.Url -notmatch '\{(ticker|name)\}') {
+            $out += [PSCustomObject]@{ Url = [string]$s.Url; Id = [string]$s.Id; Ticker = [string]$s.Ticker }
+        } else {
+            $list = @(([string]$s.Ticker) -split '[,; ]+' | Where-Object { $_ })
+            if ($list.Count -eq 0) { $list = @($Symbols) }
+            foreach ($sym in @($list | Select-Object -First $MaxPerTemplate)) {
+                $su = ([string]$sym).ToUpperInvariant()
+                $nm = Get-CompanyShortName ([string]$Names[$su])
+                if (-not $nm) { $nm = $su -replace '\..*$', '' }
+                $u = ([string]$s.Url).Replace("{ticker}", [Uri]::EscapeDataString($su)).Replace("{name}", [Uri]::EscapeDataString($nm))
+                $out += [PSCustomObject]@{ Url = $u; Id = [string]$s.Id; Ticker = $su }
+            }
+        }
+    }
+    return @($out | Select-Object -First $Max)
+}
+
+function Get-DueNewsSources {
+    # sources whose own interval (or the global one, doubled while all markets are closed) is over
+    param($Sources, [hashtable]$LastRun = @{}, [int]$GlobalMinutes = 15, [DateTime]$Now = (Get-Date), [bool]$AllClosed = $false, [switch]$Force)
+    return @(@($Sources) | Where-Object {
+        if ($null -eq $_ -or -not $_.On) { $false }
+        elseif ($Force -or -not $LastRun.ContainsKey([string]$_.Id)) { $true }
+        else {
+            $m = if ([int]$_.Minutes -gt 0) { [int]$_.Minutes } else { Get-NewsPollMinutes -Minutes $GlobalMinutes -AllClosed $AllClosed }
+            ($Now - [DateTime]$LastRun[[string]$_.Id]).TotalSeconds -ge ($m * 60 - 20)
+        }
+    })
+}
+
+function Get-FeedPauseSeconds {
+    # per host after HTTP 429: 2, 4, 8 ... minutes, at most one hour
+    param([int]$Level = 1)
+    return [int][math]::Min(3600, 120 * [math]::Pow(2, [math]::Max(0, $Level - 1)))
+}
+
+# ---- matching headlines to tickers ----
+function Get-NewsNameTerm {
+    # company name -> @{ Word; Exact }: a long word matches in any case; a short
+    # all-capitals name (ABB, SAP, OMV) only as written. $null = nothing usable.
+    param([string]$Name)
+    $long = Get-NewsNameKey $Name
+    $first = @(([string]$Name) -split '[^\p{L}\p{Nd}]+' | Where-Object { $_ -and $_ -ne "The" })
+    if ($first.Count -gt 0 -and $first[0] -cmatch '^[A-Z]{2,3}$' -and @("AG", "SA", "SE", "NV", "CO", "ETF", "US", "UK", "EU", "AI") -cnotcontains $first[0]) {
+        return [PSCustomObject]@{ Word = [string]$first[0]; Exact = $true }
+    }
+    if ($long) { return [PSCustomObject]@{ Word = $long; Exact = $false } }
+    return $null
+}
+
+function ConvertTo-NewsAliases {
+    # lines "ABBN.SW = ABB, Asea Brown Boveri" -> @{ "ABBN.SW" = @("ABB", "Asea Brown Boveri") }
+    param([string]$Text)
+    $out = @{}
+    foreach ($line in (([string]$Text) -split '[\r\n]+')) {
+        $p = $line -split '=', 2
+        if ($p.Count -ne 2) { continue }
+        $sym = $p[0].Trim().ToUpperInvariant()
+        $words = @($p[1] -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
+        if ($sym -and $words.Count -gt 0) { $out[$sym] = @(@($out[$sym]) + $words | Where-Object { $_ }) }
+    }
+    return $out
+}
+
+function Get-NewsMatchTerms {
+    # symbols + company names + aliases -> @{ sym = @(@{ Word; Exact }) }
+    param([string[]]$Symbols = @(), [hashtable]$Names = @{}, [hashtable]$Aliases = @{})
+    $out = @{}
+    foreach ($s in @(@($Symbols) + @($Aliases.Keys))) {
+        if (-not $s) { continue }
+        $u = ([string]$s).ToUpperInvariant()
+        if ($out.ContainsKey($u)) { continue }
+        $terms = @()
+        $t = Get-NewsNameTerm ([string]$Names[$u])
+        if ($null -ne $t) { $terms += $t }
+        foreach ($a in @($Aliases[$u])) {
+            if (-not $a) { continue }
+            $exact = ([string]$a -cmatch '^[A-Z0-9.&]{2,4}$')
+            $terms += [PSCustomObject]@{ Word = $(if ($exact) { [string]$a } else { ConvertTo-SearchKey $a }); Exact = $exact }
+        }
+        if ($terms.Count -gt 0) { $out[$u] = @($terms) }
+    }
+    return $out
+}
+
+function Find-NewsSymbols {
+    # headline -> our tickers whose term appears as a whole word
+    param([string]$Title, [hashtable]$Terms = @{})
+    $folded = ConvertTo-SearchKey $Title
+    return @(@(foreach ($s in $Terms.Keys) {
+        foreach ($t in @($Terms[$s])) {
+            $rx = '(?<![\p{L}\p{Nd}])' + [regex]::Escape([string]$t.Word) + '(?![\p{L}\p{Nd}])'
+            $hit = if ($t.Exact) { [string]$Title -cmatch $rx } else { $folded -match $rx }
+            if ($hit) { [string]$s; break }
+        }
+    }) | Sort-Object -Unique)
+}
+
+function ConvertTo-FeedItems {
+    # parsed feed entries of one request -> feed items (source name, fixed ticker, matched tickers, max. age)
+    param($Entries, $Source, [string]$Ticker = "", [hashtable]$Terms = @{}, [DateTime]$Now = (Get-Date))
+    $age = if ([int]$Source.MaxAgeDays -gt 0) { [int]$Source.MaxAgeDays } else { 14 }
+    $out = @()
+    foreach ($n in @($Entries)) {
+        if ($null -eq $n -or -not $n.Title) { continue }
+        $t = if ($null -ne $n.Time) { [DateTime]$n.Time } else { [DateTime]::MinValue }
+        if ($t -gt [DateTime]::MinValue -and ($Now - $t).TotalDays -gt $age) { continue }
+        $syms = @(Find-NewsSymbols -Title ([string]$n.Title) -Terms $Terms)
+        if ($Ticker) { $syms = @(@($syms) + $Ticker.ToUpperInvariant() | Sort-Object -Unique) }
+        $out += [PSCustomObject]@{
+            Key = (Get-NewsKey $n); Title = ([string]$n.Title).Trim()
+            Publisher = $(if ($Source.Name) { [string]$Source.Name } else { [string]$n.Publisher })
+            Link = [string]$n.Link; Time = $t; Syms = @($syms)
+            Summary = [string]$n.Summary; Image = [string]$n.Image; Sources = @([string]$Source.Id); Also = @()
+        }
+    }
+    return @($out)
+}
+
+function ConvertTo-PlainSummary {
+    # description HTML -> one line of plain text
+    param([string]$Html, [int]$Max = 500)
+    if (-not $Html) { return "" }
+    $t = $Html -replace '(?is)<(script|style)\b.*?</\1>', ' ' -replace '(?s)<[^>]*>', ' '
+    $t = [System.Net.WebUtility]::HtmlDecode($t) -replace '\s+', ' '
+    $t = $t.Trim()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max - 1).TrimEnd() + [string][char]0x2026 }
+    return $t
+}
+
+function Get-FeedItemImage {
+    # media:thumbnail / media:content / image enclosure / first <img> of the text; https only
+    param($Node, [string]$Html = "")
+    if ($null -ne $Node) {
+        foreach ($xp in @(".//*[local-name()='thumbnail']", ".//*[local-name()='content' and @url]", "*[local-name()='enclosure']", "*[local-name()='link' and @rel='enclosure']")) {
+            foreach ($m in @($Node.SelectNodes($xp))) {
+                $u = [string]$m.GetAttribute("url")
+                if (-not $u) { $u = [string]$m.GetAttribute("href") }
+                $type = [string]$m.GetAttribute("type") + " " + [string]$m.GetAttribute("medium")
+                if ($u -match '^https://' -and ($m.LocalName -eq "thumbnail" -or $type -match 'image' -or $u -match '(?i)\.(jpe?g|png|gif)(\?|$)')) { return $u }
+            }
+        }
+    }
+    $mm = [regex]::Match([string]$Html, '(?is)<img\b[^>]*?\bsrc\s*=\s*["''](https://[^"'']+)["'']')
+    if ($mm.Success) {
+        $tag = $mm.Value
+        if ($tag -notmatch '(?i)(width|height)\s*=\s*["'']?1(px)?["''\s>]') { return [System.Net.WebUtility]::HtmlDecode($mm.Groups[1].Value) }
+    }
+    return ""
+}
+
+# ---- what is shown ----
+function Get-ItemSources {
+    param($Item)
+    return @(@($Item.Sources) | Where-Object { $_ })
+}
+
+function Select-NewsBySource {
+    # an item shows when one of its sources is switched on and not hidden in the "Quellen" menu
+    param($Items, [string[]]$Enabled = @(), [string[]]$Hidden = @())
+    return @(@($Items) | Where-Object {
+        if ($null -eq $_) { $false } else {
+            $src = @(Get-ItemSources $_)
+            if ($src.Count -eq 0) { $true } else { @($src | Where-Object { $Enabled -contains $_ -and $Hidden -notcontains $_ }).Count -gt 0 }
+        }
+    })
+}
+
+function Test-NewsWords {
+    # the first of Words that headline or summary contains ("" = none)
+    param($Item, [string[]]$Words = @())
+    $text = ConvertTo-SearchKey (([string]$Item.Title) + " " + ([string]$Item.Summary))
+    foreach ($w in @($Words)) { if ($w -and $text.Contains((ConvertTo-SearchKey $w))) { return [string]$w } }
+    return ""
+}
+
+function Select-NewsByRules {
+    # Include: only items with one of these words (empty = all). Exclude: hide items with one of these.
+    param($Items, [string[]]$Include = @(), [string[]]$Exclude = @())
+    $inc = @(@($Include) | Where-Object { $_ })
+    $exc = @(@($Exclude) | Where-Object { $_ })
+    return @(@($Items) | Where-Object { $null -ne $_ -and ($inc.Count -eq 0 -or (Test-NewsWords $_ $inc)) -and ($exc.Count -eq 0 -or -not (Test-NewsWords $_ $exc)) })
+}
+
+function Search-NewsItems {
+    # every word of the query must appear in headline, summary, source or tickers
+    param($Items, [string]$Query = "")
+    $words = @((ConvertTo-SearchKey $Query) -split '\s+' | Where-Object { $_ })
+    return @(@($Items) | Where-Object {
+        if ($null -eq $_) { $false } else {
+            $text = ConvertTo-SearchKey (([string]$_.Title) + " " + ([string]$_.Summary) + " " + ([string]$_.Publisher) + " " + (@($_.Syms) -join " "))
+            $all = $true
+            foreach ($w in $words) { if (-not $text.Contains($w)) { $all = $false; break } }
+            $all
+        }
+    })
+}
+
+function Merge-SimilarNews {
+    # near-identical headlines within Hours become one entry (the newest). Needs 4+ words,
+    # a word overlap of at least Threshold and the same numbers (Q2 is not Q3).
+    # The result are copies; Keys lists every merged item, Also the other sources.
+    param($Items, [double]$Threshold = 0.65, [int]$Hours = 48)
+    $groups = New-Object System.Collections.Generic.List[object]
+    $index = @{}     # word -> numbers of the groups that contain it
+    foreach ($n in @($Items)) {
+        if ($null -eq $n) { continue }
+        # plain loops: this runs for every row of the list
+        $set = New-Object System.Collections.Generic.SortedSet[string]([StringComparer]::Ordinal)
+        $numSet = New-Object System.Collections.Generic.SortedSet[string]([StringComparer]::Ordinal)
+        foreach ($w in [regex]::Split((ConvertTo-SearchKey ([string]$n.Title)), '[^\p{L}\p{Nd}]+')) {
+            if (-not $w) { continue }
+            if ($w -match '\d') { [void]$set.Add($w); [void]$numSet.Add($w) } elseif ($w.Length -ge 3) { [void]$set.Add($w) }
+        }
+        $words = @($set)
+        $nums = @($numSet) -join ","
+        $target = $null
+        if ($words.Count -ge 4) {
+            $shared = @{}
+            foreach ($w in $words) { foreach ($gi in $index[$w]) { $shared[$gi] = 1 + [int]$shared[$gi] } }
+            # enough common words at all? (overlap >= Threshold needs at least this many)
+            $need = [math]::Ceiling($Threshold * $words.Count)
+            $candidates = New-Object System.Collections.Generic.List[int]
+            foreach ($key in $shared.Keys) { if ($shared[$key] -ge $need) { $candidates.Add($key) } }
+            $candidates.Sort()
+            foreach ($gi in $candidates) {
+                $g = $groups[$gi]
+                if ($g.Nums -ne $nums) { continue }
+                if ([math]::Abs(([DateTime]$g.Item.Time - [DateTime]$n.Time).TotalHours) -gt $Hours) { continue }
+                $union = $g.Words.Count + $words.Count - $shared[$gi]
+                if ($union -gt 0 -and ($shared[$gi] / [double]$union) -ge $Threshold) { $target = $g; break }
+            }
+        }
+        if ($null -eq $target) {
+            $copy = [PSCustomObject]@{ Key = [string]$n.Key; Title = [string]$n.Title; Publisher = [string]$n.Publisher; Link = [string]$n.Link; Time = [DateTime]$n.Time
+                Syms = @($n.Syms); Summary = [string]$n.Summary; Image = [string]$n.Image; Sources = @(Get-ItemSources $n); Also = @(); Keys = @([string]$n.Key) }
+            if ($words.Count -ge 4) {
+                foreach ($w in $words) { if (-not $index.ContainsKey($w)) { $index[$w] = New-Object System.Collections.Generic.List[int] }; $index[$w].Add($groups.Count) }
+            }
+            $groups.Add([PSCustomObject]@{ Item = $copy; Words = $words; Nums = $nums })
+        } else {
+            $m = $target.Item
+            $m.Keys = @($m.Keys) + [string]$n.Key
+            $m.Syms = @(@($m.Syms) + @($n.Syms) | Where-Object { $_ } | Sort-Object -Unique)
+            $m.Sources = @(@($m.Sources) + @(Get-ItemSources $n) | Where-Object { $_ } | Sort-Object -Unique)
+            if ([string]$n.Publisher -and [string]$n.Publisher -ne $m.Publisher -and @($m.Also) -notcontains [string]$n.Publisher) { $m.Also = @($m.Also) + [string]$n.Publisher }
+            if (-not $m.Summary) { $m.Summary = [string]$n.Summary }
+            if (-not $m.Image) { $m.Image = [string]$n.Image }
+        }
+    }
+    return @($groups | ForEach-Object { $_.Item })
+}
+
+# ---- history and saved items (news.json) ----
+function ConvertTo-NewsRecord {
+    param($Item)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    return [PSCustomObject]@{ Key = [string]$Item.Key; Title = [string]$Item.Title; Publisher = [string]$Item.Publisher; Link = [string]$Item.Link
+        Time = ([DateTime]$Item.Time).ToString("yyyy-MM-ddTHH:mm:ss", $inv); Syms = @(@($Item.Syms) | Where-Object { $_ })
+        Summary = [string]$Item.Summary; Image = [string]$Item.Image; Sources = @(Get-ItemSources $Item) }
+}
+
+function ConvertFrom-NewsRecord {
+    param($Record)
+    if ($null -eq $Record -or -not $Record.Title) { return $null }
+    $t = [DateTime]::MinValue
+    if ($Record.Time -is [DateTime]) { $t = [DateTime]$Record.Time }
+    elseif ($Record.Time) { [void][DateTime]::TryParse([string]$Record.Time, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$t) }
+    return [PSCustomObject]@{ Key = [string]$Record.Key; Title = [string]$Record.Title; Publisher = [string]$Record.Publisher
+        Link = $(if ([string]$Record.Link -match '^https?://') { [string]$Record.Link } else { "" }); Time = $t
+        Syms = @(@($Record.Syms) | Where-Object { $_ }); Summary = [string]$Record.Summary; Image = [string]$Record.Image
+        Sources = @(@($Record.Sources) | Where-Object { $_ }); Also = @() }
+}
+
+function Update-NewsHistory {
+    # history + fresh items -> one list by key (fresh wins; tickers and sources are joined), newest first
+    param($History, $Fresh, [int]$MaxDays = 14, [int]$Max = 500, [DateTime]$Now = (Get-Date))
+    $map = @{}
+    foreach ($n in @($History)) { if ($null -ne $n) { $map[[string]$n.Key] = $n } }
+    $done = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($n in @($Fresh)) {
+        if ($null -eq $n) { continue }
+        $k = [string]$n.Key
+        $old = $map[$k]
+        if ($null -ne $old) {
+            $n.Syms = @(@($n.Syms) + @($old.Syms) | Where-Object { $_ } | Sort-Object -Unique)
+            $n.Sources = @(@(Get-ItemSources $n) + @(Get-ItemSources $old) | Sort-Object -Unique)
+            # an item without a date keeps the time it was first seen with
+            if ([DateTime]$n.Time -eq [DateTime]::MinValue) { $n.Time = $old.Time }
+        }
+        # never seen and no date: it counts from now (and expires like the others)
+        if ([DateTime]$n.Time -eq [DateTime]::MinValue) { $n.Time = $Now }
+        $map[$k] = $n
+    }
+    $list = @($map.Values | Where-Object { [DateTime]$_.Time -eq [DateTime]::MinValue -or ($Now - [DateTime]$_.Time).TotalDays -le $MaxDays })
+    return @($list | Sort-Object -Property @{ Expression = { [DateTime]$_.Time }; Descending = $true }, @{ Expression = { [string]$_.Title }; Descending = $false } | Select-Object -First $Max)
+}
+
+function Test-NewsUnread {
+    # read / unread marks win over the "seen since" time
+    param($Item, [DateTime]$Since, $ReadKeys = $null, $UnreadKeys = $null)
+    $keys = @(@($Item.Keys) | Where-Object { $_ })
+    if ($keys.Count -eq 0) { $keys = @([string]$Item.Key) }
+    if ($null -ne $UnreadKeys) { foreach ($k in $keys) { if ($UnreadKeys.Contains([string]$k)) { return $true } } }
+    if ($null -ne $ReadKeys -and $ReadKeys.Contains([string]$keys[0])) { return $false }
+    return ([DateTime]$Item.Time -gt $Since)
+}
+
+function ConvertTo-NewsCsv {
+    # saved items -> CSV (semicolon); cells that a spreadsheet would run as a formula are prefixed
+    param($Items)
+    $cell = { param([string]$v) if ($v -match '^[=+\-@\t\r]') { $v = "'" + $v }; '"' + $v.Replace('"', '""') + '"' }
+    $lines = @('"Zeit";"Quelle";"Ticker";"Titel";"Link"')
+    foreach ($n in @($Items)) {
+        if ($null -eq $n) { continue }
+        $time = if ([DateTime]$n.Time -gt [DateTime]::MinValue) { ([DateTime]$n.Time).ToString("yyyy-MM-dd HH:mm") } else { "" }
+        $lines += @((& $cell $time), (& $cell ([string]$n.Publisher)), (& $cell (@($n.Syms) -join " ")), (& $cell ([string]$n.Title)), (& $cell ([string]$n.Link))) -join ";"
+    }
+    return ($lines -join "`r`n") + "`r`n"
+}
+
+function Get-NewsChartMarks {
+    # news of one ticker -> @(@{ Index; Count; Text }) on the bars of a chart series
+    param($Items, [string]$Symbol, [long[]]$BarTsMs, [long]$MaxGapMs)
+    $su = ([string]$Symbol).ToUpperInvariant()
+    $by = @{}
+    if ($null -eq $BarTsMs -or $BarTsMs.Count -lt 2) { return @() }
+    foreach ($n in @($Items)) {
+        if ($null -eq $n -or [DateTime]$n.Time -eq [DateTime]::MinValue -or @($n.Syms) -notcontains $su) { continue }
+        $ms = ([DateTimeOffset]([DateTime]$n.Time)).ToUnixTimeMilliseconds()
+        if ($ms -lt $BarTsMs[0] -or $ms -gt ($BarTsMs[$BarTsMs.Count - 1] + $MaxGapMs)) { continue }
+        $i = [Array]::BinarySearch($BarTsMs, [long]$ms)
+        if ($i -lt 0) { $i = (-bnot $i) - 1 }
+        if ($i -lt 0 -or ($ms - $BarTsMs[$i]) -gt $MaxGapMs) { continue }
+        if (-not $by.ContainsKey($i)) { $by[$i] = @() }
+        $by[$i] += $n
+    }
+    return @($by.Keys | Sort-Object | ForEach-Object {
+        $list = @($by[$_])
+        $text = @($list | Select-Object -First 3 | ForEach-Object { "{0} ({1})" -f $_.Title, $_.Publisher }) -join "`r`n"
+        if ($list.Count -gt 3) { $text += "`r`n+" + ($list.Count - 3) }
+        [PSCustomObject]@{ Index = [int]$_; Count = $list.Count; Text = $text }
+    })
+}
+
+# ---- feed discovery and OPML ----
+function Find-FeedLinks {
+    # web page -> RSS / Atom addresses from its <link rel="alternate"> tags
+    param([string]$Html, [string]$BaseUrl)
+    $base = $null
+    if (-not [Uri]::TryCreate([string]$BaseUrl, [UriKind]::Absolute, [ref]$base)) { return @() }
+    $out = @()
+    foreach ($m in [regex]::Matches([string]$Html, '(?is)<link\b[^>]*>')) {
+        $tag = $m.Value
+        if ($tag -notmatch '(?i)type\s*=\s*["'']application/(rss|atom)\+xml["'']') { continue }
+        $h = [regex]::Match($tag, '(?is)\bhref\s*=\s*["'']([^"'']+)["'']')
+        if (-not $h.Success) { continue }
+        $abs = $null
+        if ([Uri]::TryCreate($base, [System.Net.WebUtility]::HtmlDecode($h.Groups[1].Value), [ref]$abs) -and $abs.Scheme -match '^https?$') { $out += $abs.AbsoluteUri }
+    }
+    return @($out | Select-Object -Unique)
+}
+
+function ConvertTo-Opml {
+    param($Sources)
+    $esc = { param($v) [System.Security.SecurityElement]::Escape([string]$v) }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<?xml version="1.0" encoding="UTF-8"?>')
+    [void]$sb.AppendLine('<opml version="2.0"><head><title>TerminalWidget Feeds</title></head><body>')
+    foreach ($s in @($Sources)) {
+        if ($null -eq $s) { continue }
+        [void]$sb.AppendLine(('  <outline type="rss" text="{0}" xmlUrl="{1}" category="{2}"/>' -f (& $esc (Get-NewsSourceLabel $s)), (& $esc $s.Url), (& $esc $s.Group)))
+    }
+    [void]$sb.AppendLine('</body></opml>')
+    return $sb.ToString()
+}
+
+function ConvertFrom-Opml {
+    # OPML -> sources (folder name or category = group); DTDs are not processed
+    param([string]$Text)
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    $set = New-Object System.Xml.XmlReaderSettings
+    $set.DtdProcessing = [System.Xml.DtdProcessing]::Ignore
+    $set.XmlResolver = $null
+    try {
+        $rd = [System.Xml.XmlReader]::Create((New-Object System.IO.StringReader(([string]$Text).TrimStart([char]0xFEFF).Trim())), $set)
+        $doc.Load($rd); $rd.Close()
+    } catch { return @() }
+    $rows = @()
+    foreach ($o in @($doc.SelectNodes("//*[local-name()='outline'][@xmlUrl]"))) {
+        $group = [string]$o.GetAttribute("category")
+        if (-not $group -and $o.ParentNode.LocalName -eq "outline") { $group = [string]$o.ParentNode.GetAttribute("text") }
+        $name = [string]$o.GetAttribute("text")
+        if (-not $name) { $name = [string]$o.GetAttribute("title") }
+        $rows += [PSCustomObject]@{ Url = [string]$o.GetAttribute("xmlUrl"); Name = $name; Group = $group }
+    }
+    return @(ConvertTo-NewsSourceList $rows)
 }

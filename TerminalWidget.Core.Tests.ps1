@@ -2897,3 +2897,73 @@ Describe "V7.5 helpers" {
         (@(Get-TickerDetailLines -Symbol "X") -join "|") | Should -Be "X|Noch keine Kursdaten."
     }
 }
+
+Describe "News sources and reading (v7.7)" {
+    It "passes the logic cases" {
+        $script:fail = New-Object System.Collections.Generic.List[string]
+        function T($name, $got, $want) { if ([string]$got -cne [string]$want) { $script:fail.Add("$name : got '$got' want '$want'") } }
+        T "one date" (Get-EarliestDate -Dates @("2026-11-02")) "2026-11-02"
+        T "two dates" (Get-EarliestDate -Dates @("2026-11-02", "2025-01-03")) "2025-01-03"
+        T "no date" (Get-EarliestDate -Dates @()) ""
+        T "xirr note one" (Get-XirrNote -Xirr ([double]::NaN) -FirstDate (Get-EarliestDate @("2026-11-02")) -Today "2026-11-26") "ab 30 Tagen (noch 6 Tage)"
+        T "key id" ((Get-NewsKey @{Link="https://a.at/x.php?id=1"}) -eq (Get-NewsKey @{Link="https://a.at/x.php?id=2"})) "False"
+        T "key utm" (Get-NewsKey @{Link="https://Y.com/1?utm_source=a#x"}) "https://y.com/1"
+        T "key utm old" (Get-NewsKey @{Link="https://y.com/1?utm=x"}) "https://y.com/1"
+        $terms = Get-NewsMatchTerms -Symbols @("ABBN.SW","SAP.DE","NVDA") -Names @{"ABBN.SW"="ABB Ltd";"SAP.DE"="SAP SE";"NVDA"="NVIDIA Corporation"}
+        T "abb" (@(Find-NewsSymbols "ABB wins order" $terms) -join ",") "ABBN.SW"
+        T "abbey" (@(Find-NewsSymbols "Abbey road and sapphire" $terms) -join ",") ""
+        T "sap+nv" (@(Find-NewsSymbols "SAP and Nvidia team up" $terms) -join ",") "NVDA,SAP.DE"
+        $al = Get-NewsMatchTerms -Symbols @() -Aliases (ConvertTo-NewsAliases "RHM.DE = Rheinmetall, RHM`nbad line")
+        T "alias" (@(Find-NewsSymbols "Rheinmetall liefert" $al) -join ",") "RHM.DE"
+        T "short name" (Get-CompanyShortName "ABB Ltd") "ABB"
+        $src = ConvertTo-NewsSourceList @([pscustomobject]@{Url="https://a.b/rss?q={name}";Ticker=""}, [pscustomobject]@{Url="ftp://x"}, [pscustomobject]@{Url="https://c.d/feed";On=$false;Minutes="2";Ticker="abbn.sw"})
+        T "sources" @($src).Count 2
+        T "minutes clamp" $src[1].Minutes 5
+        $rq = @(Get-NewsFeedRequests -Sources $src -Symbols @("ABBN.SW","NVDA") -Names @{"ABBN.SW"="ABB Ltd"})
+        T "template" (@($rq | % Url) -join " ") "https://a.b/rss?q=ABB https://a.b/rss?q=NVDA"
+        T "legacy" @(Add-LegacyNewsFeeds -Sources @() -Text "https://a.b/1`r`nhttps://a.b/2").Count 2
+        T "legacy one" @(Add-LegacyNewsFeeds -Sources @() -Text "https://a.b/1").Count 1
+        T "due" @(Get-DueNewsSources -Sources $src -LastRun @{ $src[0].Id = (Get-Date) }).Count 0
+        T "force" @(Get-DueNewsSources -Sources $src -LastRun @{ $src[0].Id = (Get-Date) } -Force).Count 1
+        $rss = '<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><title>W</title><item><title>A &amp; B</title><link>https://x.at/1</link><pubDate>Thu, 26 Nov 2026 09:00:00 GMT</pubDate><description>&lt;p&gt;Hallo &lt;b&gt;Welt&lt;/b&gt; &amp;amp; mehr&lt;/p&gt;</description><media:thumbnail url="https://x.at/a.jpg"/></item></channel></rss>'
+        $e = @(ConvertFrom-RssFeed -Text $rss)
+        T "summary" $e[0].Summary "Hallo Welt & mehr"
+        T "image" $e[0].Image "https://x.at/a.jpg"
+        $atom = '<feed xmlns="http://www.w3.org/2005/Atom"><title>F</title><entry><title>T</title><link href="https://x.y/1"/><updated>2026-11-26T10:00:00Z</updated><summary type="html">&lt;img src="https://x.y/p.png"&gt;Text</summary></entry></feed>'
+        $a = @(ConvertFrom-RssFeed -Text $atom); T "atom sum" $a[0].Summary "Text"; T "atom img" $a[0].Image "https://x.y/p.png"
+        $now = [DateTime]"2026-11-26 12:00"
+        $items = @(ConvertTo-FeedItems -Entries $e -Source $src[0] -Ticker "ABBN.SW" -Now $now)
+        T "fixed ticker" (@($items[0].Syms) -join ",") "ABBN.SW"
+        T "src filter on" @(Select-NewsBySource -Items $items -Enabled @($src[0].Id)).Count 1
+        T "src filter off" @(Select-NewsBySource -Items $items -Enabled @("yahoo")).Count 0
+        T "src hidden" @(Select-NewsBySource -Items $items -Enabled @($src[0].Id) -Hidden @($src[0].Id)).Count 0
+        T "include" @(Select-NewsByRules -Items $items -Include @("welt")).Count 1
+        T "exclude" @(Select-NewsByRules -Items $items -Exclude @("welt")).Count 0
+        T "search" @(Search-NewsItems -Items $items -Query "hallo abbn").Count 1
+        T "search no" @(Search-NewsItems -Items $items -Query "hallo xyz").Count 0
+        function N($k,$t,$p,$h) { [pscustomobject]@{Key=$k;Title=$t;Publisher=$p;Link="";Time=$now.AddHours(-$h);Syms=@("NVDA");Summary="";Image="";Sources=@($p);Also=@()} }
+        $m = @(Merge-SimilarNews @((N 1 "Nvidia shares jump after record quarterly results" "A" 1), (N 2 "Nvidia shares jump after record quarterly results today" "B" 2), (N 3 "Apple unveils new phone in autumn event" "C" 3)))
+        T "merge" $m.Count 2; T "also" (@($m[0].Also) -join ",") "B"; T "keys" @($m[0].Keys).Count 2
+        $q = @(Merge-SimilarNews @((N 1 "Nvidia reports Q2 results above expectations" "A" 1), (N 2 "Nvidia reports Q3 results above expectations" "B" 2)))
+        T "numbers differ" $q.Count 2
+        $h = @(Update-NewsHistory -History @((N 1 "old" "A" 1), (N 9 "ancient" "A" 900)) -Fresh @((N 1 "new" "B" 1)) -Now $now)
+        T "history" $h.Count 1; T "history src" (@($h[0].Sources) -join ",") "A,B"
+        $rt = ConvertFrom-NewsRecord ((ConvertTo-Json -InputObject (ConvertTo-NewsRecord $h[0]) -Depth 5) | ConvertFrom-Json)
+        T "roundtrip time" $rt.Time.ToString("s") $h[0].Time.ToString("s"); T "roundtrip src" @($rt.Sources).Count 2
+        $read = New-Object System.Collections.Generic.HashSet[string]; [void]$read.Add("1")
+        T "read mark" (Test-NewsUnread -Item $h[0] -Since $now.AddDays(-5) -ReadKeys $read) "False"
+        T "unread mark" (Test-NewsUnread -Item $h[0] -Since $now -UnreadKeys $read) "True"
+        T "csv formula" ((ConvertTo-NewsCsv @((N 1 "=cmd" "A" 1))) -match '"''=cmd"') "True"
+        $bars = [long[]]@(0..3 | % { ([DateTimeOffset]$now.AddHours(-4 + $_)).ToUnixTimeMilliseconds() })
+        $mk = @(Get-NewsChartMarks -Items @((N 1 "x" "A" 1.5), (N 2 "y" "A" 1.2), (N 3 "z" "A" 100)) -Symbol "nvda" -BarTsMs $bars -MaxGapMs 3600000)
+        T "marks" ("{0}:{1}:{2}" -f $mk.Count, $mk[0].Index, $mk[0].Count) "1:2:2"
+        T "discover" (@(Find-FeedLinks '<link rel="alternate" type="application/rss+xml" href="/feed.xml">' "https://s.at/news") -join "") "https://s.at/feed.xml"
+        $o = ConvertFrom-Opml (ConvertTo-Opml $src)
+        T "opml" @($o).Count 2
+        T "opml dtd" @(ConvertFrom-Opml '<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]><opml><body><outline text="&e;" xmlUrl="https://a.b"/></body></opml>').Count 0
+        $cfg = [pscustomobject]@{ NewsSources = $src; NewsFeeds = "https://a.b/?token=SECRET"; NewsAliases = "A=B" }
+        T "diag no token" ((ConvertTo-Json (Get-DiagnosticConfig $cfg) -Depth 6) -match 'SECRET|a\.b/rss') "False"
+        T "name key kept" (Get-NewsNameKey "NVIDIA Corporation") "nvidia"
+        ($script:fail -join "`n") | Should -BeNullOrEmpty
+    }
+}
