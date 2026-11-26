@@ -816,6 +816,13 @@ function Style-DataGrid {
     $alt = New-Object System.Windows.Forms.DataGridViewCellStyle
     $alt.BackColor = if ([bool]$script:Config.ZebraRows) { Get-MixColor -A $script:Pal.Text -B $script:Pal.Card -T 0.035 } else { $script:Pal.Card }
     $Grid.AlternatingRowsDefaultCellStyle = $alt
+    # 9.0/10.0: theme the grid's own scroll bars when they become visible
+    foreach ($sb in $Grid.Controls) {
+        if ($sb -is [System.Windows.Forms.ScrollBar] -and -not $sb.AccessibleDescription) {
+            $sb.AccessibleDescription = "tw-themed"
+            $sb.Add_VisibleChanged({ param($sender, $e) if ($sender.Visible) { Set-ScrollBarTheme $sender } })
+        }
+    }
 }
 
 # ==============================================================================

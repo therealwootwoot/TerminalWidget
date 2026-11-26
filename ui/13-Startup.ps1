@@ -399,7 +399,7 @@ $script:GlobalKeyHandler = {
     # Other Ctrl/Alt combos (Ctrl+C, Alt+F4, ...) are never widget shortcuts
     if ($e.Control -or $e.Alt) { return }
     $ac = $sender.ActiveControl
-    $isFKey = $e.KeyCode -in @([System.Windows.Forms.Keys]::F1, [System.Windows.Forms.Keys]::F2, [System.Windows.Forms.Keys]::F3, [System.Windows.Forms.Keys]::F5)
+    $isFKey = $e.KeyCode -in @([System.Windows.Forms.Keys]::F1, [System.Windows.Forms.Keys]::F2, [System.Windows.Forms.Keys]::F3, [System.Windows.Forms.Keys]::F5, [System.Windows.Forms.Keys]::F6)
     # v4.9: F4 = News, except in a drop-down (F4 opens it there, as in every Windows list)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::F4 -and -not ($ac -is [System.Windows.Forms.ComboBox])) { $isFKey = $true }
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::F9) { $isFKey = $true }
@@ -428,6 +428,7 @@ $script:GlobalKeyHandler = {
         ([System.Windows.Forms.Keys]::F2) { Invoke-TabClick -TabName "Portfolio" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F3) { Invoke-TabClick -TabName "Watchlist" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F4) { Invoke-TabClick -TabName "News" -ForceFull ([bool]$e.Shift); $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::F6) { Show-OverviewDialog; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F9) { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode); $e.Handled = $true }
         ([System.Windows.Forms.Keys]::F5) {
             Refresh-AllMarketData -Force; Evaluate-GlobalAlerts; Update-AllUiViews; $e.Handled = $true
@@ -1281,6 +1282,16 @@ function Invoke-SmokeTest {
     $script:SmokeShot = $shot
     [void](Invoke-TerminalCommand "STYLE FRESH")
     Invoke-SmokeStep "Design ticker analysis" { & $probeRun { Show-TickerAnalysis "NVDA" } { & $script:SmokeShot "07-fresh-ticker-analysis" ([System.Windows.Forms.Form]::ActiveForm); "" } 8000 } 10000
+    Invoke-SmokeStep "V10 overview" { & $probeRun { Show-OverviewDialog } {
+        if ($null -eq $script:Ov) { return "window not open" }
+        $script:Ov.Canvas.Refresh()
+        if ($script:Ov.Hits.Count -lt 3) { return "overview rows: $($script:Ov.Hits.Count)" }
+        & $script:SmokeShot "22-overview" $script:Ov.Dlg
+        $keepT = $script:Config.Theme; $script:Config.Theme = "Light"; $script:Pal = Get-ThemeColors; $script:Ov.Canvas.BackColor = $script:Pal.BodyBg; $script:Ov.Canvas.Refresh()
+        & $script:SmokeShot "23-overview-light" $script:Ov.Dlg
+        $script:Config.Theme = $keepT; $script:Pal = Get-ThemeColors
+        return ""
+    } 2500 } 4000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
