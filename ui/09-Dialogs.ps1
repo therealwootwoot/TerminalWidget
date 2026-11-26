@@ -1629,6 +1629,7 @@ function Show-CalendarDialog {
         Switch-ActiveTicker -NewTicker ([string]$Tag) -SkipResolve $true
     } -OnShown {
         $ic = $script:InfoCtl
+        Add-CalendarExportButton
         $miss = @($ic.Syms | Where-Object { Test-EventsStale -Entry $script:Events[$_] })
         $foot = "Termine von Yahoo Finance, täglich aktualisiert. Doppelklick = Ticker öffnen."
         Set-InfoRows -Rows (Get-CalendarRows -Symbols $ic.Syms -Days $ic.Days) -Footer $(if ($miss.Count -gt 0 -and -not $script:WorkerShared.CrumbFailed) { "Aktualisiere Termine für {0} Ticker ..." -f $miss.Count } else { $foot })
@@ -1831,8 +1832,8 @@ function Invoke-TerminalCommand {
             "TOUR"   { Show-WelcomeTour }
             "THEME"  {
                 if (-not $arg0) { $btnThemeCycle.PerformClick(); return "" }
-                $tn = @(Get-ThemeNames | Where-Object { $_.ToUpper() -eq $arg0 })
-                if ($tn.Count -eq 0) { return "Theme: " + ((Get-ThemeNames) -join " / ") }
+                $tn = @(Get-AllThemeNames | Where-Object { $_.ToUpper() -eq $arg0 })
+                if ($tn.Count -eq 0) { return "Theme: " + ((Get-AllThemeNames) -join " / ") }
                 $script:Config.Theme = $tn[0]
                 Save-JsonState -Path $script:ConfigPath -Data $script:Config
                 Apply-ThemeToAllControls

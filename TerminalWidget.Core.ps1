@@ -1073,6 +1073,7 @@ function Get-SnoozeUntil {
         "1h"       { return $Now.AddHours(1) }
         "4h"       { return $Now.AddHours(4) }
         "Tomorrow" { return $Now.Date.AddDays(1).AddHours(8) }
+        "Week"     { return $Now.Date.AddDays(7).AddHours(8) }
         default    { return [DateTime]::MinValue }
     }
 }
@@ -4280,6 +4281,22 @@ function Get-WatchGroupSymbols {
     return @($wl | Where-Object { $set.Contains($_) })
 }
 
+function ConvertTo-FlatWatchGroups {
+    # v8.0: before 8.0 the group list could be saved as a list inside a list
+    # (and the next change then merged the groups). Returns a flat, clean list.
+    param($Groups)
+    $out = @()
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Groups)
+    while ($stack.Count -gt 0) {
+        $g = $stack.Pop()
+        if ($null -eq $g) { continue }
+        if ($g -is [System.Array]) { for ($i = $g.Count - 1; $i -ge 0; $i--) { $stack.Push($g[$i]) }; continue }
+        if ($g.Name) { $out += [PSCustomObject]@{ Name = [string]$g.Name; Symbols = @(@($g.Symbols) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpperInvariant() }) } }
+    }
+    return ,$out
+}
+
 function Set-WatchGroupMember {
     # Adds (In = $true) or removes a ticker in a group; a new name creates the
     # group. Returns the new group list (name order kept, empty groups stay).
@@ -5192,7 +5209,9 @@ function Get-PortableSettingKeys {
         "UserLayouts", "GridLayouts",
         "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds",
         "NewsSources", "NewsSourcesMigrated", "NewsYahoo", "NewsYahooNotify", "NewsViewHidden", "NewsAliases",
-        "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers"
+        "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers",
+        "ColorRules", "CustomThemes", "OwnTargets", "ColumnSets", "ColumnSetMap", "KeyMap", "Favorites", "KpiTiles", "UserProfiles",
+        "AlertTemplates", "EarningsLeadDays", "ExDivLeadDays", "SummaryAuto", "GoalDepotValue", "GoalDividendYear"
     )
 }
 
@@ -5312,7 +5331,7 @@ function Get-DiagnosticConfig {
     foreach ($k in @("PushTokenEnc", "PushTopic", "PushChatId", "PushServer", "TwelveDataKeyEnc", "FinnhubKeyEnc")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = $(if ([string]$c.$k) { "(entfernt)" } else { "" }) }
     }
-    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups")) {
+    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups", "OwnTargets", "UserProfiles", "GoalDepotValue", "GoalDividendYear", "AlertTemplates")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
     }
     # v7.7: feed addresses may carry personal tokens or tickers

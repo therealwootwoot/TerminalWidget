@@ -62,12 +62,12 @@ function Render-ChartOverlay {
 
     # Vertical line through the bar, horizontal line follows the mouse
     $g.DrawLine($c["crossPen"], $hx, $pr.Top, $hx, $L.BottomAxis)
-    $hy = if ($inPrice) { $my } else { [int]$cy }
+    $hy = if ($inPrice) { $my } else { [int][math]::Max($pr.Top, [math]::Min($pr.Bottom, $cy)) }
     $g.DrawLine($c["crossPen"], $pr.Left, $hy, $pr.Right, $hy)
 
     # Marker on the close of the hovered bar
     $mk = [float](S 3)
-    $g.FillEllipse($c["hudFg"], ([float]$hx - $mk), ($cy - $mk), (2 * $mk), (2 * $mk))
+    if ($cy -ge $pr.Top -and $cy -le $pr.Bottom) { $g.FillEllipse($c["hudFg"], ([float]$hx - $mk), ($cy - $mk), (2 * $mk), (2 * $mk)) }
 
     # Y-axis tag: price at the horizontal line
     $tagH = S 18
@@ -178,6 +178,12 @@ $script:ChartSignature  = ""
 $script:ChartBmpCache   = @{}
 $script:LastChartLayout = $null
 $script:HoverY          = -1
+# v8.0: price axis (1 / 0 = automatic)
+$script:PriceScale      = 1.0
+$script:PriceShift      = 0.0
+$script:PriceScaleKey   = ""
+$script:PriceDrag       = $null
+$script:OnPriceAxis     = $false
 
 function Update-ChartCacheSignature {
     # Bumps the version only when something the static chart shows changed
@@ -201,6 +207,7 @@ function Update-ChartCacheSignature {
         $lblLivePrice.Text, $lblDayChange.Text, $lblDayAbs.Text, $lblExtQuote.Text, $lblHeaderName.Text,
         $cfg.ShowLevels, (@(Get-ChartLevels | ForEach-Object { "{0:N4}{1}{2}" -f $_.Price, $_.Kind, $_.Hit }) -join ","),
         $cfg.CompareTicker, $script:CompareSig, $script:CompareMoreSig, $script:ViewCount, $script:ViewOffset,
+        $script:PriceScale, $script:PriceShift,
         $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType, [bool]$cfg.ShowPrevClose,
         [bool]$cfg.ShowNewsMarkers, $(if ([bool]$cfg.ShowNewsMarkers) { [string]$script:NewsVersion } else { "" }),
         [bool]$cfg.ShowTrades, $script:Transactions.Count, [string]$cfg.ChartType, $script:DrawingsSig,
@@ -1621,7 +1628,22 @@ $script:ChartMouseMoveHandler = {
         }
         return
     }
-    if (Test-PaneDividerHit -L $L -Y $e.Y) { if ($sender.Cursor -ne [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS } }
+    if ($null -ne $script:PriceDrag) {
+        $h = [double][math]::Max(1, $L.PriceRect.Height)
+        if ($script:PriceDrag.Sw.ElapsedMilliseconds -gt 30 -and [math]::Abs($e.Y - $script:PriceDrag.LastY) -ge 2) {
+            $script:PriceDrag.LastY = $e.Y
+            $script:PriceDrag.Sw.Restart()
+            # the grabbed price follows the mouse
+            Set-PriceScale -Shift ($script:PriceDrag.Shift + (($e.Y - $script:PriceDrag.Y) / $h) * $script:PriceScale)
+        }
+        return
+    }
+    if (Test-PriceAxisHit -L $L -X $e.X -Y $e.Y) {
+        $script:OnPriceAxis = $true
+        if ($sender.Cursor -ne [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS }
+    } else { $script:OnPriceAxis = $false }
+    if ($script:OnPriceAxis) { }
+    elseif (Test-PaneDividerHit -L $L -Y $e.Y) { if ($sender.Cursor -ne [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS } }
     elseif ($sender.Cursor -eq [System.Windows.Forms.Cursors]::SizeNS) { $sender.Cursor = [System.Windows.Forms.Cursors]::Default }
     if ($null -ne $script:DrawPending) { $script:DrawMouse = Get-ChartPointAt -L $L -X $e.X -Y $e.Y; $sender.Invalidate() }
     Update-ChartLegendTip -Canvas $sender -L $L -X $e.X -Y $e.Y
@@ -1650,6 +1672,10 @@ $script:ChartMouseDownHandler = {
     if ($null -eq $L) { return }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and (Test-PaneDividerHit -L $L -Y $e.Y)) {
         $script:PaneDrag = @{ Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+        return
+    }
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and -not $script:DrawMode -and (Test-PriceAxisHit -L $L -X $e.X -Y $e.Y)) {
+        $script:PriceDrag = @{ Y = $e.Y; LastY = $e.Y; Shift = $script:PriceShift; Sw = [System.Diagnostics.Stopwatch]::StartNew() }
         return
     }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
@@ -1707,6 +1733,7 @@ $script:ChartMouseDownHandler = {
 }
 $script:ChartMouseUpHandler = {
     param($sender, $e)
+    if ($null -ne $script:PriceDrag) { $script:PriceDrag = $null; return }
     if ($null -ne $script:PaneDrag) {
         $script:PaneDrag = $null
         Refresh-ChartView
@@ -1738,6 +1765,12 @@ $script:ChartMouseLeaveHandler = {
 $script:ChartWheelHandler = {
     param($sender, $e)
     $mods = [System.Windows.Forms.Control]::ModifierKeys
+    # v8.0: the wheel over the price axis stretches / squeezes the price scale
+    $Lw = Get-CanvasLayout -Canvas $sender
+    if (Test-PriceAxisHit -L $Lw -X $e.X -Y $e.Y) {
+        Set-PriceScale -Scale ($script:PriceScale * $(if ($e.Delta -gt 0) { 1.0 / 1.15 } else { 1.15 }))
+        return
+    }
     if (($mods -band [System.Windows.Forms.Keys]::Control) -eq [System.Windows.Forms.Keys]::Control) {
         Zoom-Chart -Canvas $sender -Delta $e.Delta -X $e.X
         return
@@ -1759,6 +1792,7 @@ $pnlChartCanvas.Add_MouseDown($script:ChartMouseDownHandler)
 $pnlChartCanvas.Add_MouseUp($script:ChartMouseUpHandler)
 $pnlChartCanvas.Add_MouseLeave($script:ChartMouseLeaveHandler)
 $pnlChartCanvas.Add_MouseWheel($script:ChartWheelHandler)
-$pnlChartCanvas.Add_DoubleClick({ Toggle-ChartFullscreen })
+# a double click on the price axis goes back to automatic
+$pnlChartCanvas.Add_DoubleClick({ if ($script:OnPriceAxis) { Reset-PriceScale } else { Toggle-ChartFullscreen } })
 $btnFullscreen.Add_Click({ Toggle-ChartFullscreen })
 

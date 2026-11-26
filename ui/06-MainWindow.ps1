@@ -608,6 +608,7 @@ function Apply-Layout {
     Update-LayoutButton
     Update-TapeTimer
     $pnlHeader.Invalidate()
+    if ($script:CustomReady) { Update-LinkedColumnSet }
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
 }
 
@@ -828,6 +829,7 @@ function Refresh-PortfolioGrid {
             $dgvPortfolio.Rows[$idx].Cells[0].ToolTipText = "Quartalszahlen {0} ({1})" -f $eb.Text, (Format-IsoDateDe $eb.Date)
         }
     }
+    if ($script:CustomReady) { Add-PortfolioRuleColors }
     Restore-GridState -Grid $dgvPortfolio -State $gridState
     } finally {
         $script:SuppressGridSelection = $false
@@ -1059,6 +1061,7 @@ function Refresh-WatchlistAndAlerts {
             $dgvWatchlist.Rows[$skI].Cells[0].ToolTipText = "Kurs wird geladen ..."
         }
     }
+    if ($script:CustomReady) { Add-WatchlistExtras }
     Restore-GridState -Grid $dgvWatchlist -State $gridState
     } finally {
         $script:SuppressGridSelection = $false
@@ -1106,6 +1109,15 @@ function Get-PortfolioDayTotals {
 }
 
 function Get-AlertState {
+    # v8.0: a combined alert needs both conditions at the same time
+    param($Alert)
+    $st = Get-AlertSingleState -Alert $Alert
+    if (-not [string]$Alert.Condition2) { return $st }
+    $second = [PSCustomObject]@{ Ticker = [string]$Alert.Ticker; Condition = [string]$Alert.Condition2; TargetPrice = [double]$Alert.Target2; Currency = [string]$Alert.Currency2; Peak = 0.0 }
+    return (Join-AlertEvaluations -First $st -Second (Get-AlertSingleState -Alert $second))
+}
+
+function Get-AlertSingleState {
     # Current value of what an alert watches + whether its condition is met
     # (v4.3: the check itself is Get-AlertEvaluation in Core). Ok = $false
     # when there is no live data (yet).
@@ -1141,7 +1153,7 @@ function Get-AlertState {
 }
 
 
-function Format-AlertLine {
+function Format-AlertBody {
     param($Alert)
     $kind = Get-AlertKind $Alert.Condition
     $snz = Test-AlertSnoozed -Alert $Alert
@@ -1160,6 +1172,18 @@ function Format-AlertLine {
         "PFPCT"  { "{0} {1:N2}%" -f $Alert.Condition, $t }
         default  { "{0} {1:N2} {2}" -f $Alert.Condition, $t, $Alert.Currency }
     }
+    return $body
+}
+
+function Format-AlertLine {
+    param($Alert)
+    $kind = Get-AlertKind $Alert.Condition
+    $snz = Test-AlertSnoozed -Alert $Alert
+    $flag = if (Test-AlertExpired -Alert $Alert) { "[EXP]" } elseif ($snz) { "[ZZZ]" } elseif ($Alert.Triggered) { "[HIT]" } else { "[ACT]" }
+    $body = Format-AlertBody -Alert $Alert
+    if ([string]$Alert.Condition2) {
+        $body += " & " + (Format-AlertBody -Alert ([PSCustomObject]@{ Condition = [string]$Alert.Condition2; TargetPrice = [double]$Alert.Target2; Currency = [string]$Alert.Currency2; Peak = 0.0 }))
+    }
     $re = if ([int]$Alert.RearmMin -gt 0) { " (R{0})" -f (Format-RearmLabel ([int]$Alert.RearmMin)) } else { "" }
     $ex = [string]$Alert.ExpiresAt
     $exp = if ($ex.Length -ge 10) { " bis {0}.{1}." -f $ex.Substring(8, 2), $ex.Substring(5, 2) } else { "" }
@@ -1175,7 +1199,7 @@ function Format-AlertLine {
 function Add-WidgetAlert {
     # Central place to create an alert (alert panel + chart context menu)
     param([string]$Ticker, [string]$Condition, [double]$Target, [string]$Currency, [string]$Note = "", [int]$RearmMin = 0,
-          [string]$ExpiresAt = "", [bool]$Push = $true, [switch]$NoConfirm)
+          [string]$ExpiresAt = "", [bool]$Push = $true, [string]$Condition2 = "", [double]$Target2 = 0, [string]$Currency2 = "", [switch]$NoConfirm)
     $a = [PSCustomObject]@{
         Id          = [Guid]::NewGuid().ToString("N")
         Ticker      = $Ticker.ToUpper()
@@ -1189,6 +1213,11 @@ function Add-WidgetAlert {
         ExpiresAt   = $ExpiresAt
         Peak        = 0.0
         Push        = $Push
+    }
+    if ($Condition2) {
+        $a | Add-Member -NotePropertyName Condition2 -NotePropertyValue $Condition2
+        $a | Add-Member -NotePropertyName Target2 -NotePropertyValue $Target2
+        $a | Add-Member -NotePropertyName Currency2 -NotePropertyValue $Currency2
     }
     $st = Get-AlertState -Alert $a
     # trailing stop: the high starts at today's price

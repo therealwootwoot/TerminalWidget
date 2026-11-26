@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.7"
+$script:AppVersion    = "8.0"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1046,6 +1046,26 @@ $defaultConfig = [PSCustomObject]@{
     AnalysisShowInvested  = $true
     ConcentrationWarnPct  = 20
     Watchlist            = @("NVDA", "ABBN.SW", "MSFT", "AAPL", "AMD", "AMZN", "AVGO")
+    # v8.0: own looks and handling
+    ColorRules            = @()                # empty = the ready-made rules (all off)
+    CustomThemes          = @()
+    OwnTargets            = $null              # ticker -> own target price
+    ColumnSets            = @()
+    ColumnSetMap          = $null              # "Layout:x" / "Group:y" -> column set name
+    KeyMap                = $null              # action -> own shortcut
+    Favorites             = @()
+    KpiTiles              = @()                # empty = all, default order
+    UserProfiles          = @()
+    ActiveProfile         = ""
+    # v8.0: alerts and notices
+    AlertTemplates        = @()
+    EarningsLeadDays      = 1                  # -1 = off
+    ExDivLeadDays         = -1
+    SummaryAuto           = "Off"              # Off / Daily / Weekly
+    SummaryLastShown      = ""
+    # v8.0: goals (display currency, 0 = no goal)
+    GoalDepotValue        = 0.0
+    GoalDividendYear      = 0.0
 }
 
 # v5.3: untouched copy of the defaults ("changed" markers, reset page, settings import)
@@ -1088,7 +1108,9 @@ if ([string]::IsNullOrWhiteSpace($script:Config.ActiveTicker)) { $script:Config.
 if ([string]$script:Config.Currency -notin @(Get-DisplayCurrencies)) { $script:Config.Currency = "EUR" }
 if ($script:Config.ChartType -notin @("Line", "Candle", "HA")) { $script:Config.ChartType = "Line" }
 if ($script:Config.ActiveTab -notin @("Chart", "Portfolio", "Watchlist", "News")) { $script:Config.ActiveTab = "Chart" }
-if ($script:Config.Theme -notin @(Get-ThemeNames)) { $script:Config.Theme = "Dark" }
+# v8.0: repair a group list saved as a list inside a list
+$script:Config.WatchGroups = ConvertTo-FlatWatchGroups $script:Config.WatchGroups
+if ($script:Config.Theme -notin @(Get-ThemeNames) -and @($script:Config.CustomThemes | Where-Object { $null -ne $_ -and [string]$_.Name -eq [string]$script:Config.Theme }).Count -eq 0) { $script:Config.Theme = "Dark" }
 # v4.0 layouts: a v3 config only knows CompactMode
 if ($script:Config.PSObject.Properties["Layout"] -and $cfgSchema -lt 4 -and [bool]$script:Config.CompactMode) { $script:Config.Layout = "Compact" }
 if ([string]$script:Config.Layout -notin @(Get-LayoutNames)) { $script:Config.Layout = "Standard" }
@@ -1221,6 +1243,12 @@ foreach ($a in $rawAlerts) {
         # v4.9.5 pause and v5.0 trend line points survive a restart
         $na = $script:Alerts[$script:Alerts.Count - 1]
         if ($a.SnoozeUntil) { $na | Add-Member -NotePropertyName SnoozeUntil -NotePropertyValue ([string]$a.SnoozeUntil) -Force }
+        # v8.0: second condition of a combined alert
+        if ($a.Condition2) {
+            $na | Add-Member -NotePropertyName Condition2 -NotePropertyValue ([string]$a.Condition2) -Force
+            $na | Add-Member -NotePropertyName Target2 -NotePropertyValue ([double]$a.Target2) -Force
+            $na | Add-Member -NotePropertyName Currency2 -NotePropertyValue ([string]$a.Currency2) -Force
+        }
         if ([string]$a.Condition -like "Trend*") {
             foreach ($f in @("T1", "T2")) { $na | Add-Member -NotePropertyName $f -NotePropertyValue ([long]$a.$f) -Force }
             foreach ($f in @("P1", "P2")) { $na | Add-Member -NotePropertyName $f -NotePropertyValue ([double]$a.$f) -Force }
@@ -1682,14 +1710,14 @@ function New-EventEntry {
     $e = [PSCustomObject]@{
         EarningsDate = ""; EarningsEnd = ""; ExDividendDate = ""; DividendDate = ""
         DividendRate = [double]::NaN; DividendYield = [double]::NaN; TrailingRate = [double]::NaN
-        FetchedAt = ""; NotifiedEarnings = ""
+        FetchedAt = ""; NotifiedEarnings = ""; NotifiedExDiv = ""
         TargetMean = [double]::NaN; TargetHigh = [double]::NaN; TargetLow = [double]::NaN; RecMean = [double]::NaN; Analysts = [double]::NaN; RecKey = ""
         Fund = $null
     }
     if ($null -ne $V) {
         # v5.1: fundamentals; entries from before are fetched again once
         if ($null -ne $V.PSObject.Properties["Fund"]) { $e.Fund = ConvertTo-StoredFund $V.Fund }
-        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "RecKey")) { if ($null -ne $V.$f) { $e.$f = [string]$V.$f } }
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "NotifiedExDiv", "RecKey")) { if ($null -ne $V.$f) { $e.$f = [string]$V.$f } }
         foreach ($f in $script:EventNumberFields) { $e.$f = ConvertTo-EventNumber $V.$f }
         # v4.9.5: entries from before the analyst data are fetched again once
         if ($null -eq $V.PSObject.Properties["RecKey"]) { $e.FetchedAt = "" }
@@ -1710,7 +1738,7 @@ function Save-Events {
     foreach ($k in @($script:Events.Keys)) {
         $e = $script:Events[$k]
         $o = [ordered]@{}
-        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "RecKey")) { $o[$f] = [string]$e.$f }
+        foreach ($f in @("EarningsDate", "EarningsEnd", "ExDividendDate", "DividendDate", "FetchedAt", "NotifiedEarnings", "NotifiedExDiv", "RecKey")) { $o[$f] = [string]$e.$f }
         foreach ($f in $script:EventNumberFields) {
             $n = [double]$e.$f
             $o[$f] = if ([double]::IsNaN($n) -or [double]::IsInfinity($n)) { $null } else { $n }
@@ -1735,6 +1763,7 @@ function Set-EventEntry {
         $e = New-EventEntry $old
     }
     if ($null -ne $old -and [string]$old.NotifiedEarnings -and [string]$old.NotifiedEarnings -eq $e.EarningsDate) { $e.NotifiedEarnings = [string]$old.NotifiedEarnings }
+    if ($null -ne $old -and [string]$old.NotifiedExDiv -and [string]$old.NotifiedExDiv -eq $e.ExDividendDate) { $e.NotifiedExDiv = [string]$old.NotifiedExDiv }
     if ($null -ne $old -and $null -ne $old.Fund) { $e.Fund = $old.Fund }
     $e.FetchedAt = (Get-Date).ToString("o")
     $script:Events[$u] = $e
@@ -1746,7 +1775,7 @@ function Set-EventEntry {
 # message loop, so its load time is not measured; "window shown after" covers it.
 $script:StartupParts = New-Object System.Collections.Generic.List[string]
 Write-WidgetLog ("Startup: main script ready after {0} ms" -f $script:StartWatch.ElapsedMilliseconds)
-foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "05b-News", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "13-Startup")) {
+foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "05b-News", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "12b-Custom", "12c-Alerts", "12d-Depot", "13-Startup")) {
     $twPartStart = $script:StartWatch.ElapsedMilliseconds
     if ($twPart -eq "13-Startup") { Write-WidgetLog ("Startup: parts 02-12 loaded after {0} ms" -f $twPartStart) }
     . (Join-Path (Join-Path $script:ScriptDir "ui") "$twPart.ps1")

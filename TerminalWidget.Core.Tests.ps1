@@ -2969,6 +2969,19 @@ Describe "News sources and reading (v7.7)" {
 }
 
 Describe "V8.0 logic" {
+    It "keeps three watchlist groups apart and repairs nested lists" {
+        $cfg = [PSCustomObject]@{ WatchGroups = @() }
+        foreach ($p in @(@("Tech", "AAA"), @("ETF", "BBB"), @("Div", "CCC"))) {
+            # the form the app uses: no @() around the call
+            $cfg.WatchGroups = Set-WatchGroupMember -Groups @($cfg.WatchGroups) -Group $p[0] -Symbol $p[1] -In $true
+        }
+        @($cfg.WatchGroups | ForEach-Object { $_.Name }) -join "," | Should -Be "Tech,ETF,Div"
+        $old = '{"WatchGroups":[[{"Name":"Tech","Symbols":["aaa"]},{"Name":"ETF","Symbols":["BBB"]}]]}' | ConvertFrom-Json
+        $flat = ConvertTo-FlatWatchGroups $old.WatchGroups
+        @($flat | ForEach-Object { $_.Name }) -join "," | Should -Be "Tech,ETF"
+        $flat[0].Symbols -join "," | Should -Be "AAA"
+        (ConvertTo-FlatWatchGroups @()).Count | Should -Be 0
+    }
     It "scales and moves the price axis" {
         $r = Get-ScaledPriceRange -MinP 100 -SpanP 100
         $r.Min | Should -Be 100; $r.Span | Should -Be 100

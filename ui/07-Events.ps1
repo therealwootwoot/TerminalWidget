@@ -193,19 +193,20 @@ function Update-EventsIfStale {
 }
 
 function Check-EarningsNotifications {
-    # One balloon per company and earnings date, the day before (or on the day)
-    if (-not $script:Config.NotifyEarnings) { return }
+    # v8.0: one balloon per company and date, with an adjustable lead time
+    # (earnings and, if switched on, ex-dividend day)
+    $eLead = if ([bool]$script:Config.NotifyEarnings) { [int]$script:Config.EarningsLeadDays } else { -1 }
+    $xLead = [int]$script:Config.ExDivLeadDays
+    if ($eLead -lt 0 -and $xLead -lt 0) { return }
     $changed = $false
-    foreach ($k in @($script:Portfolio.Keys)) {
-        $u = ([string]$k).ToUpper()
-        $ev = $script:Events[$u]
-        if ($null -eq $ev -or -not $ev.EarningsDate -or [string]$ev.NotifiedEarnings -eq [string]$ev.EarningsDate) { continue }
-        $b = Get-EarningsBadge -EarningsDate ([string]$ev.EarningsDate) -WindowDays 1
-        if ($null -eq $b) { continue }
-        [void](Send-WidgetNotification -Title "Quartalszahlen: $u" -Message ("{0} ({1}) - Kurs kann stark schwanken" -f $(if ($b.Days -eq 0) { "Heute" } else { "Morgen" }), (Format-IsoDateDe $b.Date)) -Kind "Earnings")
-        $ev.NotifiedEarnings = [string]$ev.EarningsDate
+    foreach ($d in @(Get-DueDateNotices -Events $script:Events -Symbols @($script:Portfolio.Keys) -EarningsLead $eLead -ExDivLead $xLead)) {
+        $when = if ($d.Days -eq 0) { "Heute" } elseif ($d.Days -eq 1) { "Morgen" } else { "In {0} Tagen" -f $d.Days }
+        $title = if ($d.Kind -eq "Earnings") { "Quartalszahlen: $($d.Ticker)" } else { "Ex-Dividende: $($d.Ticker)" }
+        $msg = if ($d.Kind -eq "Earnings") { "{0} ({1}) - Kurs kann stark schwanken" -f $when, (Format-IsoDateDe $d.Date) } else { "{0} ({1}) - ab diesem Tag ohne Dividende gehandelt" -f $when, (Format-IsoDateDe $d.Date) }
+        [void](Send-WidgetNotification -Title $title -Message $msg -Kind "Earnings")
+        $script:Events[$d.Ticker].($d.Flag) = [string]$d.Date
         $changed = $true
-        Write-WidgetLog "Earnings notice: $u $($ev.EarningsDate)"
+        Write-WidgetLog "$($d.Kind) notice: $($d.Ticker) $($d.Date)"
     }
     if ($changed) { Save-Events }
 }

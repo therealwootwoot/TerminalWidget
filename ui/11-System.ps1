@@ -568,7 +568,7 @@ function Show-SettingsDialog {
     $script:SettingsPreviewPanel = $pvPanel
     $lay.Y += S 96
     & $addSection "Farben"
-    $cbTheme  = & $addCombo -Label "Theme" -Items @(Get-ThemeNames) -Value ([string]$cfg.Theme) -TipKey "THEME" -Key "Theme" -Default ([string]$dc.Theme) -Words "dunkel hell dark light graphite Farbschema"
+    $cbTheme  = & $addCombo -Label "Theme" -Items @(Get-AllThemeNames) -Value ([string]$cfg.Theme) -TipKey "THEME" -Key "Theme" -Default ([string]$dc.Theme) -Words "dunkel hell dark light graphite Farbschema"
     $cbAccent = & $addCombo -Label "Akzentfarbe" -Items @("Sky", "Amber", "Violet", "Windows", "Eigene") -Value ([string]$cfg.AccentColor) -Tip "Eigene = Farbe frei wählen, Windows = Akzentfarbe aus den Windows-Einstellungen" -Key "AccentColor" -Default ([string]$dc.AccentColor) -Words "Accent"
     & $addSection "Listen und Fenster"
     $rdMap = @{ "Compact" = "Kompakt"; "Normal" = "Normal"; "Comfortable" = "Bequem" }
