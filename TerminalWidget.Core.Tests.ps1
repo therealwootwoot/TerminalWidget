@@ -2829,3 +2829,35 @@ Describe "V7.1.1 fixes" {
         Get-LogErrorCount -Lines @() -ProcessId 22 | Should -Be 0
     }
 }
+
+Describe "V7.3 helpers" {
+    It "explains a missing XIRR" {
+        Get-XirrNote -Xirr 0.1 -FirstDate "2026-11-02" -Today "2026-11-26" | Should -Be ""
+        Get-XirrNote -Xirr ([double]::NaN) -FirstDate "2026-11-02" -Today "2026-11-26" | Should -Be "ab 30 Tagen (noch 6 Tage)"
+        Get-XirrNote -Xirr ([double]::NaN) -FirstDate "2026-10-28" -Today "2026-11-26" | Should -Be "ab 30 Tagen (noch 1 Tag)"
+        Get-XirrNote -Xirr ([double]::NaN) -FirstDate "2026-10-27" -Today "2026-11-26" | Should -Be "nicht berechenbar"
+        Get-XirrNote -Xirr ([double]::NaN) | Should -Be "keine gebuchte Position"
+    }
+    It "shows the XIRR note in the tile" {
+        $k = @(Get-AnalysisKpiTiles -Value 100 -Invested 100 -Dividends 0 -Xirr ([double]::NaN) -XirrNote "ab 30 Tagen (noch 6 Tage)")
+        ($k | Where-Object { $_.Id -eq "Xirr" }).Sub | Should -Be "ab 30 Tagen (noch 6 Tage)"
+    }
+    It "says why polling is slower" {
+        $now = [DateTime]"2026-11-26T06:00:00"
+        Get-PollNote -AllClosed $true -ClosedMinutes 10 -RefreshSec 60 -Now $now | Should -Be "Märkte zu - Abfrage alle 10 min"
+        Get-PollNote -AllClosed $false -ClosedMinutes 10 -RefreshSec 60 -Now $now | Should -Be ""
+        Get-PollNote -AllClosed $true -ClosedMinutes 0 -RefreshSec 60 -Now $now | Should -Be ""
+        Get-PollNote -AllClosed $true -ClosedMinutes 1 -RefreshSec 60 -Now $now | Should -Be ""
+        Get-PollNote -AllClosed $false -ClosedMinutes 10 -RefreshSec 60 -BackoffUntil $now.AddMinutes(5) -Now $now | Should -Be "Yahoo-Pause bis 06:05"
+        Get-PollNote -AllClosed $false -ClosedMinutes 10 -RefreshSec 60 -BackoffUntil ([DateTime]::MinValue) -Now $now | Should -Be ""
+    }
+    It "shortens the market status" {
+        Get-ShortMarketText "Zu - öffnet in 2h 49m" | Should -Be "Zu · 2h 49m"
+        Get-ShortMarketText "Offen - zu in 3h" | Should -Be "Offen · 3h"
+        Get-ShortMarketText "Handel 24/7" | Should -Be "Handel 24/7"
+    }
+    It "keeps price columns unmasked when the header names the currency" {
+        Test-AmountColumn "EK (USD)" | Should -BeFalse
+        Test-AmountColumn "Kurs (USD)" | Should -BeFalse
+    }
+}

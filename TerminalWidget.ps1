@@ -193,6 +193,9 @@ public class Win32WidgetHelperV26 {
     [DllImport("user32.dll")]
     public static extern bool ReleaseCapture();
 
+    [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendCue(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
@@ -657,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.1.1"
+$script:AppVersion    = "7.3"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 

@@ -1294,9 +1294,14 @@ $script:PnlStatusBar.Add_Paint({
     $age = [double]::NaN
     $stand = ""
     if ($null -ne $script:LastDataTime) { $age = ((Get-Date) - $script:LastDataTime).TotalSeconds; $stand = $script:LastDataTime.ToString("HH:mm:ss") }
-    $mk = ""
-    try { $mk = [string]$lblMarketStatus.Text } catch { }
-    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Market $mk -Privacy ([bool]$script:Config.PrivacyMode) -ReqPerMin (Get-RequestsPerMinute))
+    # v7.3: the market status is in the header only; here: why polling is slower, if it is
+    $note = ""
+    try {
+        $closedMin = [int]$script:Config.ClosedPollMinutes
+        $allClosed = $closedMin -gt 0 -and (Test-AllPrioClosed)
+        $note = Get-PollNote -AllClosed $allClosed -ClosedMinutes $closedMin -RefreshSec ([int]$script:Config.RefreshSeconds) -BackoffUntil $script:BackoffUntil
+    } catch { }
+    $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Privacy ([bool]$script:Config.PrivacyMode) -ReqPerMin (Get-RequestsPerMinute) -PollNote $note)
     $txt = $parts -join "   |   "
     $tr = New-Object System.Drawing.Rectangle((S 12), 0, ($sender.Width - (S 24)), $sender.Height)
     [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $fontMono, $tr, $p.Muted, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))

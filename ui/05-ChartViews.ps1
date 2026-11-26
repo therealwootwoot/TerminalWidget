@@ -1317,6 +1317,17 @@ $btnAlertLog.Text = "Verlauf"
 $viewWatch.Controls.Add($btnAlertLog)
 Set-Tip $btnAlertLog "Ausgelöste Alarme mit Zeit, Wert und Push-Status" "ALERTLOG"
 
+function Set-CueText {
+    # v7.3: Windows placeholder text (EM_SETCUEBANNER); without it the box just stays empty
+    param([System.Windows.Forms.TextBox]$Box, [string]$Text)
+    try {
+        $Box.Tag = Tr $Text
+        $apply = { param($sender, $e) [void][Win32WidgetHelperV26]::SendCue($sender.Handle, 0x1501, [IntPtr]1, [string]$sender.Tag) }
+        $Box.Add_HandleCreated($apply)
+        if ($Box.IsHandleCreated) { & $apply $Box $null }
+    } catch { Write-WidgetLog "Placeholder text not available: $($_.Exception.Message)" "WARN" }
+}
+
 $txtAlertTicker = New-Object System.Windows.Forms.TextBox
 $txtAlertTicker.Location = New-Object System.Drawing.Point((S 496), (S 36))
 $txtAlertTicker.Size = New-Object System.Drawing.Size((S 58), (S 24))
@@ -1383,6 +1394,11 @@ $txtAlertNote.Font = $fontMono
 $txtAlertNote.MaxLength = 60
 $viewWatch.Controls.Add($txtAlertNote)
 Set-Tip $txtAlertNote "Notiz zum Alarm (optional, erscheint im Hinweis)"
+
+# v7.3: grey hint text inside the empty alarm inputs
+Set-CueText $txtAlertTicker "Ticker"
+Set-CueText $txtAlertPrice "Wert"
+Set-CueText $txtAlertNote "Notiz"
 
 # v4.3: expiry
 $cmbAlertExp = New-Object System.Windows.Forms.ComboBox

@@ -181,6 +181,8 @@ function Update-AnalysisModel {
             $totXirr = Get-Xirr -Dates ([string[]]$d) -Amounts ([double[]]$a)
         }
     }
+    $firstFlow = if ($allD.Count -gt 0 -and $tot.Booked -gt 0) { [string](@($allD.ToArray()) | Sort-Object)[0] } else { "" }
+    $xirrNote = Get-XirrNote -Xirr $totXirr -FirstDate $firstFlow -Today $today
     $benchXirr = [double]::NaN
     $benchVal = [double]::NaN
     if ($null -ne $series -and $null -ne $series.Bench -and $benchD.Count -gt 0) {
@@ -196,7 +198,7 @@ function Update-AnalysisModel {
     $tot.Total = $tot.Unreal + $tot.Real + $tot.Div
     $tot.Pct = if ($tot.Bought -gt 0) { $tot.Total / $tot.Bought * 100.0 } else { [double]::NaN }
     $ac.Model = [PSCustomObject]@{
-        Base = $base; Series = $series; Rows = $rows.ToArray(); Total = $tot; TotalXirr = $totXirr
+        Base = $base; Series = $series; Rows = $rows.ToArray(); Total = $tot; TotalXirr = $totXirr; XirrNote = $xirrNote
         BenchXirr = $benchXirr; BenchValue = $benchVal; Uncovered = $uncovered
     }
     Update-AnalysisPerf
@@ -240,21 +242,21 @@ function Update-AnalysisPerf {
         $i0 = Get-SeriesWindowStart -Dates $sr.Dates -Range ([string]$script:Config.AnalysisRange)
         $win = ($sr.Value[$last] - $sr.Value[$i0]) - ($sr.Invested[$last] - $sr.Invested[$i0]) + ($sr.Dividends[$last] - $sr.Dividends[$i0])
         $ld = [DateTime]::ParseExact($sr.Dates[$last], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("dd.MM.yyyy")
-        $lines = @(
-            ("Depotwert {0:N2} {1}   Netto investiert {2:N2}   Dividenden {3:N2}   (Schlusskurse vom {4})" -f $v, $b, $i, $d, $ld)
-            ("Ergebnis {0} {1}   Rendite p.a. (XIRR) {2} %   Im Zeitraum {3}: {4} {1}" -f (Format-Signed $res), $b, (Format-Signed ($m.TotalXirr * 100) "N1"), (Get-RangeLabel ([string]$script:Config.AnalysisRange)), (Format-Signed $win))
-        )
+        # v7.3: the figures are in the tiles; the text below only adds what they do not show
+        $bl = @()
         if (-not [double]::IsNaN($m.BenchValue)) {
             $diff = ($m.TotalXirr - $m.BenchXirr) * 100
             $verdict = if ([double]::IsNaN($diff)) { "" } elseif ($diff -ge 0) { "   -> Depot {0:N1} Prozentpunkte p.a. besser" -f $diff } else { "   -> Depot {0:N1} Prozentpunkte p.a. schlechter" -f (-$diff) }
-            $lines += ("Benchmark {0}: gleiche Käufe/Verkäufe wären heute {1:N2} {2} wert, XIRR {3} %{4}" -f $script:Config.AnalysisBenchmark, $m.BenchValue, $b, (Format-Signed ($m.BenchXirr * 100) "N1"), $verdict)
+            $xt = if ([double]::IsNaN($m.BenchXirr)) { "" } else { ", XIRR {0} %" -f (Format-Signed ($m.BenchXirr * 100) "N1") }
+            $bl += ("Benchmark {0}: gleiche Käufe/Verkäufe wären {1:N2} {2} wert{3}{4}" -f $script:Config.AnalysisBenchmark, $m.BenchValue, $b, $xt, $verdict)
         }
-        if ($sr.Approx) { $notes.Add("Teilweise mit aktuellem statt historischem Wechselkurs gerechnet (Verlauf fehlte).") }
-        $ac.Sum.Text = ($lines -join "`r`n")
-        $ac.Sum.ForeColor = if ($res -ge 0) { $colGreen } else { $colRed }
+        $dateNote = "Stand der Werte: Tagesschlusskurse und Wechselkurs-Verlauf bis {0}. Das Hauptfenster rechnet mit aktuellen Kursen und kann abweichen." -f $ld
         try {
-            $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)))
-        } catch { $ac.Kpi = @() }
+            $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
+        } catch { $ac.Kpi = @(); Write-WidgetLog "Analysis tiles failed: $($_.Exception.Message)" "WARN" }
+        $ac.Sum.Text = ((@($bl) + $dateNote) -join "`r`n")
+        $ac.Sum.ForeColor = $script:Pal.Muted
+        if ($sr.Approx) { $notes.Add("Teilweise mit aktuellem statt historischem Wechselkurs gerechnet (Verlauf fehlte).") }
     }
     $ac.Status.Text = if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b }
     $ac.Status.ForeColor = if ($notes.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
@@ -418,6 +420,7 @@ function Draw-AnalysisChart {
             }
         } finally { $gridPen.Dispose() }
 
+        $g.DrawString([string]$m.Base, $fontAxis, $brMuted, [float](S 8), [float](S 4))   # v7.3: currency of the value axis
         $lx = [float]$L
         foreach ($ln in $lines) {
             $pen = New-Object System.Drawing.Pen($ln.C, [float]($ln.W * $script:DpiScale))

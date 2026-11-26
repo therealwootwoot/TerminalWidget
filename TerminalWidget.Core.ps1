@@ -4756,9 +4756,23 @@ function Get-AccentStates {
     return [PSCustomObject]@{ Hover = $hover; Pressed = $pressed; Subtle = $subtle; OnAccent = $onAccent }
 }
 
+function Get-PollNote {
+    # v7.3: why data is refreshed less often than selected ("" = normal polling)
+    param([bool]$AllClosed, [int]$ClosedMinutes, [int]$RefreshSec, $BackoffUntil = $null, [DateTime]$Now = (Get-Date))
+    if ($null -ne $BackoffUntil -and [DateTime]$BackoffUntil -gt $Now) { return ("Yahoo-Pause bis {0:HH:mm}" -f [DateTime]$BackoffUntil) }
+    if ($AllClosed -and $ClosedMinutes -gt 0 -and ($ClosedMinutes * 60) -gt $RefreshSec) { return "Märkte zu - Abfrage alle $ClosedMinutes min" }
+    return ""
+}
+
+function Get-ShortMarketText {
+    # v7.3: shorter market status for narrow windows
+    param([string]$Text)
+    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in) ', ' · ' -replace ' - öffnet ', ' · ')
+}
+
 function Get-StatusBarParts {
     # V7.0: the pieces of the status bar at the bottom of the window
-    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1)
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1, [string]$PollNote = "")
     $parts = @()
     if ($Stand) {
         $a = ""
@@ -4769,6 +4783,7 @@ function Get-StatusBarParts {
     }
     else { $parts += "Noch keine Daten" }
     if ($Market) { $parts += $Market }
+    if ($PollNote) { $parts += $PollNote }
     if ($ReqPerMin -ge 0) { $parts += ("{0} Abfragen/min" -f $ReqPerMin) }
     if ($Privacy) { $parts += "Privat-Modus" }
     return $parts
@@ -4800,10 +4815,23 @@ function Get-ChipLayout {
     return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
 }
 
+function Get-XirrNote {
+    # v7.3: why the return p.a. shows "-" ("" when there is a value). Needs 30 days since the first booking.
+    param([double]$Xirr, [string]$FirstDate = "", [string]$Today = "", [int]$MinDays = 30)
+    if (-not [double]::IsNaN($Xirr)) { return "" }
+    if (-not $FirstDate) { return "keine gebuchte Position" }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $end = if ($Today) { [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $left = $MinDays - [int]($end - [DateTime]::ParseExact($FirstDate.Substring(0, 10), "yyyy-MM-dd", $inv)).TotalDays
+    if ($left -eq 1) { return "ab $MinDays Tagen (noch 1 Tag)" }
+    if ($left -gt 1) { return "ab $MinDays Tagen (noch $left Tage)" }
+    return "nicht berechenbar"
+}
+
 function Get-AnalysisKpiTiles {
     # V7.0: the key figures at the top of the Analyse "Wertentwicklung" page.
     # Kind = up / down / flat decides the colour (green / red only for gains / losses).
-    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "")
+    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "", [string]$XirrNote = "")
     $res = $Value + $Dividends - $Invested
     $kindOf = { param([double]$x) if ([double]::IsNaN($x) -or [math]::Abs($x) -lt 0.005) { return "flat" } elseif ($x -gt 0) { return "up" } else { return "down" } }
     $pct = [double]::NaN
@@ -4811,7 +4839,7 @@ function Get-AnalysisKpiTiles {
     $tiles = @()
     $tiles += [PSCustomObject]@{ Id = "Value"; Label = "Depotwert"; Text = ("{0:N0} {1}" -f $Value, $Base); Sub = ("Investiert {0:N0}" -f $Invested); Kind = "flat" }
     $tiles += [PSCustomObject]@{ Id = "Result"; Label = "Ergebnis"; Text = ("{0:+#,##0;-#,##0;0} {1}" -f $res, $Base); Sub = $(if ([double]::IsNaN($pct)) { "" } else { "{0:+0.0;-0.0;0.0} % auf Einsatz" -f $pct }); Kind = (& $kindOf $res) }
-    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = "XIRR"; Kind = (& $kindOf $Xirr) }
+    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = $(if ($XirrNote) { $XirrNote } else { "XIRR" }); Kind = (& $kindOf $Xirr) }
     $tiles += [PSCustomObject]@{ Id = "Div"; Label = "Dividenden"; Text = ("{0:N0} {1}" -f $Dividends, $Base); Sub = "bisher erhalten"; Kind = "flat" }
     if (-not [double]::IsNaN($WindowResult)) {
         $tiles += [PSCustomObject]@{ Id = "Window"; Label = $(if ($RangeLabel) { "Im Zeitraum ($RangeLabel)" } else { "Im Zeitraum" }); Text = ("{0:+#,##0;-#,##0;0} {1}" -f $WindowResult, $Base); Sub = ""; Kind = (& $kindOf $WindowResult) }

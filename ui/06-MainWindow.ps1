@@ -776,6 +776,11 @@ function Refresh-PortfolioGrid {
         default { $rows | Sort-Object Value -Descending }
     } }
 
+    # v7.3: EK and price are shown in the base currency - say so in the header
+    foreach ($hc in @(@("Avg", "EK"), @("Price", "Kurs"))) {
+        $ht = "{0} ({1})" -f (Tr $hc[1]), $curr
+        if ($dgvPortfolio.Columns[$hc[0]].HeaderText -ne $ht) { $dgvPortfolio.Columns[$hc[0]].HeaderText = $ht }
+    }
     $gridState = Save-GridState -Grid $dgvPortfolio
     $script:SuppressGridSelection = $true
     try {
@@ -1291,6 +1296,8 @@ function Update-MarketStatusUi {
             else { "$zu - öffnet " + (Format-LocalTime $ms.NextSec) }
         }
     }
+    # v7.3: short form when the full text does not fit (narrow window); the tooltip has the details
+    if ($lblMarketStatus.Width -gt 0 -and [System.Windows.Forms.TextRenderer]::MeasureText($txt, $lblMarketStatus.Font).Width -gt $lblMarketStatus.Width) { $txt = Get-ShortMarketText $txt }
     if ($lblMarketStatus.Text -ne $txt) { $lblMarketStatus.Text = $txt }
     $lblMarketStatus.ForeColor = Get-MarketStateColor $ms.State
 
