@@ -3138,3 +3138,29 @@ Describe "Layout helpers (v9.0)" {
         (($w | Measure-Object -Sum).Sum + 8) | Should -BeLessOrEqual 200
     }
 }
+
+Describe "Overview logic (v10.0)" {
+    It "sorts slices and sums to 100 percent" {
+        $r = @(Get-AllocationSlices -Items @(@{ Name = "A"; Value = 25 }, @{ Name = "B"; Value = 75 }, @{ Name = "C"; Value = 0 }))
+        $r.Count | Should -Be 2
+        $r[0].Name | Should -Be "B"
+        $r[0].Pct | Should -Be 75
+    }
+    It "collects small positions in one slice" {
+        $items = 1..9 | ForEach-Object { @{ Name = "T$_"; Value = $_ } }
+        $r = @(Get-AllocationSlices -Items $items -MaxSlices 4 -OtherName "Rest")
+        $r.Count | Should -Be 4
+        $r[3].Name | Should -Be "Rest"
+        $r[3].Value | Should -Be 21
+    }
+    It "returns nothing without positions" {
+        @(Get-AllocationSlices -Items @()).Count | Should -Be 0
+        @(Get-CombinedTrend -Series @()).Count | Should -Be 0
+    }
+    It "ends at today's total, whatever the price unit is" {
+        $r = @(Get-CombinedTrend -Series @(@{ EndValue = 100.0; Values = @(500.0, 1000.0) }, @{ EndValue = 50.0; Values = @(5.0, 5.0, 5.0) }) -Points 3)
+        $r[0] | Should -Be 100
+        $r[1] | Should -Be 125
+        $r[2] | Should -Be 150
+    }
+}

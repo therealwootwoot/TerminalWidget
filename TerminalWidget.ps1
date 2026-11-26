@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "9.0"
+$script:AppVersion    = "10.0"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1775,7 +1775,7 @@ function Set-EventEntry {
 # message loop, so its load time is not measured; "window shown after" covers it.
 $script:StartupParts = New-Object System.Collections.Generic.List[string]
 Write-WidgetLog ("Startup: main script ready after {0} ms" -f $script:StartWatch.ElapsedMilliseconds)
-foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "05b-News", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "12b-Custom", "12c-Alerts", "12d-Depot", "13-Startup")) {
+foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "05b-News", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "12b-Custom", "12c-Alerts", "12d-Depot", "12e-Overview", "13-Startup")) {
     $twPartStart = $script:StartWatch.ElapsedMilliseconds
     if ($twPart -eq "13-Startup") { Write-WidgetLog ("Startup: parts 02-12 loaded after {0} ms" -f $twPartStart) }
     . (Join-Path (Join-Path $script:ScriptDir "ui") "$twPart.ps1")

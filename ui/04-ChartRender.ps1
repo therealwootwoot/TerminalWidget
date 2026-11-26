@@ -500,34 +500,6 @@ $form.KeyPreview = $true
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 
-# 9.0: scroll bars follow the theme (they stayed white in the dark themes)
-try {
-    if (-not ('TwUxTheme90' -as [type])) {
-        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class TwUxTheme90 { [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hWnd, string app, string idList); }' -ErrorAction Stop
-    }
-} catch { Write-WidgetLog "Dark scroll bars unavailable: $($_.Exception.Message)" "WARN" }
-
-function Set-ScrollBarTheme {
-    param([System.Windows.Forms.Control]$Root)
-    if ($null -eq $Root -or $Root.IsDisposed -or -not ('TwUxTheme90' -as [type])) { return }
-    $name = if ([int]$script:Pal.DwmDark -eq 1) { "DarkMode_Explorer" } else { "Explorer" }
-    $stack = New-Object System.Collections.Generic.Stack[object]
-    $stack.Push($Root)
-    while ($stack.Count -gt 0) {
-        $c = $stack.Pop()
-        $scrolls = ($c -is [System.Windows.Forms.ScrollBar]) -or ($c -is [System.Windows.Forms.ListBox]) -or
-                   ($c -is [System.Windows.Forms.ScrollableControl] -and $c.AutoScroll) -or
-                   ($c -is [System.Windows.Forms.TextBox] -and $c.Multiline) -or ($c -is [System.Windows.Forms.TreeView])
-        if ($scrolls) {
-            try {
-                if ($c.IsHandleCreated) { [void][TwUxTheme90]::SetWindowTheme($c.Handle, $name, $null) }
-                else { $c.Add_HandleCreated({ param($sender, $e) $n = if ([int]$script:Pal.DwmDark -eq 1) { "DarkMode_Explorer" } else { "Explorer" }; [void][TwUxTheme90]::SetWindowTheme($sender.Handle, $n, $null) }) }
-            } catch { }
-        }
-        foreach ($ch in $c.Controls) { $stack.Push($ch) }
-    }
-}
-
 function Set-WindowChrome {
     # v4.9: the same window frame for the main window and every dialog: dark
     # title bar, caption + border colour of the theme, rounded corners
@@ -550,8 +522,7 @@ function Apply-DwmTitlebarTheme {
     # the main window; the borderless ticker strip gets small round corners
     $kind = if ([string]$script:Config.Layout -eq "Ticker") { "Strip" } else { "Window" }
     Set-WindowChrome -Win $form -Kind $kind
-    foreach ($ow in @($form.OwnedForms)) { Set-WindowChrome -Win $ow; Set-ScrollBarTheme $ow }
-    Set-ScrollBarTheme $form
+    foreach ($ow in @($form.OwnedForms)) { Set-WindowChrome -Win $ow }
 }
 
 # every dialog gets the frame when its window handle exists

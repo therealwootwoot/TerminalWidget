@@ -13,6 +13,7 @@ Ctrl+K          Command line (also numpad /)
 Ctrl+Z          Undo the last deletion (10 seconds)
 Ctrl+Y          Redo (30 seconds)
 Ctrl+C          Copy the whole list as a table
+F6              Overview: portfolio, movers and news on one screen
 F9              Privacy mode (hide amounts; Fn+F9 on many laptops)
 Shift+F2/F3/F4  Terminal layout: list as a full page (Esc = back)
 Ctrl+Alt+W      Show / hide the widget from anywhere
@@ -145,6 +146,7 @@ Terminal  Chart oben, Watchlist + Portfolio darunter
           (oder Shift+F2/F3/F4) = Liste als ganze Seite,
           F1 / Esc = zurück
 
+F6: Übersicht - Depot, Bewegungen und Meldungen auf einen Blick
 F9 (am Laptop oft Fn+F9) oder Augen-Knopf im Portfolio:
 Privat-Modus (Beträge aus), Ctrl+Y: wiederholen,
 Ctrl+C in einer Liste: ganze Tabelle kopieren.

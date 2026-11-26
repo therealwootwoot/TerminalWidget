@@ -7081,3 +7081,40 @@ function Get-FittedWidths {
     $f = if ($sum -gt $room -and $sum -gt 0) { [math]::Max(0.0, $room / $sum) } else { 1.0 }
     return @($want | ForEach-Object { [int][math]::Floor($_ * $f) })
 }
+
+# ---- 10.0: overview ----------------------------------------------------------
+function Get-AllocationSlices {
+    # Items @{Name;Value} -> largest first with Pct; everything after
+    # MaxSlices-1 is one "other" slice. Values <= 0 are left out.
+    param($Items, [int]$MaxSlices = 6, [string]$OtherName = "Übrige")
+    $list = @(@($Items) | Where-Object { $null -ne $_ -and [double]$_.Value -gt 0 } | ForEach-Object { [PSCustomObject]@{ Name = [string]$_.Name; Value = [double]$_.Value } } | Sort-Object Value -Descending)
+    if ($list.Count -eq 0) { return @() }
+    $sum = 0.0; foreach ($i in $list) { $sum += $i.Value }
+    if ($list.Count -gt $MaxSlices) {
+        $rest = 0.0; foreach ($i in @($list | Select-Object -Skip ($MaxSlices - 1))) { $rest += $i.Value }
+        $list = @($list | Select-Object -First ($MaxSlices - 1)) + @([PSCustomObject]@{ Name = $OtherName; Value = $rest })
+    }
+    return @($list | ForEach-Object { [PSCustomObject]@{ Name = $_.Name; Value = $_.Value; Pct = $_.Value / $sum * 100.0 } })
+}
+
+function Get-CombinedTrend {
+    # Portfolio value over a short period. Series @{EndValue; Values}: each
+    # price line is scaled so its last point equals today's position value
+    # (independent of price units), stretched to $Points and added up.
+    param($Series, [int]$Points = 60)
+    $sum = New-Object double[] $Points
+    $used = 0
+    foreach ($s in @($Series)) {
+        $v = [double[]]@($s.Values)
+        if ($v.Count -lt 2 -or $v[$v.Count - 1] -le 0) { continue }
+        $f = [double]$s.EndValue / $v[$v.Count - 1]
+        for ($i = 0; $i -lt $Points; $i++) {
+            $pos = $i * ($v.Count - 1) / [double]($Points - 1)
+            $lo = [int][math]::Floor($pos); $hi = [math]::Min($v.Count - 1, $lo + 1)
+            $sum[$i] += ($v[$lo] + ($v[$hi] - $v[$lo]) * ($pos - $lo)) * $f
+        }
+        $used++
+    }
+    if ($used -eq 0) { return @() }
+    return $sum
+}

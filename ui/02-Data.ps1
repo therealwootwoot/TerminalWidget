@@ -812,7 +812,7 @@ function Show-Toast {
                 Fill-RoundedRect $g $br $r ([float]$script:UiSpec.BtnRadius) $pen 0
                 $br.Dispose(); $pen.Dispose()
                 $bar = New-Object System.Drawing.SolidBrush($p.Accent)
-                $g.FillRectangle($bar, (S 8), (S 8), (S 3), ($sender.Height - (S 16)))
+                $g.FillRectangle($bar, (S 8), (S 5), (S 3), ($sender.Height - (S 10)))
                 $bar.Dispose()
                 $tr = New-Object System.Drawing.Rectangle((S 18), 0, ($sender.Width - (S 26)), $sender.Height)
                 [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$script:ToastText, $fontUi, $tr, $p.Text, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
@@ -829,7 +829,8 @@ function Show-Toast {
         $w = [math]::Min([int]($form.ClientSize.Width - (S 24)), [math]::Max((S 160), $tw + (S 36)))
         $h = S 32
         # 9.0: top centre, so it no longer covers the action buttons at the bottom
-        $ty = [math]::Min((S 30), [math]::Max(0, $form.ClientSize.Height - $h))
+        $h = S 22
+        $ty = S 1
         $script:ToastPanel.SetBounds([int](($form.ClientSize.Width - $w) / 2), [int]$ty, [int]$w, [int]$h)
         $script:ToastPanel.Visible = $true
         $script:ToastPanel.BringToFront()
