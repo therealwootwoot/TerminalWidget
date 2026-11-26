@@ -804,7 +804,8 @@ function New-DialogForm {
     $d.ClientSize = New-Object System.Drawing.Size($W, $H)
     $d.Add_HandleCreated($script:DialogChromeHandler)
     # v4.7: English mode translates the static texts once the dialog is built
-    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender; Add-FocusRings $sender })
+    $d.Add_Shown({ param($sender, $e) Apply-Language $sender; Set-AccessibilityDefaults $sender; Add-FocusRings $sender; Set-ScrollBarTheme $sender })
+    if ($null -ne $form.Icon) { $d.Icon = $form.Icon }   # 9.0: not the default Windows icon
     $d.Text = Tr $Title
     if ($Key) { Register-DialogPlacement -Dlg $d -Key $Key }
     return $d

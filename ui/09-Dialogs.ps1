@@ -673,6 +673,25 @@ function Show-AnalysisDialog {
     $btnExp.Add_Click({ param($sender, $e) $sender.Tag.Show($sender, (New-Object System.Drawing.Point(0, $sender.Height))) })
     Enable-PrivacyMask $dlg
 
+    # 9.0: the page buttons share the width left of "Export" (they overlapped it on narrower screens)
+    $script:AnaCtl.ExportBtn = $btnExp
+    $fitTabs = {
+        $ac = $script:AnaCtl
+        if ($null -eq $ac -or $ac.Dlg.IsDisposed) { return }
+        $btns = @($ac.PageButtons.Values)
+        $need = @($btns | ForEach-Object { [double]([System.Windows.Forms.TextRenderer]::MeasureText([string]$_.Text, $_.Font).Width) })
+        $w = Get-FittedWidths -Natural ([double[]]$need) -Available ($ac.ExportBtn.Left - (S 12) - (S 8)) -Gap (S 4) -Pad (S 16)
+        $x = S 12
+        for ($i = 0; $i -lt $btns.Count; $i++) {
+            $btns[$i].SetBounds([int]$x, $btns[$i].Top, [int]$w[$i], $btns[$i].Height)
+            $btns[$i].AutoEllipsis = $true
+            $x += $w[$i] + (S 4)
+        }
+    }
+    $script:AnaCtl.FitTabs = $fitTabs
+    $dlg.Add_Resize({ if ($null -ne $script:AnaCtl -and $null -ne $script:AnaCtl.FitTabs) { & $script:AnaCtl.FitTabs } })
+    $dlg.Add_Shown({ if ($null -ne $script:AnaCtl -and $null -ne $script:AnaCtl.FitTabs) { & $script:AnaCtl.FitTabs } })
+
     try {
         $owner = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { $script:FsForm } else { $form }
         [void]$dlg.ShowDialog($owner)

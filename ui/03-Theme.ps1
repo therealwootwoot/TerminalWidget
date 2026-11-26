@@ -1246,10 +1246,10 @@ function Render-ChartAndRsi {
                 if ($bi -lt 0) { continue }
                 $mx = $priceRect.Left + (($bi / [double]($n - 1)) * $priceRect.Width)
                 $my = $priceRect.Bottom - (S 14)
-                $pts = [System.Drawing.PointF[]]@(
+                $diaPts = [System.Drawing.PointF[]]@(   # 9.0: was $pts, which overwrote the price points (date axis, hit tests)
                     (New-Object System.Drawing.PointF([float]$mx, [float]($my - (S 5)))), (New-Object System.Drawing.PointF([float]($mx + (S 5)), [float]$my)),
                     (New-Object System.Drawing.PointF([float]$mx, [float]($my + (S 5)))), (New-Object System.Drawing.PointF([float]($mx - (S 5)), [float]$my)))
-                $g.FillPolygon($mBr, $pts)
+                $g.FillPolygon($mBr, $diaPts)
                 $dTxt = "Ex-Dividende {0:N2} {1}" -f ([double]$dv.Amount), $script:ActiveNativeCurr
                 & $addLeg "xx" ($mx - (S 6)) ($my - (S 6)) "EXDATE" $fontAxis $dTxt
             }
@@ -1620,6 +1620,7 @@ function Draw-ChartLevels {
     $amber = $script:Pal.Warn
     $topY = $PriceRect.Top + (S 4)
     $botY = $PriceRect.Bottom - (S 18)
+    $used = New-Object System.Collections.Generic.List[object]
     foreach ($lv in $levels) {
         $colr = if ($lv.Kind -eq "EK") { $script:Pal.Accent } elseif ($lv.Hit) { $script:Pal.Muted } else { $amber }
         $txt = $lv.Label
@@ -1639,6 +1640,9 @@ function Draw-ChartLevels {
                 $tx = $PriceRect.Right - $tw - (S 4)
                 $ty = [int]$ly - $th - 1
                 if ($ty -lt $PriceRect.Top) { $ty = [int]$ly + 1 }
+                # 9.0: a tag that would cover an earlier one moves to the left of it
+                $tx = [int](Get-FreeTagX -X $tx -Y $ty -Width $tw -Height $th -Used $used.ToArray() -MinX ($PriceRect.Left + (S 4)) -Gap (S 4))
+                $used.Add(@{ X = $tx; Y = $ty; W = $tw; H = $th })
                 $g.FillRectangle($br, $tx, $ty, $tw, $th)
                 $g.DrawString($txt, $fontAxis, $fg, ($tx + (S 3)), ($ty + 1))
                 if ($null -ne $Legends) { $Legends.Add([PSCustomObject]@{ R = (New-Object System.Drawing.RectangleF([float]$tx, [float]$ty, [float]$tw, [float]$th)); Key = $(if ($lv.Kind -eq "EK") { "EK" } else { "LEVELS" }) }) }
@@ -1649,6 +1653,8 @@ function Draw-ChartLevels {
                 $tw2 = [int][math]::Ceiling($g.MeasureString($txt2, $fontAxis).Width) + (S 6)
                 $tx = $PriceRect.Right - $tw2 - (S 4)
                 if ($ly -lt $PriceRect.Top) { $ty = $topY; $topY += $th + 2 } else { $ty = $botY; $botY -= $th + 2 }
+                $tx = [int](Get-FreeTagX -X $tx -Y $ty -Width $tw2 -Height $th -Used $used.ToArray() -MinX ($PriceRect.Left + (S 4)) -Gap (S 4))
+                $used.Add(@{ X = $tx; Y = $ty; W = $tw2; H = $th })
                 $g.FillRectangle($br, $tx, $ty, $tw2, $th)
                 $g.DrawString($txt2, $fontAxis, $fg, ($tx + (S 3)), ($ty + 1))
                 if ($null -ne $Legends) { $Legends.Add([PSCustomObject]@{ R = (New-Object System.Drawing.RectangleF([float]$tx, [float]$ty, [float]$tw2, [float]$th)); Key = "LEVELS" }) }

@@ -7049,3 +7049,35 @@ function ConvertFrom-WatchlistCsv {
     $res.Rows = $rows
     return $res
 }
+
+# ---- 9.0: chart tags ---------------------------------------------------------
+function Get-FreeTagX {
+    # Left edge for a tag so that it does not cover the tags in $Used
+    # (@{X;Y;W;H}). Moves left only; never past $MinX.
+    param([double]$X, [double]$Y, [double]$Width, [double]$Height, $Used = @(), [double]$MinX = 0, [double]$Gap = 4)
+    $x0 = $X
+    for ($guard = 0; $guard -lt 50; $guard++) {
+        $hit = $null
+        foreach ($u in @($Used)) {
+            if ($null -eq $u) { continue }
+            if ($x0 -lt ($u.X + $u.W) -and ($x0 + $Width) -gt $u.X -and $Y -lt ($u.Y + $u.H) -and ($Y + $Height) -gt $u.Y) { $hit = $u; break }
+        }
+        if ($null -eq $hit) { return $x0 }
+        $next = $hit.X - $Width - $Gap
+        if ($next -lt $MinX) { return [math]::Max($MinX, $x0) }
+        $x0 = $next
+    }
+    return $x0
+}
+
+function Get-FittedWidths {
+    # Widths for a row of buttons: text width + padding when there is room
+    # (never stretched further), otherwise all shrink by the same factor.
+    param([double[]]$Natural, [double]$Available, [double]$Gap = 4, [double]$Pad = 16)
+    if ($null -eq $Natural -or $Natural.Count -eq 0) { return @() }
+    $want = @($Natural | ForEach-Object { $_ + $Pad })
+    $sum = 0.0; foreach ($w in $want) { $sum += $w }
+    $room = $Available - $Gap * ($Natural.Count - 1)
+    $f = if ($sum -gt $room -and $sum -gt 0) { [math]::Max(0.0, $room / $sum) } else { 1.0 }
+    return @($want | ForEach-Object { [int][math]::Floor($_ * $f) })
+}

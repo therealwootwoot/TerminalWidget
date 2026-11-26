@@ -347,11 +347,11 @@ function New-PortInput {
 }
 
 $txtPortTicker = New-PortInput -LabelText "Ticker:"       -X 8   -Y 8 -W 74
-$txtPortShares = New-PortInput -LabelText "Stück:"       -X 88  -Y 8 -W 72
-$txtPortAvg    = New-PortInput -LabelText "EK-Kurs:"      -X 166 -Y 8 -W 82
+$txtPortShares = New-PortInput -LabelText "Stück:"       -X 88  -Y 8 -W 96
+$txtPortAvg    = New-PortInput -LabelText "EK-Kurs:"      -X 190 -Y 8 -W 104
 
 $lblPortCurr = New-Object System.Windows.Forms.Label
-$lblPortCurr.Location = New-Object System.Drawing.Point((S 254), (S 8))
+$lblPortCurr.Location = New-Object System.Drawing.Point((S 300), (S 8))
 $lblPortCurr.Size = New-Object System.Drawing.Size((S 58), (S 16))
 $lblPortCurr.Font = $fontUi
 $lblPortCurr.ForeColor = $script:Pal.Muted
@@ -360,7 +360,7 @@ $pnlPortBottom.Controls.Add($lblPortCurr)
 $script:PortInputLabels.Add($lblPortCurr)
 
 $cmbPortCurr = New-ThemedCombo
-$cmbPortCurr.Location = New-Object System.Drawing.Point((S 254), (S 25))
+$cmbPortCurr.Location = New-Object System.Drawing.Point((S 300), (S 25))
 $cmbPortCurr.Size = New-Object System.Drawing.Size((S 58), (S 22))
 $cmbPortCurr.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $cmbPortCurr.BackColor = $script:Pal.Input

@@ -3116,3 +3116,25 @@ Describe "V8.0 logic" {
         @((ConvertFrom-WatchlistCsv "a;b`r`n1;2").Rows).Count | Should -Be 0
     }
 }
+
+# ==============================================================================
+# v9.0
+# ==============================================================================
+Describe "Layout helpers (v9.0)" {
+    It "keeps a tag in place when nothing is in the way" {
+        Get-FreeTagX -X 500 -Y 10 -Width 80 -Height 15 -Used @() | Should -Be 500
+    }
+    It "moves a tag left of the one it would cover" {
+        Get-FreeTagX -X 500 -Y 12 -Width 80 -Height 15 -Used @(@{ X = 490; Y = 10; W = 90; H = 15 }) -Gap 4 | Should -Be 406
+    }
+    It "never moves a tag past the left limit" {
+        Get-FreeTagX -X 50 -Y 10 -Width 80 -Height 15 -Used @(@{ X = 40; Y = 10; W = 100; H = 15 }) -MinX 4 | Should -Be 50
+    }
+    It "does not stretch buttons when there is room" {
+        (Get-FittedWidths -Natural @(40, 60) -Available 500) -join "," | Should -Be "56,76"
+    }
+    It "shrinks buttons so the row fits" {
+        $w = @(Get-FittedWidths -Natural @(100, 100, 100) -Available 200 -Gap 4)
+        (($w | Measure-Object -Sum).Sum + 8) | Should -BeLessOrEqual 200
+    }
+}
