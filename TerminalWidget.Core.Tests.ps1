@@ -547,7 +547,9 @@ Describe "Glossary and tooltips (v4.0)" {
         # quoted UPPERCASE tokens on tooltip / legend lines; label texts excluded
         $labels = @("BB20", "PRE", "POST", "EUR", "USD", "CHF", "GBP", "OK", "EN", "DE")
         $used = New-Object System.Collections.Generic.HashSet[string]
-        foreach ($line in (Get-Content -Path $ui -Encoding UTF8)) {
+        # V7.0: the UI script is split into the main file + ui\*.ps1 parts
+        $uiFiles = @($ui) + @(Get-ChildItem -Path (Join-Path $PSScriptRoot "ui") -Filter *.ps1 -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
+        foreach ($line in ($uiFiles | ForEach-Object { Get-Content -Path $_ -Encoding UTF8 })) {
             if ($line -notmatch 'Set-Tip|Set-DynTip|addLeg|Legends\.Add|GlossaryShort|Spark = "SPARK"|addNum|addCombo|addCheck') { continue }
             foreach ($m in [regex]::Matches($line, '"([A-Z][A-Z0-9]{1,11})"')) {
                 $k = $m.Groups[1].Value
@@ -2639,5 +2641,105 @@ Describe "Release files (v4.8)" {
         $line = @(Get-Content -Path $ui -Encoding UTF8 | Where-Object { $_ -match '^\$script:AppVersion\s*=' })[0]
         $app = [regex]::Match($line, '"([^"]+)"').Groups[1].Value
         Get-LatestVersionFromJson (Get-Content $vf -Raw | ConvertFrom-Json) | Should -Be $app
+    }
+}
+
+
+Describe "Design tokens (V7.0)" {
+    It "keeps every spacing and radius value on the 4 px grid" {
+        $s = Get-DesignScale
+        foreach ($v in $s.Space.PSObject.Properties.Value) { ($v % 4) | Should -Be 0 }
+        foreach ($v in $s.Radius.PSObject.Properties.Value) { ($v % 4) | Should -Be 0 }
+    }
+    It "keeps motion durations at 150 ms or less" {
+        foreach ($v in (Get-DesignScale).Motion.PSObject.Properties.Value) { $v | Should -BeLessOrEqual 150 }
+    }
+    It "rounds <Value> px at scale <Scale> to <Expected>" -TestCases @(
+        @{ Value = 10; Scale = 1.0; Expected = 12 }
+        @{ Value = 9;  Scale = 1.0; Expected = 8 }
+        @{ Value = 13; Scale = 1.5; Expected = 12 }
+        @{ Value = 0;  Scale = 2.0; Expected = 0 }
+    ) {
+        ConvertTo-GridPx -Value $Value -Scale $Scale | Should -Be $Expected
+    }
+    It "computes WCAG contrast: black on white is 21, equal colours are 1" {
+        [math]::Round((Get-ContrastRatio -A @(0, 0, 0) -B @(255, 255, 255)), 2) | Should -Be 21
+        [math]::Round((Get-ContrastRatio -A @(40, 50, 60) -B @(40, 50, 60)), 2) | Should -Be 1
+    }
+    It "derives a lighter hover and a darker pressed accent on dark surfaces" {
+        $a = @(56, 189, 248)
+        $st = Get-AccentStates -Rgb $a -DarkSurface $true
+        (Get-RelativeLuminance -Rgb $st.Hover) | Should -BeGreaterThan (Get-RelativeLuminance -Rgb $a)
+        (Get-RelativeLuminance -Rgb $st.Pressed) | Should -BeLessThan (Get-RelativeLuminance -Rgb $a)
+    }
+    It "derives darker hover and pressed accents on light surfaces" {
+        $a = @(2, 132, 199)
+        $st = Get-AccentStates -Rgb $a -Surface @(255, 255, 255) -DarkSurface $false
+        (Get-RelativeLuminance -Rgb $st.Hover) | Should -BeLessThan (Get-RelativeLuminance -Rgb $a)
+        (Get-RelativeLuminance -Rgb $st.Pressed) | Should -BeLessThan (Get-RelativeLuminance -Rgb $st.Hover)
+    }
+    It "picks readable text on the accent" {
+        ((Get-AccentStates -Rgb @(255, 221, 0)).OnAccent -join ",") | Should -Be "0,0,0"
+        ((Get-AccentStates -Rgb @(0, 0, 128)).OnAccent -join ",") | Should -Be "255,255,255"
+    }
+    It "has a token map without duplicates and with the core roles" {
+        $m = Get-TokenMap
+        @($m.Values | Select-Object -Unique).Count | Should -Be $m.Count
+        foreach ($k in @("surface.card", "text.primary", "text.muted", "text.disabled", "accent", "accent.hover", "accent.pressed", "accent.subtle", "accent.text")) {
+            $m.Contains($k) | Should -BeTrue
+        }
+    }
+}
+
+Describe "Status bar and toasts (V7.0)" {
+    It "lists data age, market and privacy mode" {
+        $p = @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 30 -Market "Börse offen" -Privacy $true)
+        $p.Count | Should -Be 3
+        $p[0] | Should -Be "Stand 10:00:00 (vor 30 s)"
+        $p[2] | Should -Be "Privat-Modus"
+    }
+    It "switches to minutes when the data is older than 90 seconds" {
+        @(Get-StatusBarParts -Stand "10:00:00" -AgeSec 300)[0] | Should -Be "Stand 10:00:00 (vor 5 min)"
+    }
+    It "says so when there is no data yet" {
+        @(Get-StatusBarParts)[0] | Should -Be "Noch keine Daten"
+    }
+}
+
+Describe "Chip row layout (V7.0)" {
+    It "shows every chip when they fit" {
+        $l = Get-ChipLayout -Widths @(50, 60, 70) -Available 400
+        $l.Shown | Should -Be 3
+        $l.Overflow | Should -BeFalse
+        ($l.X -join ",") | Should -Be "0,56,122"
+    }
+    It "moves the rest behind a more chip when the row is too narrow" {
+        $l = Get-ChipLayout -Widths @(50, 60, 70) -Available 150
+        $l.Shown | Should -Be 1
+        $l.Overflow | Should -BeTrue
+    }
+    It "always keeps the first chip" {
+        (Get-ChipLayout -Widths @(200, 60) -Available 100).Shown | Should -Be 1
+    }
+    It "handles an empty list" {
+        (Get-ChipLayout -Widths @() -Available 300).Shown | Should -Be 0
+    }
+}
+
+Describe "Analyse key figure tiles (V7.0)" {
+    It "builds the tiles and colours gains and losses" {
+        $k = @(Get-AnalysisKpiTiles -Value 10000 -Invested 8000 -Dividends 200 -Xirr 0.123 -WindowResult 150 -RangeLabel "1J")
+        ($k | ForEach-Object { $_.Id }) -join "," | Should -Be "Value,Result,Xirr,Div,Window"
+        ($k | Where-Object { $_.Id -eq "Result" }).Kind | Should -Be "up"
+        ($k | Where-Object { $_.Id -eq "Value" }).Kind | Should -Be "flat"
+    }
+    It "marks a loss as down and leaves out the period tile without a window" {
+        $k = @(Get-AnalysisKpiTiles -Value 7000 -Invested 8000 -Dividends 0 -Xirr -0.05)
+        ($k | Where-Object { $_.Id -eq "Result" }).Kind | Should -Be "down"
+        ($k | Where-Object { $_.Id -eq "Xirr" }).Kind | Should -Be "down"
+        @($k).Count | Should -Be 4
+    }
+    It "shows a dash when the XIRR is unknown" {
+        (@(Get-AnalysisKpiTiles -Value 100 -Invested 100 -Dividends 0 -Xirr ([double]::NaN)) | Where-Object { $_.Id -eq "Xirr" }).Text | Should -Be "-"
     }
 }

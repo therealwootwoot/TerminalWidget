@@ -4658,6 +4658,165 @@ function Get-UiSpec {
 }
 
 function Get-UiStyles { return @("Refined", "Fresh") }
+
+# ------------------------------------------------------------------------------
+# V7.0: design tokens - scales, accent states, contrast
+# ------------------------------------------------------------------------------
+function Get-DesignScale {
+    # One scale for the whole widget (before DPI scaling). Everything is a multiple of 4.
+    return [PSCustomObject]@{
+        Space  = [PSCustomObject]@{ XS = 4; S = 8; M = 12; L = 16; XL = 24 }
+        Radius = [PSCustomObject]@{ S = 4; M = 8; L = 12 }
+        Font   = [PSCustomObject]@{ Caption = 7.5; Body = 8.5; BodyStrong = 8.5; Title = 11.0; Display = 16.0 }
+        Motion = [PSCustomObject]@{ Fast = 80; Normal = 120; Slow = 150 }   # milliseconds, at most 150
+    }
+}
+
+function ConvertTo-GridPx {
+    # Rounds a size to the 4 px grid; after DPI scaling the grid step is 4 * Scale
+    param([double]$Value, [double]$Scale = 1.0)
+    $step = 4.0 * $Scale
+    if ($step -le 0) { return [int][math]::Round($Value) }
+    $n = [math]::Round($Value / $step, [System.MidpointRounding]::AwayFromZero)
+    return [int][math]::Round($n * $step)
+}
+
+function Get-RelativeLuminance {
+    # WCAG relative luminance of an sRGB colour (R, G, B = 0..255)
+    param([int[]]$Rgb)
+    $lin = @()
+    foreach ($v in @($Rgb[0], $Rgb[1], $Rgb[2])) {
+        $s = $v / 255.0
+        if ($s -le 0.03928) { $lin += ($s / 12.92) } else { $lin += [math]::Pow((($s + 0.055) / 1.055), 2.4) }
+    }
+    return (0.2126 * $lin[0] + 0.7152 * $lin[1] + 0.0722 * $lin[2])
+}
+
+function Get-ContrastRatio {
+    # WCAG contrast ratio, 1 .. 21
+    param([int[]]$A, [int[]]$B)
+    $la = Get-RelativeLuminance -Rgb $A
+    $lb = Get-RelativeLuminance -Rgb $B
+    $hi = [math]::Max($la, $lb)
+    $lo = [math]::Min($la, $lb)
+    return (($hi + 0.05) / ($lo + 0.05))
+}
+
+function Get-MixRgb {
+    # T = share of A (0..1)
+    param([int[]]$A, [int[]]$B, [double]$T)
+    return @(
+        [int]($B[0] + ($A[0] - $B[0]) * $T),
+        [int]($B[1] + ($A[1] - $B[1]) * $T),
+        [int]($B[2] + ($A[2] - $B[2]) * $T)
+    )
+}
+
+function Get-AccentStates {
+    # Hover / pressed / subtle-background colours and the text colour on top of
+    # the accent, all derived from the base accent, so any Windows accent works.
+    param([int[]]$Rgb, [int[]]$Surface = @(24, 24, 27), [bool]$DarkSurface = $true)
+    $white = @(255, 255, 255)
+    $black = @(0, 0, 0)
+    if ($DarkSurface) {
+        $hover   = Get-MixRgb -A $white -B $Rgb -T 0.15
+        $pressed = Get-MixRgb -A $black -B $Rgb -T 0.20
+    }
+    else {
+        $hover   = Get-MixRgb -A $black -B $Rgb -T 0.12
+        $pressed = Get-MixRgb -A $black -B $Rgb -T 0.25
+    }
+    $subtle = Get-MixRgb -A $Rgb -B $Surface -T 0.18
+    $onAccent = $black
+    if ((Get-ContrastRatio -A $Rgb -B $white) -ge (Get-ContrastRatio -A $Rgb -B $black)) { $onAccent = $white }
+    return [PSCustomObject]@{ Hover = $hover; Pressed = $pressed; Subtle = $subtle; OnAccent = $onAccent }
+}
+
+function Get-StatusBarParts {
+    # V7.0: the pieces of the status bar at the bottom of the window
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false)
+    $parts = @()
+    if ($Stand) {
+        $a = ""
+        if (-not [double]::IsNaN($AgeSec)) {
+            if ($AgeSec -lt 90) { $a = " (vor {0:N0} s)" -f $AgeSec } else { $a = " (vor {0:N0} min)" -f [math]::Floor($AgeSec / 60) }
+        }
+        $parts += ("Stand " + $Stand + $a)
+    }
+    else { $parts += "Noch keine Daten" }
+    if ($Market) { $parts += $Market }
+    if ($Privacy) { $parts += "Privat-Modus" }
+    return $parts
+}
+
+function Get-ChipLayout {
+    # V7.0: how many chips fit into one row; the rest goes behind a "more" chip.
+    # Returns Shown (number of chips), Overflow ($true = a "more" chip is needed) and X (left edge of each shown chip).
+    param([int[]]$Widths, [int]$Available, [int]$Gap = 6, [int]$AddWidth = 26, [int]$MoreWidth = 34)
+    $n = @($Widths).Count
+    $total = 0
+    foreach ($w in @($Widths)) { $total += ([int]$w + $Gap) }
+    $x = @()
+    if ($n -eq 0) { return [PSCustomObject]@{ Shown = 0; Overflow = $false; X = @() } }
+    if (($total + $AddWidth) -le $Available) {
+        $pos = 0
+        foreach ($w in @($Widths)) { $x += $pos; $pos += ([int]$w + $Gap) }
+        return [PSCustomObject]@{ Shown = $n; Overflow = $false; X = $x }
+    }
+    $cap = $Available - ($MoreWidth + $Gap + $AddWidth + $Gap)
+    $pos = 0
+    $shown = 0
+    foreach ($w in @($Widths)) {
+        if ($shown -gt 0 -and ($pos + [int]$w) -gt $cap) { break }
+        $x += $pos
+        $pos += ([int]$w + $Gap)
+        $shown++
+    }
+    return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
+}
+
+function Get-AnalysisKpiTiles {
+    # V7.0: the key figures at the top of the Analyse "Wertentwicklung" page.
+    # Kind = up / down / flat decides the colour (green / red only for gains / losses).
+    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "")
+    $res = $Value + $Dividends - $Invested
+    $kindOf = { param([double]$x) if ([double]::IsNaN($x) -or [math]::Abs($x) -lt 0.005) { return "flat" } elseif ($x -gt 0) { return "up" } else { return "down" } }
+    $pct = [double]::NaN
+    if ($Invested -gt 0) { $pct = $res / $Invested * 100.0 }
+    $tiles = @()
+    $tiles += [PSCustomObject]@{ Id = "Value"; Label = "Depotwert"; Text = ("{0:N0} {1}" -f $Value, $Base); Sub = ("Investiert {0:N0}" -f $Invested); Kind = "flat" }
+    $tiles += [PSCustomObject]@{ Id = "Result"; Label = "Ergebnis"; Text = ("{0:+#,##0;-#,##0;0} {1}" -f $res, $Base); Sub = $(if ([double]::IsNaN($pct)) { "" } else { "{0:+0.0;-0.0;0.0} % auf Einsatz" -f $pct }); Kind = (& $kindOf $res) }
+    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = "XIRR"; Kind = (& $kindOf $Xirr) }
+    $tiles += [PSCustomObject]@{ Id = "Div"; Label = "Dividenden"; Text = ("{0:N0} {1}" -f $Dividends, $Base); Sub = "bisher erhalten"; Kind = "flat" }
+    if (-not [double]::IsNaN($WindowResult)) {
+        $tiles += [PSCustomObject]@{ Id = "Window"; Label = $(if ($RangeLabel) { "Im Zeitraum ($RangeLabel)" } else { "Im Zeitraum" }); Text = ("{0:+#,##0;-#,##0;0} {1}" -f $WindowResult, $Base); Sub = ""; Kind = (& $kindOf $WindowResult) }
+    }
+    return $tiles
+}
+
+function Get-TokenMap {
+    # Token name -> key of the palette ($script:Pal). Drawing code asks for tokens only.
+    return [ordered]@{
+        "surface.window"  = "BodyBg"
+        "surface.header"  = "HeaderBg"
+        "surface.panel"   = "PanelBg"
+        "surface.card"    = "Card"
+        "surface.raised"  = "Input"
+        "surface.hover"   = "Hover"
+        "border.subtle"   = "Grid"
+        "border.strong"   = "Border"
+        "text.primary"    = "Text"
+        "text.muted"      = "Muted"
+        "text.disabled"   = "Disabled"
+        "accent"          = "Accent"
+        "accent.hover"    = "AccentHover"
+        "accent.pressed"  = "AccentPressed"
+        "accent.subtle"   = "AccentSubtle"
+        "accent.text"     = "OnAccent"
+        "warning"         = "Warn"
+    }
+}
+
 function Get-RowDensities { return @("Compact", "Normal", "Comfortable") }
 function Get-TapeSpeeds { return @("Slow", "Normal", "Fast") }
 
@@ -4794,7 +4953,7 @@ function Get-PortableSettingKeys {
         "RefreshSeconds", "SlowRefreshSeconds", "HttpTimeoutSeconds", "ClosedPollMinutes",
         "SmaFastPeriod", "SmaSlowPeriod", "RsiPeriod", "RsiOverbought", "RsiOversold", "MaType", "LowerPanel",
         "Theme", "AccentColor", "AccentHex", "Language", "TopMost", "CompactTape",
-        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons",
+        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "ShowToasts", "PerMonitorDpi", "DayChangePill", "Animations", "FollowHighContrast",
         "ShowTrayNotifications", "NotifyMarketOpen", "NotifyEarnings", "QuietFrom", "QuietTo",
         "Layout", "Opacity", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalChartPct", "CompactShow",
         "UpDownScheme", "UpColor", "DownColor", "ShowArrows", "PriceFlash", "TrayFollowsDepot", "SnapToEdges",
