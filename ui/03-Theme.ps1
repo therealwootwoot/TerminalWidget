@@ -262,7 +262,9 @@ function Get-ThemeBaseColors {
         $rgb = ConvertFrom-HexColor ([string]$pp.Value)
         if ($null -ne $rgb) { $t[$pp.Name] = [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) }
     }
-    $t["DwmCap"] = $t["HeaderBg"]; $t["DwmBdr"] = $t["Border"]; $t["DwmDark"] = ($t["BodyBg"].GetBrightness() -lt 0.5)
+    # title bar colours are Windows COLORREF numbers (0x00BBGGRR), not Color objects
+    $ref = { param($c) [int](([int]$c.B * 65536) + ([int]$c.G * 256) + [int]$c.R) }
+    $t["DwmCap"] = (& $ref $t["HeaderBg"]); $t["DwmBdr"] = (& $ref $t["Border"]); $t["DwmDark"] = [int]($t["BodyBg"].GetBrightness() -lt 0.5)
     return $t
 }
 

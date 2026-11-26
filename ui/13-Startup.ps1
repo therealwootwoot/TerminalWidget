@@ -1784,6 +1784,7 @@ function Invoke-SmokeTest {
             Save-CustomTheme (ConvertFrom-ThemeData ([PSCustomObject]@{ Name = "Smoke Theme"; Base = "Light"; Colors = [PSCustomObject]@{ Card = "#123456" } }))
             Set-ThemeByName "Smoke Theme"; & $pump
             if ($script:Pal.Card.R -ne 0x12 -or $script:Pal.Card.B -ne 0x56) { throw "own theme colour not used: $($script:Pal.Card)" }
+            foreach ($dk in @("DwmCap", "DwmBdr", "DwmDark")) { if ($script:Pal[$dk] -isnot [int]) { throw "title bar value $dk is not a number: $($script:Pal[$dk])" } }
         } finally {
             $script:Config.ColorRules = $old.Rules; $script:Config.CustomThemes = $old.Themes
             Set-ThemeByName $old.Theme; Set-ActiveTab -TabName "Chart"
