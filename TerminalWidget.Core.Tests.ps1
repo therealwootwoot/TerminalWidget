@@ -2861,3 +2861,39 @@ Describe "V7.3 helpers" {
         Test-AmountColumn "Kurs (USD)" | Should -BeFalse
     }
 }
+
+Describe "V7.5 helpers" {
+    It "keeps the design widths at the minimum size" {
+        $w = Get-WatchPanelWidths -ViewW 756
+        $w.Grid | Should -Be 480
+        $w.Alarm | Should -Be 252
+        $w.Detail | Should -Be 0
+        $w.CanDetail | Should -BeFalse
+    }
+    It "widens the alarm column and adds details in a very wide view" {
+        $w = Get-WatchPanelWidths -ViewW 1900
+        $w.Alarm | Should -Be 420
+        $w.Detail | Should -Be 260
+        ($w.Grid + $w.Detail + $w.Alarm + 32) | Should -Be 1900
+        $off = Get-WatchPanelWidths -ViewW 1900 -WantDetail $false
+        $off.Detail | Should -Be 0
+        $off.CanDetail | Should -BeTrue
+        ($off.Grid + $off.Alarm + 24) | Should -Be 1900
+    }
+    It "never lets the list get smaller than 480" {
+        foreach ($vw in 756, 800, 900, 1000, 1200, 1600) { (Get-WatchPanelWidths -ViewW $vw).Grid | Should -BeGreaterOrEqual 480 }
+    }
+    It "builds detail lines and hides the share count in privacy mode" {
+        $q = [PSCustomObject]@{ Currency = "USD"; LongName = "Nvidia"; Price = 100.0; ChangePct = 1.5; PrevClose = 98.5; ExtPrice = 0.0; ExtPct = 0.0; High52 = 125.0; Low52 = 50.0; Rsi14 = [double]::NaN }
+        $pos = [PSCustomObject]@{ Shares = 7.0; AvgPrice = 80.0; Currency = "USD" }
+        $a = (@(Get-TickerDetailLines -Symbol "NVDA" -Quote $q -Position $pos -Note "Test") -join "`n")
+        $a | Should -Match "Nvidia"
+        $a | Should -Match "52W Hoch"
+        $a | Should -Match "Notiz"
+        $a | Should -Not -Match "RSI"
+        $a | Should -Match "Stück     7"
+        $b = (@(Get-TickerDetailLines -Symbol "NVDA" -Quote $q -Position $pos -Privacy $true) -join "`n")
+        $b | Should -Not -Match "Stück     7"
+        (@(Get-TickerDetailLines -Symbol "X") -join "|") | Should -Be "X|Noch keine Kursdaten."
+    }
+}

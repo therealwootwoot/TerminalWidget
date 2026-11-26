@@ -718,33 +718,21 @@ function Show-BuyDatePrompt {
     # Returns yyyy-MM-dd, or "" when cancelled
     param([string]$Ticker, [double]$Shares)
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Kaufdatum - $Ticker" -W (S 360) -H (S 150)
+    # v7.5: standard dialog template
+    $sd = New-StandardDialog -Title "Kaufdatum - $Ticker" -Subtitle "Für Wertentwicklung, Rendite (XIRR) und Jahresreport." -W 400 -BodyH 62
+    $dlg = $sd.Dlg
     $lbl = New-Object System.Windows.Forms.Label
-    $lbl.SetBounds((S 14), (S 12), (S 332), (S 40))
-    $lbl.Text = ("Wann wurden die {0:N4} Stück {1} gekauft?`r`nFür Wertentwicklung, Rendite (XIRR) und Jahresreport." -f $Shares, $Ticker)
-    $dlg.Controls.Add($lbl)
+    $lbl.SetBounds(0, (S 2), $sd.Body.Width, (S 20))
+    $lbl.Text = ("Wann wurden die {0:N4} Stück {1} gekauft?" -f $Shares, $Ticker)
+    $sd.Body.Controls.Add($lbl)
     $dp = New-Object System.Windows.Forms.DateTimePicker
-    $dp.SetBounds((S 14), (S 60), (S 140), (S 24))
+    $dp.SetBounds(0, (S 28), (S 140), (S 24))
     $dp.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
     $dp.CustomFormat = "dd.MM.yyyy"
     $dp.MaxDate = (Get-Date).Date
     $dp.Value = (Get-Date).Date
-    $dlg.Controls.Add($dp)
+    $sd.Body.Controls.Add($dp)
     Set-DynTip $dp "Tippen oder aus dem Kalender wählen. Enter = übernehmen." "OPENING"
-    $ok = New-Object System.Windows.Forms.Button
-    $ok.SetBounds((S 156), (S 106), (S 90), (S 28))
-    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $ok.Text = "OK"
-    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $dlg.Controls.Add($ok)
-    $cancel = New-Object System.Windows.Forms.Button
-    $cancel.SetBounds((S 252), (S 106), (S 94), (S 28))
-    Style-FlatButton -Btn $cancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
-    $cancel.Text = "Abbrechen"
-    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $dlg.Controls.Add($cancel)
-    $dlg.AcceptButton = $ok
-    $dlg.CancelButton = $cancel
     $dlg.Add_Shown({ param($sender, $e) $sender.ActiveControl = $sender.AcceptButton })
     $res = $dlg.ShowDialog($form)
     $iso = $dp.Value.ToString("yyyy-MM-dd")

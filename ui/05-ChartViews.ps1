@@ -382,8 +382,11 @@ function Select-CurrencyInCombo {
     $Combo.SelectedIndex = $idx
 }
 
-$txtPortBuyAmt = New-PortInput -LabelText "Nachkauf:"     -X 318 -Y 8 -W 96
-$txtPortTarget = New-PortInput -LabelText "Oder Ziel-EK:" -X 420 -Y 8 -W 98
+# v7.5: the top-up calculator has its own row that opens on demand
+$txtPortBuyAmt = New-PortInput -LabelText "Nachkauf:"     -X 8   -Y 88 -W 96
+$lblPortBuyAmt = $script:PortInputLabels[$script:PortInputLabels.Count - 1]
+$txtPortTarget = New-PortInput -LabelText "Oder Ziel-EK:" -X 110 -Y 88 -W 98
+$lblPortTarget = $script:PortInputLabels[$script:PortInputLabels.Count - 1]
 Set-Tip $txtPortAvg "EK-Kurs je Stück in der EK-Währung" "EK"
 Set-Tip $txtPortBuyAmt "Betrag in Anzeigewährung für die Nachkauf-Simulation" "NACHKAUF"
 Set-Tip $txtPortTarget "Gewünschter neuer EK in Anzeigewährung" "TARGETEK"
@@ -405,7 +408,7 @@ $btnPortDel.Text = "Löschen"
 $pnlPortBottom.Controls.Add($btnPortDel)
 
 $btnPortTx = New-Object System.Windows.Forms.Button
-$btnPortTx.Location = New-Object System.Drawing.Point((S 610), (S 56))
+$btnPortTx.Location = New-Object System.Drawing.Point((S 476), (S 56))
 $btnPortTx.Size = New-Object System.Drawing.Size((S 90), (S 26))
 Style-FlatButton -Btn $btnPortTx -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
 $btnPortTx.Font = $fontUiBold
@@ -415,7 +418,7 @@ Set-Tip $btnPortTx "Kauf / Verkauf / Dividende buchen (realisierter G/V wird ges
 
 # v5.0: more depot tools behind a small menu button
 $btnPortMore = New-Object System.Windows.Forms.Button
-$btnPortMore.Location = New-Object System.Drawing.Point((S 702), (S 56))
+$btnPortMore.Location = New-Object System.Drawing.Point((S 568), (S 56))
 $btnPortMore.Size = New-Object System.Drawing.Size((S 28), (S 26))
 Style-FlatButton -Btn $btnPortMore -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
 $btnPortMore.Font = $fontUiBold
@@ -437,8 +440,8 @@ $miPmHeat.Add_Click({ Show-AnalysisDialog -Page "Heat" })
 $btnPortMore.Add_Click({ param($sender, $e) $portMoreMenu.Show($sender, 0, $sender.Height) })
 
 $btnPortHist = New-Object System.Windows.Forms.Button
-$btnPortHist.Location = New-Object System.Drawing.Point((S 610), (S 88))
-$btnPortHist.Size = New-Object System.Drawing.Size((S 58), (S 26))
+$btnPortHist.Location = New-Object System.Drawing.Point((S 600), (S 56))
+$btnPortHist.Size = New-Object System.Drawing.Size((S 62), (S 26))
 Style-FlatButton -Btn $btnPortHist -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
 $btnPortHist.Font = $fontUi
 $btnPortHist.Text = "Historie"
@@ -447,8 +450,8 @@ Set-Tip $btnPortHist "Alle Transaktionen, realisierter G/V, CSV-Export, Jahresre
 
 # v4.1: portfolio analysis (value history, returns, allocation)
 $btnPortAna = New-Object System.Windows.Forms.Button
-$btnPortAna.Location = New-Object System.Drawing.Point((S 672), (S 88))
-$btnPortAna.Size = New-Object System.Drawing.Size((S 58), (S 26))
+$btnPortAna.Location = New-Object System.Drawing.Point((S 666), (S 56))
+$btnPortAna.Size = New-Object System.Drawing.Size((S 64), (S 26))
 Style-FlatButton -Btn $btnPortAna -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
 $btnPortAna.Font = $fontUi
 $btnPortAna.Text = "Analyse"
@@ -463,6 +466,34 @@ $lblNachkaufOut.Font = $fontMono
 $lblNachkaufOut.ForeColor = $script:Pal.Text
 $lblNachkaufOut.Text = "Position wählen oder Ticker, Stück & EK eintragen für Live-Nachkauf-Simulation."
 $pnlPortBottom.Controls.Add($lblNachkaufOut)
+
+$btnPortSim = New-Object System.Windows.Forms.Button
+$btnPortSim.Location = New-Object System.Drawing.Point((S 8), (S 56))
+$btnPortSim.Size = New-Object System.Drawing.Size((S 150), (S 26))
+Style-FlatButton -Btn $btnPortSim -BgColor $script:Pal.Input -FgColor $script:Pal.Text -BorderColor $script:Pal.Border
+$btnPortSim.Font = $fontUi
+$pnlPortBottom.Controls.Add($btnPortSim)
+Set-Tip $btnPortSim "Nachkauf- und Ziel-EK-Rechner ein- oder ausklappen" "NACHKAUF"
+$btnPortSim.Add_Click({
+    $script:Config.PortSimOpen = -not [bool]$script:Config.PortSimOpen
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-PortSimLayout
+    Update-NachkaufSimulation
+})
+
+function Update-PortSimLayout {
+    # v7.5: closed = one message line next to the button; open = inputs + result below
+    $open = [bool]$script:Config.PortSimOpen
+    $arrow = if ($open) { [string][char]0x25BE } else { [string][char]0x25B8 }
+    $btnPortSim.Text = "{0} {1}" -f $arrow, (Tr "Nachkauf-Rechner")
+    foreach ($c in @($lblPortBuyAmt, $txtPortBuyAmt, $lblPortTarget, $txtPortTarget)) { $c.Visible = $open }
+    $h = if ($open) { S 172 } else { S 90 }
+    $pnlPortBottom.SetBounds($pnlPortBottom.Left, ($viewPortfolio.ClientSize.Height - $h - (S 8)), $pnlPortBottom.Width, $h)
+    $dgvPortfolio.Height = [math]::Max((S 40), ($pnlPortBottom.Top - $dgvPortfolio.Top - (S 6)))
+    $right = $pnlPortBottom.Width - (S 8)
+    if ($open) { $lblNachkaufOut.SetBounds((S 218), (S 90), [math]::Max((S 100), ($right - (S 218))), (S 78)) }
+    else { $lblNachkaufOut.SetBounds((S 166), (S 55), [math]::Max((S 100), ($btnPortTx.Left - (S 174))), (S 30)) }
+}
 
 # ==============================================================================
 # VIEW 3: WATCHLIST & ALARME VIEW
@@ -1466,8 +1497,69 @@ $btnPortTx.Anchor   = $aT -bor $aR
 $btnPortMore.Anchor = $aT -bor $aR
 $btnPortHist.Anchor = $aT -bor $aR
 $btnPortAna.Anchor  = $aT -bor $aR
+$btnPortSim.Anchor  = $aT -bor $aL
+Update-PortSimLayout
 
-# Watchlist view: list grows, alarm column keeps its width on the right
+# v7.5: details for the selected ticker, shown when the watchlist is very wide
+$btnWlDetail = New-Object System.Windows.Forms.Button
+$btnWlDetail.Location = New-Object System.Drawing.Point((S 496), (S 35))
+$btnWlDetail.Size = New-Object System.Drawing.Size((S 90), (S 25))
+Style-FlatButton -Btn $btnWlDetail -BgColor $script:Pal.Input -FgColor $script:Pal.Text -BorderColor $script:Pal.Border
+$btnWlDetail.Font = $fontUi
+$btnWlDetail.Text = "Details"
+$btnWlDetail.Visible = $false
+$viewWatch.Controls.Add($btnWlDetail)
+Set-Tip $btnWlDetail "Details zum markierten Ticker ein- oder ausblenden (nur bei breiter Watchlist)"
+$lblWlDetail = New-Object System.Windows.Forms.Label
+$lblWlDetail.Font = $fontMono
+$lblWlDetail.ForeColor = $script:Pal.Text
+$lblWlDetail.BackColor = $script:Pal.Input
+$lblWlDetail.Padding = New-Object System.Windows.Forms.Padding((S 6))
+$lblWlDetail.UseMnemonic = $false
+$lblWlDetail.Visible = $false
+$viewWatch.Controls.Add($lblWlDetail)
+
+# v7.5: alarm column controls with their design position; per row one control stretches
+$script:AlarmCol = @()
+foreach ($def in @(
+    @($lblAlTitle, "stretch"), @($btnAlertLog, "move"),
+    @($txtAlertTicker, "keep"), @($cmbAlertCond, "stretch"), @($txtAlertPrice, "move"), @($btnAddAlert, "move"), @($btnDelAlert, "move"),
+    @($txtAlertNote, "stretch"), @($cmbAlertExp, "move"), @($cmbAlertRearm, "move"), @($lstAlerts, "stretch"))) {
+    $script:AlarmCol += [PSCustomObject]@{ C = $def[0]; Mode = $def[1]; Off = ($def[0].Left - (S 496)); W = $def[0].Width }
+}
+
+function Update-WatchLayout {
+    # v7.5: the alarm column grows with the window (252 to 420 px); very wide views get a detail panel
+    $vw = $viewWatch.ClientSize.Width
+    if ($vw -lt (S 700)) { return }
+    $w = Get-WatchPanelWidths -ViewW ([int][math]::Floor($vw / $script:DpiScale)) -WantDetail ([bool]$script:Config.WatchDetail)
+    $alarmW = S $w.Alarm
+    $detailW = if ($w.Detail -gt 0) { S $w.Detail } else { 0 }
+    $colX = $vw - (S 8) - $alarmW
+    $gridW = $colX - (S 16) - $(if ($detailW -gt 0) { $detailW + (S 8) } else { 0 })
+    $extra = $alarmW - (S 252)
+    foreach ($a in $script:AlarmCol) {
+        $x = $colX + $a.Off + $(if ($a.Mode -eq "move") { $extra } else { 0 })
+        $cw = $a.W + $(if ($a.Mode -eq "stretch") { $extra } else { 0 })
+        $a.C.Left = $x
+        $a.C.Width = $cw
+    }
+    $dgvWatchlist.Width = $gridW
+    $script:PnlWlChips.Width = $gridW
+    $btnWlDetail.Visible = [bool]$w.CanDetail
+    if ($detailW -gt 0) { $lblWlDetail.SetBounds(($colX - (S 8) - $detailW), $dgvWatchlist.Top, $detailW, $dgvWatchlist.Height) }
+    $lblWlDetail.Visible = ($detailW -gt 0)
+    if ($detailW -gt 0) { Update-WatchDetail }
+}
+$btnWlDetail.Add_Click({
+    $script:Config.WatchDetail = -not [bool]$script:Config.WatchDetail
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-WatchLayout
+})
+$viewWatch.Add_Resize({ Update-WatchLayout })
+$dgvWatchlist.Add_SelectionChanged({ if (-not $script:SuppressGridSelection -and $lblWlDetail.Visible) { Update-WatchDetail } })
+
+# Watchlist view: list grows, alarm column on the right (width: Update-WatchLayout)
 $dgvWatchlist.Anchor = $anchorAll
 foreach ($ctl in @($lblAlTitle, $btnAlertLog, $txtAlertTicker, $cmbAlertCond, $txtAlertPrice, $btnAddAlert, $btnDelAlert, $txtAlertNote, $cmbAlertExp, $cmbAlertRearm)) { $ctl.Anchor = $aT -bor $aR }
 $lstAlerts.Anchor = $aT -bor $aB -bor $aR

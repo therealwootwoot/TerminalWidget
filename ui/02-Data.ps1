@@ -1413,45 +1413,19 @@ function Switch-CompareTicker {
 
 function Show-CompareDialog {
     $p = $script:Pal
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Add_HandleCreated($script:DialogChromeHandler)
-    $dlg.Text = "Vergleichen mit"
-    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.ShowInTaskbar = $false
-    $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
-    $dlg.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
-    $dlg.BackColor = $p.BodyBg; $dlg.ForeColor = $p.Text; $dlg.Font = $fontUi
+    # v7.5: standard dialog template
+    $sd = New-StandardDialog -Title "Vergleichen mit" -Subtitle "Ticker (Kursentwicklung in % ab Chartbeginn):" -W 400 -BodyH 32 -OkText "Vergleichen"
+    $dlg = $sd.Dlg
     $dlg.TopMost = $true
-    $dlg.ClientSize = New-Object System.Drawing.Size((S 320), (S 112))
-
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.SetBounds((S 12), (S 12), (S 296), (S 18))
-    $lbl.Text = "Ticker (Kursentwicklung in % ab Chartbeginn):"
-    $dlg.Controls.Add($lbl)
 
     $cb = New-Object System.Windows.Forms.ComboBox
-    $cb.SetBounds((S 12), (S 34), (S 296), (S 24))
+    $cb.SetBounds(0, (S 4), $sd.Body.Width, (S 24))
     $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
     $cb.BackColor = $p.Input; $cb.ForeColor = $p.Text; $cb.Font = $fontMono
     foreach ($sug in @("QQQ", "SPY", "^GSPC", "^NDX", "SOXX", "^GDAXI", "^SSMI", "^ATX", "BTC-USD")) { [void]$cb.Items.Add($sug) }
     foreach ($w in $script:Config.Watchlist) { if (-not $cb.Items.Contains($w)) { [void]$cb.Items.Add($w) } }
     $cb.Text = if ($script:Config.CompareTicker) { [string]$script:Config.CompareTicker } else { "QQQ" }
-    $dlg.Controls.Add($cb)
-
-    $ok = New-Object System.Windows.Forms.Button
-    $ok.SetBounds((S 118), (S 72), (S 92), (S 28))
-    Style-FlatButton -Btn $ok -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $ok.Text = "Vergleichen"
-    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $dlg.Controls.Add($ok)
-    $cancel = New-Object System.Windows.Forms.Button
-    $cancel.SetBounds((S 216), (S 72), (S 92), (S 28))
-    Style-FlatButton -Btn $cancel -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
-    $cancel.Text = "Abbrechen"
-    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $dlg.Controls.Add($cancel)
-    $dlg.AcceptButton = $ok
-    $dlg.CancelButton = $cancel
+    $sd.Body.Controls.Add($cb)
 
     $owner = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { $script:FsForm } else { $form }
     $res = $dlg.ShowDialog($owner)

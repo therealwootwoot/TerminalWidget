@@ -659,6 +659,9 @@ function Update-NachkaufSimulation {
         $lines.Add(("{0,-8} | Aktueller Marktkurs: {1:N2} {2}" -f $sym, $mktPrice, $dispCurr))
     }
 
+    # v7.5: closed calculator -> only the position line
+    if (-not [bool]$script:Config.PortSimOpen) { $lblNachkaufOut.Text = ($lines -join "`r`n"); return }
+
     if ($buyAmount -gt 0) {
         $addShares = $buyAmount / $mktPrice
         $newTotalShares = $shares + $addShares
@@ -682,6 +685,20 @@ function Update-NachkaufSimulation {
     }
 
     $lblNachkaufOut.Text = ($lines -join "`r`n")
+}
+
+function Update-WatchDetail {
+    # v7.5: facts about the selected watchlist ticker from the data already loaded
+    $sym = ""
+    if ($null -ne $dgvWatchlist.CurrentRow -and $dgvWatchlist.CurrentRow.Index -ge 0) { $sym = [string]$dgvWatchlist.CurrentRow.Cells[0].Value }
+    if (-not $sym) { $sym = [string]$script:Config.ActiveTicker }
+    $sym = $sym.ToUpper()
+    $q = if ($script:QuoteStore.ContainsKey($sym)) { $script:QuoteStore[$sym] } else { $null }
+    $pos = if ($script:Portfolio.ContainsKey($sym)) { $script:Portfolio[$sym] } else { $null }
+    $txt = (@(Get-TickerDetailLines -Symbol $sym -Quote $q -Position $pos -Note ([string](Get-TickerNote $sym)) -Privacy ([bool]$script:Config.PrivacyMode)) -join "`r`n")
+    if ($lblWlDetail.Text -ne $txt) { $lblWlDetail.Text = $txt }
+    $lblWlDetail.BackColor = $script:Pal.Input
+    $lblWlDetail.ForeColor = $script:Pal.Text
 }
 
 # Grid rebuild helpers: keep selection + scroll position across refreshes and
@@ -1049,6 +1066,7 @@ function Refresh-WatchlistAndAlerts {
     } finally {
         $script:SuppressGridSelection = $false
     }
+    if ($lblWlDetail.Visible) { Update-WatchDetail }
 
     $alSel = $lstAlerts.SelectedIndex
     $lstAlerts.BeginUpdate()

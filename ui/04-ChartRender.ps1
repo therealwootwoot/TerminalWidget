@@ -283,6 +283,7 @@ $script:EnText = @{
     "Vergleichen mit" = "Compare with"; "Ticker (Kursentwicklung in % ab Chartbeginn):" = "Ticker (performance in % from chart start):"; "Vergleichen" = "Compare"
     "Abbrechen" = "Cancel"; "Kerzen" = "Candles"; "Volumen" = "Volume"; "Vollbild" = "Fullscreen"; "EK-Währ.:" = "Cost ccy:"
     "Position speichern" = "Save position"; "Löschen" = "Delete"; "Transaktion..." = "Transaction..."; "Historie" = "History"; "Analyse" = "Analysis"
+    "Nachkauf-Rechner" = "Top-up calculator"
     "Position wählen oder Ticker, Stück & EK eintragen für Live-Nachkauf-Simulation." = "Pick a position or enter ticker, shares & cost for a live top-up simulation."
     "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" = "Watchlist (drag = order | Del = remove)"; "+ Aktiven Ticker" = "+ Active ticker"; "+ Suchen / Add" = "+ Search / add"
     "Entfernen" = "Remove"; "Alarme (Doppelklick = Reset)" = "Alerts (double-click = reset)"; "Verlauf" = "History"; "Leeren" = "Clear"; "Schließen" = "Close"
@@ -614,7 +615,8 @@ $script:RoundBtnPaint = {
         Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF(0.5, 0.5, ($w - 1.5), ($h - 1.5))) -Radius ([float](S $spec.BtnRadius)) -Pen $pn
         $br.Dispose(); if ($null -ne $pn) { $pn.Dispose() }
         # V7.0: focus ring (keyboard focus only): 2 px accent line, one style in every theme
-        if ($sender.Focused -and $sender.ShowFocusCues) {
+        # v7.5: ShowFocusCues is protected (always empty in PowerShell): skip the ring for mouse clicks instead
+        if ($sender.Focused -and -not [object]::ReferenceEquals($script:MouseBtn, $sender)) {
             $fpen = New-Object System.Drawing.Pen($script:Pal.Accent, 2)
             Fill-RoundedRect -g $g -Brush ([System.Drawing.Brushes]::Transparent) -Rect (New-Object System.Drawing.RectangleF(1, 1, ($w - 3), ($h - 3))) -Radius ([float](S $spec.BtnRadius)) -Pen $fpen
             $fpen.Dispose()
@@ -641,9 +643,10 @@ $script:RoundBtnEnter = {
 }
 $script:RoundBtnLeave = { param($sender, $e) if ([object]::ReferenceEquals($script:HotBtn, $sender)) { $script:HotBtn = $null }; if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; if ($script:BtnFade.ContainsKey($sender)) { $script:BtnFadeTarget[$sender] = 0.0; if (Test-MotionOn) { $script:BtnFadeTimer.Start() } else { $script:BtnFade.Remove($sender); $script:BtnFadeTarget.Remove($sender) } }; $sender.Invalidate() }
 # V7.0: pressed state and focus ring need a repaint
-$script:RoundBtnDown  = { param($sender, $e) $script:PressBtn = $sender; $sender.Invalidate() }
+$script:MouseBtn = $null
+$script:RoundBtnDown  = { param($sender, $e) $script:PressBtn = $sender; $script:MouseBtn = $sender; $sender.Invalidate() }
 $script:RoundBtnUp    = { param($sender, $e) if ([object]::ReferenceEquals($script:PressBtn, $sender)) { $script:PressBtn = $null }; $sender.Invalidate() }
-$script:RoundBtnFocus = { param($sender, $e) $sender.Invalidate() }
+$script:RoundBtnFocus = { param($sender, $e) if (-not $sender.Focused -and [object]::ReferenceEquals($script:MouseBtn, $sender)) { $script:MouseBtn = $null }; $sender.Invalidate() }
 
 function Style-FlatButton {
     param(

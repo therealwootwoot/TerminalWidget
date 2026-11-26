@@ -267,6 +267,7 @@ function Show-SettingsDialog {
     $ch = if ([int]$cfg.SettingsH -gt 0) { [int]$cfg.SettingsH } else { S 560 }
     $dlg.ClientSize = New-Object System.Drawing.Size([math]::Min($cw, $wa.Width - (S 24)), [math]::Min($ch, $wa.Height - (S 48)))
     $dlg.Add_HandleCreated($script:DialogChromeHandler)
+    $dlg.Add_Shown({ param($sender, $e) Add-FocusRings $sender })
 
     # ---- frame: content (fill), page list (left), button bar (bottom) ----
     $host0 = New-Object System.Windows.Forms.Panel
@@ -1164,23 +1165,15 @@ function Read-TextPrompt {
     param([string]$Title, [string]$Prompt, [string]$Value = "")
     if ($script:SmokeMode) { return "Smoke" }
     $p = $script:Pal
-    $dlg = New-DialogForm -Title $Title -W (S 400) -H (S 112)
-    $l = New-Object System.Windows.Forms.Label
-    $l.SetBounds((S 12), (S 10), (S 376), (S 18)); $l.Text = $Prompt; $l.ForeColor = $p.Muted
-    $dlg.Controls.Add($l)
+    # v7.5: standard dialog template
+    $sd = New-StandardDialog -Title $Title -Subtitle $Prompt -W 400 -BodyH 32
+    $dlg = $sd.Dlg
     $tb = New-Object System.Windows.Forms.TextBox
-    $tb.SetBounds((S 12), (S 32), (S 376), (S 24)); $tb.MaxLength = 80; $tb.Text = $Value
+    $tb.SetBounds(0, (S 4), $sd.Body.Width, (S 24)); $tb.MaxLength = 80; $tb.Text = $Value
     $tb.BackColor = $p.Input; $tb.ForeColor = $p.Text; $tb.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $dlg.Controls.Add($tb)
-    $bOk = New-Object System.Windows.Forms.Button
-    $bOk.SetBounds((S 182), (S 72), (S 100), (S 28)); $bOk.Text = "OK"; $bOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    Style-FlatButton -Btn $bOk -BgColor $p.Accent -FgColor $p.HeaderBg -BorderColor $p.Accent
-    $dlg.Controls.Add($bOk)
-    $bCa = New-Object System.Windows.Forms.Button
-    $bCa.SetBounds((S 288), (S 72), (S 100), (S 28)); $bCa.Text = "Abbrechen"; $bCa.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    Style-FlatButton -Btn $bCa -BgColor $p.Input -FgColor $p.Text -BorderColor $p.Border
-    $dlg.Controls.Add($bCa)
-    $dlg.AcceptButton = $bOk; $dlg.CancelButton = $bCa
+    $sd.Body.Controls.Add($tb)
+    $dlg.Tag.Input = $tb
+    $dlg.Add_Shown({ param($sender, $e) try { $sender.Tag.Input.Focus() } catch { } })
     $owner = if ($null -ne $script:FsForm -and -not $script:FsForm.IsDisposed) { $script:FsForm } else { $form }
     $res = $dlg.ShowDialog($owner)
     $out = $tb.Text.Trim()
