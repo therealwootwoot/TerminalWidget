@@ -150,7 +150,7 @@ function Toggle-ChartFullscreen {
 # VIEW 2: PORTFOLIO VIEW
 # ==============================================================================
 $viewPortfolio = New-Object System.Windows.Forms.Panel
-$viewPortfolio.Location = New-Object System.Drawing.Point((S 12), (S 92))
+$viewPortfolio.Location = New-Object System.Drawing.Point((S 12), ((S 92) + $script:MenuH))
 $viewPortfolio.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewPortfolio.BackColor = $script:Pal.Card
 $viewPortfolio.Visible = $false
@@ -499,7 +499,7 @@ function Update-PortSimLayout {
 # VIEW 3: WATCHLIST & ALARME VIEW
 # ==============================================================================
 $viewWatch = New-Object System.Windows.Forms.Panel
-$viewWatch.Location = New-Object System.Drawing.Point((S 12), (S 92))
+$viewWatch.Location = New-Object System.Drawing.Point((S 12), ((S 92) + $script:MenuH))
 $viewWatch.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewWatch.BackColor = $script:Pal.Card
 $viewWatch.Visible = $false
@@ -908,7 +908,7 @@ $aNL = [System.Windows.Forms.AnchorStyles]::Left
 $aNR = [System.Windows.Forms.AnchorStyles]::Right
 
 $viewNews = New-Object System.Windows.Forms.Panel
-$viewNews.Location = New-Object System.Drawing.Point((S 12), (S 92))
+$viewNews.Location = New-Object System.Drawing.Point((S 12), ((S 92) + $script:MenuH))
 $viewNews.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewNews.BackColor = $script:Pal.Card
 $viewNews.Visible = $false

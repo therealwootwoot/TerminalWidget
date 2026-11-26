@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.5"
+$script:AppVersion    = "7.5.1"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 

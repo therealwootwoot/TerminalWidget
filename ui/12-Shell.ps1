@@ -268,6 +268,139 @@ Limits          Minuten- / Tagesbudget wird eingehalten, Hinweis wenn erreicht
     Show-HelpTextDialog -Title "Hilfe - $($script:AppTitle)" -Text $txt
 }
 
+# ==============================================================================
+# v7.5.1: menu bar (replaces the command box in the navigation row)
+# ==============================================================================
+function Add-BarItem {
+    param($Parent, [string]$Text, [scriptblock]$Action = $null, [string]$Keys = "", [string]$Tag = "")
+    $mi = New-Object System.Windows.Forms.ToolStripMenuItem((Tr $Text))
+    if ($Keys) { $mi.ShortcutKeyDisplayString = $Keys }
+    if ($Tag) { $mi.Tag = $Tag }
+    if ($null -ne $Action) { $mi.Add_Click($Action) }
+    if ($Parent -is [System.Windows.Forms.MenuStrip]) { [void]$Parent.Items.Add($mi) } else { [void]$Parent.DropDownItems.Add($mi) }
+    return $mi
+}
+function Add-BarLine { param($Parent) [void]$Parent.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
+
+function Show-PortfolioCalculator {
+    # shows the calculator; on the visible Portfolio page it opens / closes it
+    if ($viewPortfolio.Visible -and [bool]$script:Config.PortSimOpen) { $script:Config.PortSimOpen = $false }
+    else { $script:Config.PortSimOpen = $true; Set-ActiveTab -TabName "Portfolio" }
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    Update-PortSimLayout
+    Update-NachkaufSimulation
+}
+
+$script:MenuBar = New-Object System.Windows.Forms.MenuStrip
+$script:MenuBar.AutoSize = $false
+$script:MenuBar.Dock = [System.Windows.Forms.DockStyle]::None
+$script:MenuBar.SetBounds(0, 0, $form.ClientSize.Width, $script:MenuH)
+$script:MenuBar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:MenuBar.Padding = New-Object System.Windows.Forms.Padding(0, 0, (S 4), 0)
+$script:MenuBar.Font = $fontUi
+
+$mbFile = Add-BarItem $script:MenuBar "Datei"
+$mbFile.Padding = New-Object System.Windows.Forms.Padding((S 10), 0, (S 10), 0)
+# like in the Windows Explorer: the first menu is filled with the accent colour
+$mbFile.Add_Paint({
+    param($sender, $e)
+    $br = New-Object System.Drawing.SolidBrush($script:Pal.Accent)
+    $r = New-Object System.Drawing.Rectangle(0, 0, $sender.Width, $sender.Height)
+    $e.Graphics.FillRectangle($br, $r)
+    $br.Dispose()
+    $tf = [System.Windows.Forms.TextFormatFlags]
+    [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $sender.Text, $sender.Font, $r, $script:Pal.OnAccent, ($tf::HorizontalCenter -bor $tf::VerticalCenter -bor $tf::SingleLine))
+})
+[void](Add-BarItem $mbFile "Jetzt aktualisieren" { $btnRefreshNow.PerformClick() } "F5")
+Add-BarLine $mbFile
+[void](Add-BarItem $mbFile "Broker-CSV importieren ..." { Show-CsvImportDialog })
+[void](Add-BarItem $mbFile "Daten exportieren (Zip) ..." { Export-DataZip })
+[void](Add-BarItem $mbFile "Backup wiederherstellen ..." { Show-RestoreDialog })
+[void](Add-BarItem $mbFile "Einstellungen exportieren ..." { [void](Export-SettingsFile) })
+[void](Add-BarItem $mbFile "Einstellungen importieren ..." { Import-SettingsFile })
+Add-BarLine $mbFile
+[void](Add-BarItem $mbFile "Einstellungen ..." { Show-SettingsDialog } "S")
+[void](Add-BarItem $mbFile "In den Infobereich ausblenden" { $form.Hide() })
+[void](Add-BarItem $mbFile "Beenden" { $trayIcon.Visible = $false; $form.Close() })
+
+$mbView = Add-BarItem $script:MenuBar "Ansicht"
+$script:MbTabs = @()
+foreach ($vd in @(@("Chart", "Chart", "F1"), @("Portfolio", "Portfolio", "F2"), @("Watchlist", "Watchlist && Alarme", "F3"), @("News", "News", "F4"))) {
+    $script:MbTabs += Add-BarItem $mbView $vd[1] { param($sender, $e) Set-ActiveTab -TabName ([string]$sender.Tag) } $vd[2] $vd[0]
+}
+Add-BarLine $mbView
+$mbLayout = Add-BarItem $mbView "Layout"
+foreach ($ln in @("Ticker", "Compact", "Standard", "Terminal")) { [void](Add-BarItem $mbLayout $ln { param($sender, $e) Invoke-LayoutMenuTag ("Layout:" + [string]$sender.Tag) } "" $ln) }
+$mbStyle = Add-BarItem $mbView "Stil"
+foreach ($sn in @("Refined", "Fresh")) { [void](Add-BarItem $mbStyle $sn { param($sender, $e) Invoke-LayoutMenuTag ("Style:" + [string]$sender.Tag) } "" $sn) }
+[void](Add-BarItem $mbView "Nächstes Theme" { $btnThemeCycle.PerformClick() } "T")
+Add-BarLine $mbView
+$script:MbTopMost = Add-BarItem $mbView "Immer im Vordergrund" { $btnPin.PerformClick() }
+$script:MbPrivacy = Add-BarItem $mbView "Privat-Modus (Beträge ausblenden)" { Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) } "F9"
+$mbView.Add_DropDownOpening({
+    foreach ($it in $script:MbTabs) { $it.Checked = ([string]$it.Tag -eq [string]$script:Config.ActiveTab) }
+    foreach ($it in $mbLayout.DropDownItems) { $it.Checked = ([string]$it.Tag -eq [string]$script:Config.Layout) }
+    foreach ($it in $mbStyle.DropDownItems) { $it.Checked = ([string]$it.Tag -eq [string]$script:Config.UiStyle) }
+    $script:MbTopMost.Checked = [bool]$script:Config.TopMost
+    $script:MbPrivacy.Checked = [bool]$script:Config.PrivacyMode
+})
+
+$mbPort = Add-BarItem $script:MenuBar "Portfolio"
+$script:MbCalc = Add-BarItem $mbPort "Nachkauf-Rechner" { Show-PortfolioCalculator }
+Add-BarLine $mbPort
+[void](Add-BarItem $mbPort "Transaktion buchen ..." { Show-TransactionDialog -Ticker ([string]$script:Config.ActiveTicker) })
+[void](Add-BarItem $mbPort "Transaktionshistorie ..." { Show-TransactionHistory })
+[void](Add-BarItem $mbPort "Kaufdaten ..." { if ([int](@(Show-BuyDatesDialog) | Select-Object -Last 1) -gt 0) { Update-AllUiViews } })
+[void](Add-BarItem $mbPort "Bargeld ..." { Show-CashDialog })
+[void](Add-BarItem $mbPort "Sparpläne ..." { Show-SavingsPlansDialog })
+Add-BarLine $mbPort
+[void](Add-BarItem $mbPort "Analyse ..." { Show-AnalysisDialog } "P")
+[void](Add-BarItem $mbPort "Jahresreport ..." { Show-YearReport })
+$mbPort.Add_DropDownOpening({ $script:MbCalc.Checked = [bool]$script:Config.PortSimOpen })
+
+$mbTools = Add-BarItem $script:MenuBar "Extras"
+[void](Add-BarItem $mbTools "Befehlszeile ..." { Show-CommandPalette } "Strg+K")
+Add-BarLine $mbTools
+[void](Add-BarItem $mbTools "Kalender ..." { Show-CalendarDialog })
+[void](Add-BarItem $mbTools "Gewinner / Verlierer ..." { Show-MoversDialog })
+[void](Add-BarItem $mbTools "Ticker vergleichen ..." { Show-CompareDialog } "X")
+Add-BarLine $mbTools
+[void](Add-BarItem $mbTools "Alarm-Verlauf ..." { Show-AlertLogDialog })
+[void](Add-BarItem $mbTools "Handy-Push einrichten ..." { if (Show-PushDialog) { Save-JsonState -Path $script:ConfigPath -Data $script:Config } })
+
+$mbHelp = Add-BarItem $script:MenuBar "?"
+$mbHelp.Alignment = [System.Windows.Forms.ToolStripItemAlignment]::Right
+$mbHelp.ToolTipText = Tr "Hilfe"
+[void](Add-BarItem $mbHelp "Tastenkürzel ..." { Show-ShortcutHelp } "H")
+[void](Add-BarItem $mbHelp "Glossar ..." { Show-GlossaryDialog } "G")
+[void](Add-BarItem $mbHelp "Einführung ..." { Show-WelcomeTour })
+Add-BarLine $mbHelp
+[void](Add-BarItem $mbHelp "Systemzustand (HEALTH) ..." { Show-HealthReport })
+[void](Add-BarItem $mbHelp "Diagnose exportieren ..." { [void](Export-Diagnostics) })
+[void](Add-BarItem $mbHelp "Über ..." { Show-AboutDialog })
+
+function Update-MenuBarTheme {
+    # the renderer paints with the theme tokens; these colours are the fallback if it could not be compiled
+    $script:MenuBar.BackColor = $script:Pal.Card
+    $script:MenuBar.ForeColor = $script:Pal.Text
+    $script:MenuBar.Invalidate()
+}
+Update-MenuBarTheme
+
+$form.Controls.Add($script:MenuBar)
+$form.MainMenuStrip = $script:MenuBar
+
+function Set-MenuBarVisible {
+    # the small Compact / Ticker bars have no menu: the header moves back to the top
+    param([bool]$On)
+    $script:MenuBar.Visible = $On
+    $off = if ($On) { $script:MenuH } else { 0 }
+    $pnlHeader.Top = $off
+    $lstTickerDropdown.Top = (S 40) + $off
+    $lstCurrencyDropdown.Top = (S 40) + $off
+    if ($On) { $script:MenuBar.Width = $form.ClientSize.Width }
+}
+
 $btnToggleExt.Add_Click({ Toggle-ExtendedHours })
 $btnSettings.Add_Click({ Show-SettingsDialog })
 

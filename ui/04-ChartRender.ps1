@@ -284,6 +284,13 @@ $script:EnText = @{
     "Abbrechen" = "Cancel"; "Kerzen" = "Candles"; "Volumen" = "Volume"; "Vollbild" = "Fullscreen"; "EK-Währ.:" = "Cost ccy:"
     "Position speichern" = "Save position"; "Löschen" = "Delete"; "Transaktion..." = "Transaction..."; "Historie" = "History"; "Analyse" = "Analysis"
     "Nachkauf-Rechner" = "Top-up calculator"
+    "Datei" = "File"; "Ansicht" = "View"; "Hilfe" = "Help"; "Jetzt aktualisieren" = "Refresh now"
+    "Daten exportieren (Zip) ..." = "Export data (zip) ..."; "Backup wiederherstellen ..." = "Restore backup ..."; "Einstellungen exportieren ..." = "Export settings ..."; "Einstellungen importieren ..." = "Import settings ..."
+    "In den Infobereich ausblenden" = "Hide to tray"; "Watchlist && Alarme" = "Watchlist && alerts"; "Nächstes Theme" = "Next theme"
+    "Privat-Modus (Beträge ausblenden)" = "Privacy mode (hide amounts)"; "Transaktion buchen ..." = "Book transaction ..."; "Transaktionshistorie ..." = "Transaction history ..."
+    "Bargeld ..." = "Cash ..."; "Sparpläne ..." = "Savings plans ..."; "Analyse ..." = "Analysis ..."; "Jahresreport ..." = "Annual report ..."; "Befehlszeile ..." = "Command line ..."; "Kalender ..." = "Calendar ..."
+    "Gewinner / Verlierer ..." = "Gainers / losers ..."; "Ticker vergleichen ..." = "Compare ticker ..."; "Alarm-Verlauf ..." = "Alert history ..."
+    "Tastenkürzel ..." = "Keyboard shortcuts ..."; "Glossar ..." = "Glossary ..."; "Einführung ..." = "Welcome tour ..."; "Systemzustand (HEALTH) ..." = "Health report ..."; "Diagnose exportieren ..." = "Export diagnostics ..."; "Über ..." = "About ..."
     "Position wählen oder Ticker, Stück & EK eintragen für Live-Nachkauf-Simulation." = "Pick a position or enter ticker, shares & cost for a live top-up simulation."
     "Watchlist (Ziehen = Reihenfolge | Entf = Löschen)" = "Watchlist (drag = order | Del = remove)"; "+ Aktiven Ticker" = "+ Active ticker"; "+ Suchen / Add" = "+ Search / add"
     "Entfernen" = "Remove"; "Alarme (Doppelklick = Reset)" = "Alerts (double-click = reset)"; "Verlauf" = "History"; "Leeren" = "Clear"; "Schließen" = "Close"
@@ -336,7 +343,7 @@ $script:EnText = @{
     "Broker-CSV importieren" = "Import broker CSV"; "Backup wiederherstellen" = "Restore backup"; "Indikatoren: IND MACD / RSI / EMA / SMA" = "Indicators: IND MACD / RSI / EMA / SMA"
     "Durchklicken an/aus (Maus geht durchs Fenster)" = "Click-through on/off (mouse passes through)"; "Kurze Einführung" = "Short tour"; "zuletzt" = "recent"; "Ticker öffnen" = "Open ticker"; "Alarm" = "Alert"
     # v4.9: news tab, fonts, frame
-    "> Befehl" = "> Command"; "> Befehl     Strg+K" = "> Command    Ctrl+K"; "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße Listen + Chart (ab Neustart)" = "List + chart font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
+    "Nachrichten - Depot und Watchlist" = "News - depot and watchlist"; "Alle gelesen" = "Mark all read"; "Ticker" = "Ticker"; "Alle" = "All"; "Nachrichten werden geladen ..." = "Loading news ..."; "Keine Nachrichten für diesen Filter." = "No news for this filter."; "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." = "No connection - news follow on the next try."; "Keine Nachrichten der letzten 14 Tage." = "No news in the last 14 days."; "lädt ..." = "loading ..."; "Meldungen" = "items"; "Stand" = "as of"; "letzter Versuch ohne Verbindung" = "last try had no connection"; "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel" = "Source: Yahoo Finance, double-click opens the article"; "Doppelklick öffnet den Artikel im Browser" = "Double-click opens the article in the browser"; "Aktiver Ticker:" = "Active ticker:"; "Schrift und Rahmen" = "Font and frame"; "Schrift für Zahlen (ab Neustart)" = "Font for numbers (after restart)"; "Schriftgröße Listen + Chart (ab Neustart)" = "List + chart font size (after restart)"; "Zahlen rechtsbündig (Watchlist, Portfolio)" = "Numbers right-aligned (watchlist, portfolio)"; "Abgerundete Fensterecken (Windows 11)" = "Rounded window corners (Windows 11)"; "Nachrichten (F4)" = "News (F4)"; "Neu laden alle (Minuten)" = "Reload every (minutes)"; "Ticker markieren ab Tagesbewegung (%)" = "Mark tickers moving today from (%)"; "Schrift und Schriftgröße wirken nach einem Neustart. Jetzt neu starten?" = "Font and font size apply after a restart. Restart now?"; "Schrift" = "Font"
     # v4.9.5
     "Rechtsklick: Quelle ausblenden" = "Right-click: mute source"; "Artikel öffnen" = "Open article"; "Link kopieren" = "Copy link"; "Quelle ausblenden" = "Mute source"; "Link kopiert" = "Link copied"; "Quelle ausgeblendet:" = "Source muted:"; "zurück in den Einstellungen" = "undo in Settings"; "Alarm-Wörter" = "Alert words"; "Alarm-Wörter auch für Watchlist-Ticker" = "Alert words for watchlist tickers too"; "Ausgeblendete Quellen zeigen" = "Show muted sources"; "Tray-Symbol in der Farbe des Depot-Tages (statt Ticker)" = "Tray icon in the colour of the depot's day (not the ticker)"; "Beitrag heute" = "Today's contribution"; "Privat (F9)" = "Private (F9)"; "Privat-Modus: Beträge und Stückzahlen ausgeblendet. F9 = wieder zeigen." = "Privacy mode: amounts and shares hidden. F9 = show again."; "Privat-Modus: erst F9 drücken, dann bearbeiten" = "Privacy mode: press F9 first, then edit"; "Weitere Positionen: unten Ticker, Stück und EK eintragen - oder:" = "More positions: enter ticker, shares and cost below - or:"; "+ Kauf buchen ..." = "+ Book a buy ..."; "Broker-CSV importieren ..." = "Import broker CSV ..."; "Analysten" = "Analysts"; "1 Stunde pausieren" = "Pause for 1 hour"; "4 Stunden pausieren" = "Pause for 4 hours"; "Bis morgen 08:00 pausieren" = "Pause until tomorrow 08:00"; "Pause beenden" = "End pause"; "Löschen (Entf)" = "Delete (Del)"; "Chart öffnen" = "Open chart"; "Alarm anlegen ..." = "Create alert ..."; "Kauf / Verkauf buchen ..." = "Book buy / sell ..."; "Nachrichten (News-Tab)" = "News (news tab)"; "Im Chart vergleichen" = "Compare in chart"; "Beschreibung (DES)" = "Description (DES)"; "Aus der Watchlist entfernen" = "Remove from watchlist"; "Vortag" = "Prev. close"; "Vortages-Schluss als Linie (1D / 5D)" = "Previous close as a line (1D / 5D)"
     "Ganze Seite" = "Full page"; "Tab nochmal klicken, F1 oder Esc = zurück" = "click the tab again, F1 or Esc = back"; "Privat-Modus: Beträge ausblenden (F9)" = "Privacy mode: hide amounts (F9)"
@@ -677,7 +684,9 @@ function Style-FlatButton {
     $Btn.Cursor = [System.Windows.Forms.Cursors]::Hand
 }
 
-$form.ClientSize = New-Object System.Drawing.Size((S 780), (S 560))
+# v7.5.1: menu bar at the top of the full layouts; everything below starts this much lower
+$script:MenuH = S 24
+$form.ClientSize = New-Object System.Drawing.Size((S 780), ((S 560) + $script:MenuH))
 # The design size is the minimum; the window can only grow from there
 $script:MinFormSize = $form.Size
 $form.MinimumSize = $script:MinFormSize
@@ -776,7 +785,7 @@ function Style-DataGrid {
 # ROW 1: DISTINCT FULL-WIDTH TOP HEADER
 # ==============================================================================
 $pnlHeader = New-Object System.Windows.Forms.Panel
-$pnlHeader.Location = New-Object System.Drawing.Point(0, 0)
+$pnlHeader.Location = New-Object System.Drawing.Point(0, $script:MenuH)
 $pnlHeader.Size = New-Object System.Drawing.Size((S 780), (S 48))
 $pnlHeader.BackColor = $script:Pal.HeaderBg
 $pnlHeader.Add_Paint({
@@ -1129,7 +1138,7 @@ Set-Tip $btnTray "In den System Tray minimieren"
 
 # Currency Dropdown Popup
 $lstCurrencyDropdown = New-Object System.Windows.Forms.ListBox
-$lstCurrencyDropdown.Location = New-Object System.Drawing.Point((S 544), (S 40))
+$lstCurrencyDropdown.Location = New-Object System.Drawing.Point((S 544), ((S 40) + $script:MenuH))
 $lstCurrencyDropdown.Size = New-Object System.Drawing.Size((S 62), (S 66))
 $lstCurrencyDropdown.BackColor = $script:Pal.Input
 $lstCurrencyDropdown.ForeColor = $script:Pal.Text
@@ -1145,7 +1154,7 @@ $lstCurrencyDropdown.BringToFront()
 
 # Ticker Dropdown Popup
 $lstTickerDropdown = New-Object System.Windows.Forms.ListBox
-$lstTickerDropdown.Location = New-Object System.Drawing.Point((S 12), (S 40))
+$lstTickerDropdown.Location = New-Object System.Drawing.Point((S 12), ((S 40) + $script:MenuH))
 $lstTickerDropdown.Size = New-Object System.Drawing.Size((S 388), (S 185))
 $lstTickerDropdown.BackColor = $script:Pal.Card
 $lstTickerDropdown.ForeColor = $script:Pal.Text
@@ -1160,7 +1169,7 @@ $lstTickerDropdown.BringToFront()
 # ROW 2: NAVIGATION BAR (3 Tabs + Refresh Controls + Theme Cycle + FX Status)
 # ==============================================================================
 $pnlNav = New-Object System.Windows.Forms.Panel
-$pnlNav.Location = New-Object System.Drawing.Point((S 12), (S 56))
+$pnlNav.Location = New-Object System.Drawing.Point((S 12), ((S 56) + $script:MenuH))
 $pnlNav.Size = New-Object System.Drawing.Size((S 756), (S 32))
 $pnlNav.BackColor = $script:Pal.BodyBg
 $form.Controls.Add($pnlNav)
@@ -1253,17 +1262,6 @@ $lblStatus.AutoEllipsis = $true
 $lblStatus.Text = "USD 1.0950 | CHF 0.9400"
 $pnlNav.Controls.Add($lblStatus)
 
-# v4.4: command line button (Ctrl+K)
-$btnCmd = New-Object System.Windows.Forms.Button
-$btnCmd.SetBounds((S ($script:NavX + 200)), (S 3), (S 170), (S 24))
-Style-FlatButton -Btn $btnCmd -BgColor $script:Pal.Input -FgColor $script:Pal.Muted -BorderColor $script:Pal.Border
-$btnCmd.Font = $fontMono
-$btnCmd.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$btnCmd.Text = "> Befehl     Strg+K"
-$pnlNav.Controls.Add($btnCmd)
-Set-Tip $btnCmd "Befehlszeile wie im Terminal: NVDA GP, NVDA DES, NVDA N, CAL, TOP, PORT, NVDA ALRT TRAIL 8 ... (Strg+K)"
-$btnCmd.Add_Click({ Show-CommandPalette })
-
 # v4.9.5: data source health dot (green / amber / red) left of the status text
 $script:HealthLevel = ""
 $pnlHealth = New-Object System.Windows.Forms.Panel
@@ -1341,7 +1339,7 @@ $script:CardPaint = {
     } catch { }
 }
 $viewChart = New-Object System.Windows.Forms.Panel
-$viewChart.Location = New-Object System.Drawing.Point((S 12), (S 92))
+$viewChart.Location = New-Object System.Drawing.Point((S 12), ((S 92) + $script:MenuH))
 $viewChart.Size = New-Object System.Drawing.Size((S 756), (S 456))
 $viewChart.BackColor = $script:Pal.BodyBg
 $form.Controls.Add($viewChart)
