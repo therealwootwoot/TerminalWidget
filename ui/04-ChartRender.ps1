@@ -202,6 +202,7 @@ function Update-ChartCacheSignature {
         $cfg.ShowLevels, (@(Get-ChartLevels | ForEach-Object { "{0:N4}{1}{2}" -f $_.Price, $_.Kind, $_.Hit }) -join ","),
         $cfg.CompareTicker, $script:CompareSig, $script:CompareMoreSig, $script:ViewCount, $script:ViewOffset,
         $cfg.LogScale, @($script:ActiveDividends).Count, [string]$cfg.LowerPanel, [string]$cfg.MaType, [bool]$cfg.ShowPrevClose,
+        [bool]$cfg.ShowNewsMarkers, $(if ([bool]$cfg.ShowNewsMarkers) { [string]$script:NewsVersion } else { "" }),
         [bool]$cfg.ShowTrades, $script:Transactions.Count, [string]$cfg.ChartType, $script:DrawingsSig,
         [bool]$cfg.PctAxis, [bool]$cfg.ShowSR, $(if ([bool]$cfg.ShowSR -and $null -ne $script:DailyCache[([string]$cfg.ActiveTicker).ToUpper()]) { [string]$script:DailyCache[([string]$cfg.ActiveTicker).ToUpper()].Day } else { "" })
     ) -join "|"
@@ -1411,6 +1412,17 @@ $cmiTrades.Add_Click({
     Update-AllUiViews
 })
 [void]$chartContextMenu.Items.Add($cmiTrades)
+# v7.7: news marks
+$cmiNewsMarks = New-Object System.Windows.Forms.ToolStripMenuItem("News im Chart anzeigen")
+$cmiNewsMarks.CheckOnClick = $true
+$cmiNewsMarks.Checked = [bool]$script:Config.ShowNewsMarkers
+$cmiNewsMarks.Add_Click({
+    $script:Config.ShowNewsMarkers = $cmiNewsMarks.Checked
+    Save-JsonState -Path $script:ConfigPath -Data $script:Config
+    $script:ChartSignature = ""
+    Update-AllUiViews
+})
+[void]$chartContextMenu.Items.Add($cmiNewsMarks)
 # v5.0: drawing tools
 $cmiDraw = New-Object System.Windows.Forms.ToolStripMenuItem("Zeichnen")
 foreach ($dk in @(@("H", "Horizontale Linie"), @("T", "Trendlinie (D)"), @("F", "Fibonacci"), @("R", "Zone (Rechteck)"), @("N", "Textnotiz"))) {

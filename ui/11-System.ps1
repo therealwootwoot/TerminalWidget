@@ -620,10 +620,16 @@ function Show-SettingsDialog {
         $sender.Enabled = $false
     }
     $btnMuted.Enabled = (@($script:NewMuted).Count -gt 0)
-    # v5.7: own feeds
-    $tFeeds = & $addText -Label "Eigene RSS-Feeds (eine Adresse je Zeile)" -Value ([string]$cfg.NewsFeeds) -Tip "RSS- oder Atom-Adressen, z. B. die Wirtschafts-Feeds deiner Zeitung. Meldungen mit dem Namen eines deiner Ticker im Titel werden dem Ticker zugeordnet." -Key "NewsFeeds" -Default ([string]$dc.NewsFeeds) -Width (S 196) -Words "RSS Atom Feed Nachrichten Quelle finanzen derstandard"
-    $tFeeds.Multiline = $true; $tFeeds.Height = S 64; $tFeeds.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical; $tFeeds.Font = $fontUi
-    $lay.Y += S 44
+    # v7.7: feeds are selected and managed in their own window
+    $onCount = @(@($cfg.NewsSources) | Where-Object { $null -ne $_ -and $_.On }).Count
+    [void](& $addButton -Text ("News-Feeds verwalten ({0} an)" -f $onCount) -Width (S 220) -Tip "Quellen ein- und ausschalten, benennen, testen, Intervall und Ticker je Feed, OPML. Speichert zuerst die Einstellungen." -Words "RSS Atom Feed Nachrichten Quelle Yahoo OPML finanzen derstandard" -Act { & $script:SettingsOpenAfter { Show-FeedManager } })
+    $tNewsInc = & $addText -Label "Nur Meldungen mit diesen Wörtern" -Value ([string]$cfg.NewsInclude) -Tip "Mit Komma trennen, leer = alle. Gesucht wird in Titel und Kurztext." -Key "NewsInclude" -Default ([string]$dc.NewsInclude) -Width (S 196) -Words "News Filter Regel"
+    $tNewsExc = & $addText -Label "Meldungen mit diesen Wörtern ausblenden" -Value ([string]$cfg.NewsExclude) -Tip "Mit Komma trennen. Gesucht wird in Titel und Kurztext." -Key "NewsExclude" -Default ([string]$dc.NewsExclude) -Width (S 196) -Words "News Filter Regel stumm"
+    $tNewsHi = & $addText -Label "Wörter hervorheben" -Value ([string]$cfg.NewsHighlight) -Tip "Titel solcher Meldungen werden farbig. Benachrichtigungen: Alarme & Benachrichtigungen > Stichwörter." -Key "NewsHighlight" -Default ([string]$dc.NewsHighlight) -Width (S 196) -Words "News markieren Regel"
+    $chkNewsMerge = & $addCheck -Label "Ähnliche Schlagzeilen zusammenfassen" -Value ([bool]$cfg.NewsMergeSimilar) -Key "NewsMergeSimilar" -Default ([bool]$dc.NewsMergeSimilar) -Words "News doppelt"
+    $chkNewsPrev = & $addCheck -Label "Vorschau unter der News-Liste (V)" -Value ([bool]$cfg.NewsPreview) -Key "NewsPreview" -Default ([bool]$dc.NewsPreview) -Words "News Kurztext"
+    $chkNewsImg = & $addCheck -Label "Bilder in der Vorschau laden" -Value ([bool]$cfg.NewsImages) -Tip "Das Bild wird beim Anbieter der Meldung abgerufen, nur bei offener Vorschau." -Key "NewsImages" -Default ([bool]$dc.NewsImages) -Words "News Bild"
+    $nNewsDays = & $addNum -Label "News aufbewahren (Tage)" -Min 1 -Max 90 -Value ([int]$cfg.NewsHistoryDays) -Tip "So lange bleiben Meldungen in der Liste und in der Suche (höchstens 600). Gemerkte bleiben immer." -Key "NewsHistoryDays" -Default ([int]$dc.NewsHistoryDays) -Words "News Verlauf"
 
     # ================= Alarme & Benachrichtigungen =================
     & $beginPage "Alerts"
@@ -1044,9 +1050,13 @@ function Show-SettingsDialog {
     $cfg.NewsKeywords          = (@(ConvertTo-KeywordList $tKw.Text) -join ", ")
     $cfg.NewsKeywordWatch      = [bool]$chkKwWatch.Checked
     $cfg.SignalAlerts          = switch ([string]$cbSigAl.SelectedItem) { "Depot + Watchlist" { "Alle" } "Aus" { "Aus" } default { "Depot" } }
-    $feedsNew = (@(ConvertTo-FeedList $tFeeds.Text) -join "`r`n")
-    if ($feedsNew -ne [string]$cfg.NewsFeeds) { $script:NextNewsLoad = Get-Date }
-    $cfg.NewsFeeds             = $feedsNew
+    $cfg.NewsInclude           = (@(ConvertTo-KeywordList $tNewsInc.Text) -join ", ")
+    $cfg.NewsExclude           = (@(ConvertTo-KeywordList $tNewsExc.Text) -join ", ")
+    $cfg.NewsHighlight         = (@(ConvertTo-KeywordList $tNewsHi.Text) -join ", ")
+    $cfg.NewsMergeSimilar      = [bool]$chkNewsMerge.Checked
+    $cfg.NewsPreview           = [bool]$chkNewsPrev.Checked
+    $cfg.NewsImages            = [bool]$chkNewsImg.Checked
+    $cfg.NewsHistoryDays       = [int]$nNewsDays.Value
     # V6: keys - "********" = unchanged, empty = remove
     foreach ($kp in @(@($tTdKey, "TwelveDataKeyEnc"), @($tFhKey, "FinnhubKeyEnc"))) {
         $kt = ([string]$kp[0].Text).Trim()
@@ -1058,6 +1068,7 @@ function Show-SettingsDialog {
         }
     }
     $cfg.NewsMuted             = @($script:NewMuted)
+    $script:NewsVersion++
     $hkNew = $tHk.Text.Trim()
     $hkChanged = ($hkNew -ne [string]$cfg.GlobalHotkey)
     if (-not $hkNew -or $null -ne (ConvertFrom-HotkeyText $hkNew)) { $cfg.GlobalHotkey = $hkNew }
@@ -1086,6 +1097,7 @@ function Show-SettingsDialog {
     Apply-TooltipMode
     Update-ChartControlsLayout
     Apply-NumberAlignment
+    Set-NewsLayout
     if ($newsMinChanged) { $script:NextNewsLoad = (Get-Date).AddMinutes([int]$cfg.NewsRefreshMinutes) }
     Save-JsonState -Path $script:ConfigPath -Data $cfg
     Apply-ThemeToAllControls
@@ -1151,6 +1163,11 @@ function Import-SettingsFile {
     if (-not (Confirm-Action -Text $txt -Title "Einstellungen importieren")) { return $false }
     [void](Backup-DataFiles -Reason "vor_einstellungen_import")
     foreach ($k in @($r.Settings.Keys)) { $script:Config.$k = $r.Settings[$k] }
+    # v7.7: a file from an older version only has the feed text
+    if ($r.Settings.ContainsKey("NewsFeeds") -and -not $r.Settings.ContainsKey("NewsSources")) {
+        $script:Config.NewsSources = @(Add-LegacyNewsFeeds -Sources $script:Config.NewsSources -Text ([string]$r.Settings["NewsFeeds"]))
+    }
+    $script:Config.NewsSources = @(ConvertTo-NewsSourceList $script:Config.NewsSources)
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     $script:SettingsIndexCache = $null
     Write-WidgetLog ("Settings imported from {0}: {1} keys, skipped {2}" -f $Path, $r.Settings.Count, (@($r.Skipped) -join ","))
@@ -1289,6 +1306,10 @@ function Get-HealthChecks {
         $mb = $pr0.WorkingSet64 / 1MB
         & $add "Speicher" $(if ($mb -gt 900) { "WARN" } else { "INFO" }) ("{0:N0} MB (Arbeitsspeicher), {1:N0} MB privat" -f $mb, ($pr0.PrivateMemorySize64 / 1MB))
     } catch { }
+    # v7.7: news sources that failed at their last request
+    $nc = @(Get-NewsSourceChoices)
+    $nf = @($nc | Where-Object { $null -ne $script:FeedStatus[$_.Id] -and $script:FeedStatus[$_.Id].Error } | ForEach-Object { "{0}: {1}" -f $_.Label, $script:FeedStatus[$_.Id].Error })
+    & $add "News-Quellen" $(if ($nf.Count -gt 0) { "WARN" } else { "INFO" }) $(if ($nf.Count -gt 0) { $nf -join "; " } else { "{0} eingeschaltet" -f $nc.Count })
     $nReq = $script:FetchLog.Count
     $byP = @($script:FetchLog.ToArray() | Group-Object -Property P | Sort-Object Count -Descending | ForEach-Object { "{0} {1}" -f $_.Name, $_.Count })
     & $add "Abfragen" $(if ($nReq -gt 2000) { "WARN" } else { "INFO" }) ("{0} Anfragen in der letzten Stunde ({3}), Intervall {1} s / {2} s" -f $nReq, [int]$script:Config.RefreshSeconds, [int]$script:Config.SlowRefreshSeconds, $(if ($byP.Count -gt 0) { $byP -join ", " } else { "-" }))

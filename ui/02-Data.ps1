@@ -284,6 +284,8 @@ $script:FetchWorkerScript = {
     # Retry = URLs that failed in a way another Yahoo host might not (timeout,
     # connection error, 5xx, 401/403). 404 / 429 are not retried.
     $state   = @{ RateLimited = $false; Retry = (New-Object System.Collections.Generic.HashSet[string]) }
+    # v7.7: per address @{ Code; Error; ETag; Modified } (used by the news feeds)
+    $meta    = @{}
     if ($MaxConc -lt 1) { $MaxConc = 4 }
 
     function Fetch-UrlBatch {
@@ -295,8 +297,19 @@ $script:FetchWorkerScript = {
             $batch = @($uniq[$i..$end])
             $tasks = @{}
             foreach ($u in $batch) {
-                try { $tasks[$u] = $Client.GetAsync($u) }
-                catch { $logs.Add("WARN|Request start failed: $u ($($_.Exception.Message))") }
+                try {
+                    $cond = $null
+                    if ($null -ne $Shared.Cond) { $cond = $Shared.Cond[$u] }
+                    if ($null -eq $cond) { $tasks[$u] = $Client.GetAsync($u) }
+                    else {
+                        # v7.7: only send the feed again when it changed
+                        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, [string]$u)
+                        if ($cond.ETag) { [void]$req.Headers.TryAddWithoutValidation("If-None-Match", [string]$cond.ETag) }
+                        if ($cond.Modified) { [void]$req.Headers.TryAddWithoutValidation("If-Modified-Since", [string]$cond.Modified) }
+                        $tasks[$u] = $Client.SendAsync($req)
+                    }
+                }
+                catch { $meta[$u] = @{ Code = 0; Error = $_.Exception.Message }; $logs.Add("WARN|Request start failed: $u ($($_.Exception.Message))") }
             }
             $arr = [System.Threading.Tasks.Task[]]@($tasks.Values)
             if ($arr.Count -gt 0) {
@@ -316,7 +329,15 @@ $script:FetchWorkerScript = {
                     $resp = $t.Result
                     try {
                         $code = [int]$resp.StatusCode
-                        if ($resp.IsSuccessStatusCode) {
+                        $m = @{ Code = $code; Error = ""; ETag = ""; Modified = "" }
+                        try {
+                            if ($null -ne $resp.Headers.ETag) { $m.ETag = $resp.Headers.ETag.ToString() }
+                            if ($null -ne $resp.Content -and $null -ne $resp.Content.Headers.LastModified) { $m.Modified = $resp.Content.Headers.LastModified.ToString("r") }
+                        } catch { }
+                        $meta[$u] = $m
+                        if ($code -eq 304) {
+                            # not modified: nothing new
+                        } elseif ($resp.IsSuccessStatusCode) {
                             $body = $resp.Content.ReadAsStringAsync().Result
                             $results[$u] = if ($body.TrimStart().StartsWith("<")) { $body } else { ($body | ConvertFrom-Json) }
                         } elseif ($code -eq 429) {
@@ -333,9 +354,11 @@ $script:FetchWorkerScript = {
                     }
                 } elseif ($t.IsFaulted) {
                     $inner = if ($t.Exception -and $t.Exception.InnerException) { $t.Exception.InnerException.Message } else { "unknown" }
+                    $meta[$u] = @{ Code = 0; Error = $inner }
                     $logs.Add("WARN|Request failed: $u ($inner)")
                     [void]$state.Retry.Add($u)
                 } elseif ($t.IsCanceled) {
+                    $meta[$u] = @{ Code = 0; Error = "Zeitüberschreitung" }
                     $logs.Add("WARN|Request timed out / cancelled: $u")
                     [void]$state.Retry.Add($u)
                 }
@@ -411,9 +434,10 @@ $script:FetchWorkerScript = {
     $Box.Logs        = $logs.ToArray()
     $Box.RateLimited = [bool]$state.RateLimited
     $Box.ExtraFx     = $extraFx
+    $Box.Meta        = $meta
 }
 
-$script:WorkerShared = [hashtable]::Synchronized(@{ Cancel = $false; PreferQ2 = $false })
+$script:WorkerShared = [hashtable]::Synchronized(@{ Cancel = $false; PreferQ2 = $false; Cond = [hashtable]::Synchronized(@{}) })
 $script:FetchJobs    = New-Object System.Collections.Generic.List[PSObject]
 $script:FetchLog     = New-Object System.Collections.Generic.Queue[object]   # v5.7: @{ T; P } per request
 $script:WorkerPool   = $null
@@ -493,7 +517,7 @@ function Start-FetchJob {
         if ($pv0 -in @("TwelveData", "Finnhub")) { Add-ProviderUsage $pv0 }
     }
     while ($script:FetchLog.Count -gt 0 -and ($nowR - $script:FetchLog.Peek().T).TotalMinutes -gt 60) { [void]$script:FetchLog.Dequeue() }
-    $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null })
+    $box = [hashtable]::Synchronized(@{ Results = $null; Logs = $null; RateLimited = $false; ExtraFx = $null; Meta = $null })
     $job = [PSCustomObject]@{ PS = $null; Async = $null; Box = $box; Context = $Context; OnComplete = $OnComplete }
 
     if ($null -eq $script:WorkerPool) {

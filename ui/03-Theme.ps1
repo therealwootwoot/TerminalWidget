@@ -1251,6 +1251,27 @@ function Render-ChartAndRsi {
             } finally { $buyBr.Dispose(); $sellBr.Dispose(); $outPen.Dispose() }
         }
     }
+    # v7.7: news of this ticker as small squares along the top, at the time of publication
+    if ([bool]$script:Config.ShowNewsMarkers -and $n -ge 2) {
+        $newsTs = New-Object 'long[]' $n
+        for ($i = 0; $i -lt $n; $i++) { $newsTs[$i] = [long]$series[$i].Ts }
+        # a headline belongs to a bar when it is at most one bar spacing (plus a weekend on daily bars) later
+        $spacing = [long](($newsTs[$n - 1] - $newsTs[0]) / ($n - 1))
+        $maxGap = if ($spacing -ge 72000000) { [long]345600000 } else { [long][math]::Max(3600000, 3 * ($newsTs[1] - $newsTs[0])) }
+        $marks = @(Get-NewsChartMarks -Items @(Get-NewsPool) -Symbol $actU -BarTsMs $newsTs -MaxGapMs $maxGap)
+        if ($marks.Count -gt 0) {
+            $nwBr = New-Object System.Drawing.SolidBrush($script:Pal.Accent)
+            try {
+                foreach ($mk in $marks) {
+                    $nx = $priceRect.Left + (($mk.Index / [double]($n - 1)) * $priceRect.Width)
+                    $ny = $priceRect.Top + (S 20)
+                    $side = if ($mk.Count -gt 1) { S 8 } else { S 6 }
+                    $g.FillRectangle($nwBr, [float]($nx - $side / 2), [float]$ny, [float]$side, [float]$side)
+                    & $addLeg "xx" ($nx - (S 6)) ($ny - (S 3)) "" $fontAxis ("News: " + $mk.Text)
+                }
+            } finally { $nwBr.Dispose() }
+        }
+    }
     $evA = $script:Events[([string]$script:Config.ActiveTicker).ToUpper()]
     if ($null -ne $evA -and $evA.EarningsDate) {
         $ebA = Get-EarningsBadge -EarningsDate ([string]$evA.EarningsDate) -WindowDays 30

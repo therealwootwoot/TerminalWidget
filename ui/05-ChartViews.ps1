@@ -1046,7 +1046,7 @@ function Update-NewsBadge {
         if (-not $script:NewsWasVisible) { $script:NewsBoldSince = $script:NewsSeenAt }
         Set-NewsSeen (Get-NewsNewest)
     } else {
-        $cnt = Get-NewsUnreadCount -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Since $script:NewsSeenAt
+        $cnt = Get-NewsUnreadTotal
     }
     $script:NewsWasVisible = $vis
     $b = $tabButtons["News"]
@@ -1068,6 +1068,12 @@ function Get-NewsTooltip {
     if ($Item.Publisher) { $meta += [string]$Item.Publisher }
     if ($meta.Count -gt 0) { $lines.Add($meta -join "  |  ") }
     if (@($Item.Syms).Count -gt 0) { $lines.Add("Ticker: " + (@($Item.Syms) -join ", ")) }
+    if (@($Item.Also | Where-Object { $_ }).Count -gt 0) { $lines.Add((Tr "Auch bei:") + " " + (@($Item.Also) -join ", ")) }
+    if ($Item.Summary) {
+        $sm = [string]$Item.Summary
+        if ($sm.Length -gt 240) { $sm = $sm.Substring(0, 239).TrimEnd() + [string][char]0x2026 }
+        $lines.Add($sm)
+    }
     if ($Item.Link) { $lines.Add((Tr "Doppelklick öffnet den Artikel im Browser")) }
     return ($lines -join "`r`n")
 }
@@ -1077,12 +1083,14 @@ function Refresh-NewsGrid {
     # the ages "vor 5 min" need at most one rebuild per minute)
     param([switch]$IfChanged)
     if ($null -eq $dgvNews -or $dgvNews.IsDisposed) { return }
-    $sig = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $script:NewsLoadedAt.Ticks, [string]$script:Config.NewsFilter, $script:NewsBoldSince.Ticks, (Get-Date).ToString("yyyyMMddHHmm"), $script:NewsLoading, @($script:NewsItems).Count, (@($script:Config.NewsMuted) -join ","), [bool]$script:Config.PrivacyMode
+    $sig = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}|{9}|{10}" -f $script:NewsLoadedAt.Ticks, [string]$script:Config.NewsFilter, $script:NewsBoldSince.Ticks, (Get-Date).ToString("yyyyMMddHHmm"), $script:NewsLoading, @($script:NewsItems).Count, (@($script:Config.NewsMuted) -join ","), [bool]$script:Config.PrivacyMode, $script:NewsVersion, $script:NewsQuery, $script:NewsSavedMode
     if ($IfChanged -and $sig -eq $script:NewsGridSig) { return }
     $script:NewsGridSig = $sig
     $p = $script:Pal
-    $hold = @($script:Portfolio.Keys)
-    $items = @(Select-NewsItems -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Filter ([string]$script:Config.NewsFilter) -Holdings $hold -Watchlist @($script:Config.Watchlist))
+    $items = @(Get-NewsShown)
+    $highlight = @(ConvertTo-KeywordList ([string]$script:Config.NewsHighlight))
+    $savedKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($sv in @($script:NewsSaved)) { if ($null -ne $sv) { [void]$savedKeys.Add([string]$sv.Key) } }
     $dayPct = @{}
     foreach ($k in @($script:QuoteStore.Keys)) {
         $q = $script:QuoteStore[$k]
@@ -1103,13 +1111,20 @@ function Refresh-NewsGrid {
         $symTxt = @($n.Syms | Select-Object -First 4) -join " "
         if (@($n.Syms).Count -gt 4) { $symTxt += " +" + (@($n.Syms).Count - 4) }
         if ($null -ne $mv) { $symTxt = "{0}  {1}{2:+0.0;-0.0}%" -f $symTxt, (Get-ArrowPrefix $mv.Pct), $mv.Pct }
-        $idx = $dgvNews.Rows.Add((Format-NewsAge -Time ([DateTime]$n.Time) -Now $now -Lang $lang), $symTxt, [string]$n.Publisher, [string]$n.Title)
+        $srcTxt = [string]$n.Publisher
+        $alsoN = @($n.Also | Where-Object { $_ }).Count
+        if ($alsoN -gt 0) { $srcTxt += " +" + $alsoN }
+        $isSaved = $false
+        foreach ($k in @(Get-NewsItemKeys $n)) { if ($savedKeys.Contains($k)) { $isSaved = $true; break } }
+        $titleTxt = if ($isSaved) { [string][char]0x2605 + " " + [string]$n.Title } else { [string]$n.Title }
+        $idx = $dgvNews.Rows.Add((Format-NewsAge -Time ([DateTime]$n.Time) -Now $now -Lang $lang), $symTxt, $srcTxt, $titleTxt)
         $row = $dgvNews.Rows[$idx]
         $row.Tag = $n
         $row.Cells["Age"].Style.ForeColor = $p.Muted
         $row.Cells["Src"].Style.ForeColor = $p.Muted
         $row.Cells["Syms"].Style.ForeColor = if ($null -eq $mv) { $p.Accent } elseif ($mv.Pct -ge 0) { $colGreen } else { $colRed }
-        if ([DateTime]$n.Time -gt $script:NewsBoldSince) {
+        if ($highlight.Count -gt 0 -and (Test-NewsWords $n $highlight)) { $row.Cells["Title"].Style.ForeColor = $p.Warn }
+        if (Test-NewsUnread -Item $n -Since $script:NewsBoldSince -ReadKeys $script:NewsRead -UnreadKeys $script:NewsUnread) {
             foreach ($cn in @("Age", "Syms", "Src")) { $row.Cells[$cn].Style.Font = $fontGridBold }
             $row.Cells["Title"].Style.Font = $fontGridUiBold
         }
@@ -1120,7 +1135,9 @@ function Refresh-NewsGrid {
         if ($selKey -and [string]$n.Key -eq $selKey) { $row.Selected = $true }
     }
     if ($items.Count -eq 0) {
-        $msg = if ($script:NewsLoading -or $script:NewsLoadedAt -eq [DateTime]::MinValue) { "Nachrichten werden geladen ..." }
+        $msg = if ($script:NewsSavedMode) { "Keine gemerkten Meldungen (S merkt die markierte Meldung)." }
+               elseif (@(Get-EnabledNewsIds).Count -eq 0) { "Keine Quelle eingeschaltet - Quellen > Feeds verwalten." }
+               elseif (@($script:NewsItems).Count -eq 0 -and ($script:NewsLoading -or $script:NewsLoadedAt -eq [DateTime]::MinValue)) { "Nachrichten werden geladen ..." }
                elseif (@($script:NewsItems).Count -gt 0) { "Keine Nachrichten für diesen Filter." }
                elseif ($script:NewsError) { "Keine Verbindung - Nachrichten kommen beim nächsten Versuch." }
                else { "Keine Nachrichten der letzten 14 Tage." }
@@ -1131,6 +1148,7 @@ function Refresh-NewsGrid {
     if ($first -ge 0 -and $first -lt $dgvNews.Rows.Count) { try { $dgvNews.FirstDisplayedScrollingRowIndex = $first } catch { } }
     $dgvNews.ResumeLayout()
     Update-NewsInfo -Shown $items.Count
+    Update-NewsPreview
 }
 
 function Update-NewsInfo {
@@ -1143,108 +1161,22 @@ function Update-NewsInfo {
         $parts += ("{0} {1}" -f (Tr "Stand"), $script:NewsLoadedAt.ToString("HH:mm"))
     }
     if ($script:NewsError) { $parts += (Tr "letzter Versuch ohne Verbindung") }
-    $parts += (Tr "Quelle: Yahoo Finance, Doppelklick öffnet den Artikel")
+    $choices = @(Get-NewsSourceChoices)
+    $hidden = @($choices | Where-Object { @($script:Config.NewsViewHidden) -contains $_.Id }).Count
+    $feeds = @($choices | Where-Object { $_.Id -ne "yahoo" }).Count
+    $src = @()
+    if ([bool]$script:Config.NewsYahoo) { $src += "Yahoo Finance" }
+    if ($feeds -gt 0) { $src += "{0} {1}" -f $feeds, $(if ($feeds -eq 1) { "Feed" } else { "Feeds" }) }
+    $parts += ((Tr "Quellen:") + " " + $(if ($src.Count -gt 0) { $src -join " + " } else { Tr "keine" }) + $(if ($hidden -gt 0) { " ({0} {1})" -f $hidden, (Tr "ausgeblendet") } else { "" }))
+    $failed = @($choices | Where-Object { $null -ne $script:FeedStatus[$_.Id] -and $script:FeedStatus[$_.Id].Error })
+    if ($failed.Count -gt 0) {
+        # failures first, so that the narrow label does not cut them off
+        $names = @($failed | Select-Object -First 3 | ForEach-Object { $_.Label }) -join ", "
+        $parts = @((Tr "Fehler:") + " " + $names + $(if ($failed.Count -gt 3) { " +" + ($failed.Count - 3) } else { "" })) + $parts
+    }
+    $lblNewsInfo.ForeColor = if ($failed.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
+    Set-DynTip $lblNewsInfo (($choices | ForEach-Object { "{0}: {1}" -f $_.Label, (Get-FeedStatusText $_.Id) }) -join "`r`n")
     $lblNewsInfo.Text = $parts -join "  |  "
-}
-
-function Invoke-NewsKeywordCheck {
-    # v4.9.5: tray + phone push for new headlines with a chosen word about a
-    # held ticker (optionally the watchlist). Each item once: the newest
-    # checked time is kept in the config, the first run only sets it.
-    $kw = @(ConvertTo-KeywordList ([string]$script:Config.NewsKeywords))
-    $newest = Get-NewsNewest
-    $last = [DateTime]::MinValue
-    if ([string]$script:Config.NewsKeywordLastAt) {
-        [void][DateTime]::TryParse([string]$script:Config.NewsKeywordLastAt, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$last)
-    }
-    if ($kw.Count -gt 0 -and $last -gt [DateTime]::MinValue) {
-        $syms = @($script:Portfolio.Keys)
-        if ([bool]$script:Config.NewsKeywordWatch) { $syms += @($script:Config.Watchlist) }
-        $hits = @(Find-NewsKeywordHits -Items (Remove-MutedNews -Items $script:NewsItems -Muted @($script:Config.NewsMuted)) -Keywords $kw -Symbols $syms -Since $last)
-        foreach ($h in ($hits | Select-Object -Last 3)) {
-            $title = "News {0}: {1}" -f $h.Sym, $h.Keyword
-            $msg = "{0} ({1})" -f [string]$h.Item.Title, [string]$h.Item.Publisher
-            $push = Send-WidgetNotification -Title $title -Message $msg -Kind "News"
-            Add-AlertLogEntry -Alert ([PSCustomObject]@{ Ticker = $h.Sym; Condition = "NEWS"; Note = $h.Keyword }) -Text ([string]$h.Item.Title) -Push $push
-        }
-        if ($hits.Count -gt 3) { Write-WidgetLog ("News keywords: {0} hits, notified the newest 3" -f $hits.Count) }
-    }
-    if ($newest -gt $last) {
-        $script:Config.NewsKeywordLastAt = $newest.ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
-        Save-JsonState -Path $script:ConfigPath -Data $script:Config
-    }
-}
-
-function Start-NewsLoad {
-    # One Yahoo search request per ticker (holdings + watchlist, max 40),
-    # merged into one feed in the background
-    if ($script:IsClosing -or $script:NewsLoading) { return }
-    # v4.9.5: Yahoo asked us to slow down -> the news wait for the same pause
-    if ((Get-Date) -lt $script:BackoffUntil) {
-        $script:NextNewsLoad = $script:BackoffUntil.AddMinutes(1)
-        return
-    }
-    $syms = @(Get-NewsSymbols -Holdings @($script:Portfolio.Keys | Sort-Object) -Watchlist @($script:Config.Watchlist) -Max 40)
-    if ($syms.Count -eq 0 -and @(ConvertTo-FeedList ([string]$script:Config.NewsFeeds)).Count -eq 0) {
-        $script:NewsItems = @()
-        $script:NewsLoadedAt = Get-Date
-        Update-NewsBadge
-        if ($viewNews.Visible) { Refresh-NewsGrid }
-        return
-    }
-    $urls = @{}
-    foreach ($s in $syms) { $urls[$s] = Get-ProviderUrl -Kind "Search" -Symbol $s -NewsCount 10 }
-    # v5.7: own RSS / Atom feeds
-    foreach ($fu in @(ConvertTo-FeedList ([string]$script:Config.NewsFeeds))) { $urls["rss:" + $fu] = $fu }
-    $script:NewsLoading = $true
-    if ($viewNews.Visible) { Update-NewsInfo }
-    Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
-        param($Box, $Ctx)
-        $script:NewsLoading = $false
-        if ([bool]$Box.RateLimited) {
-            # same back-off as the price refresh (30 s doubling, max 5 min)
-            $script:BackoffLevel = [math]::Min(5, $script:BackoffLevel + 1)
-            $script:BackoffUntil = (Get-Date).AddSeconds([math]::Min(300, 30 * [math]::Pow(2, $script:BackoffLevel - 1)))
-            $script:NextNewsLoad = $script:BackoffUntil.AddMinutes(1)
-            Write-WidgetLog ("News: rate limit, pause until {0:HH:mm:ss}" -f $script:BackoffUntil) "WARN"
-        }
-        $by = @{}
-        $ok = 0
-        $rssItems = @()
-        foreach ($s in $Ctx.Urls.Keys) {
-            $j = $Box.Results[$Ctx.Urls[$s]]
-            if ($null -ne $j) { $ok++ }
-            # v5.7: own feeds come back as text
-            if (([string]$s).StartsWith("rss:")) { if ($j -is [string]) { $rssItems += @(ConvertFrom-RssFeed -Text $j -Fallback (Get-ProviderOfUrl $Ctx.Urls[$s])) }; continue }
-            $by[$s] = @(ConvertFrom-YahooNews $j)
-        }
-        if ($ok -eq 0) {
-            $script:NewsError = "offline"
-            Write-WidgetLog "News: no answer for $($Ctx.Urls.Count) tickers" "WARN"
-        } else {
-            $script:NewsError = ""
-            $script:NewsItems = @(Merge-NewsFeed -BySymbol $by -Max 150)
-            if ($rssItems.Count -gt 0) {
-                $nameMap = @{}
-                foreach ($s in $by.Keys) {
-                    $q0 = $script:QuoteStore[$s]
-                    $nm0 = if ($null -ne $q0 -and $q0.LongName) { [string]$q0.LongName } elseif ($null -ne $script:Profiles[$s]) { [string]$script:Profiles[$s].Name } else { "" }
-                    $w0 = Get-NewsNameKey $nm0
-                    if ($w0) { $nameMap[$s] = $w0 }
-                }
-                $script:NewsItems = @(Add-RssToFeed -Feed $script:NewsItems -RssItems $rssItems -NameMap $nameMap -Max 200)
-            }
-            $script:NewsLoadedAt = Get-Date
-            # first start: nothing counts as unread
-            if ($script:NewsSeenAt -eq [DateTime]::MinValue) {
-                Set-NewsSeen (Get-NewsNewest)
-                $script:NewsBoldSince = $script:NewsSeenAt
-            }
-            Invoke-NewsKeywordCheck
-        }
-        Update-NewsBadge
-        if ($viewNews.Visible) { Refresh-NewsGrid }
-    }
 }
 
 $cmbNewsFilter.Add_SelectionChangeCommitted({
@@ -1254,21 +1186,23 @@ $cmbNewsFilter.Add_SelectionChangeCommitted({
     Set-NewsFilter $script:NewsFilterKeys[$i]
 })
 $btnNewsRead.Add_Click({
-    $script:NewsBoldSince = [DateTime]::MaxValue
+    $script:NewsUnread.Clear()
+    $script:NewsRead.Clear()
     Set-NewsSeen (Get-NewsNewest)
     $script:NewsBoldSince = $script:NewsSeenAt
-    Refresh-NewsGrid
-    Update-NewsBadge
+    Save-NewsState
+    Update-NewsViews
 })
 $btnNewsRefresh.Add_Click({
-    $script:NextNewsLoad = (Get-Date).AddMinutes((Get-NewsPollMinutes -Minutes ([int]$script:Config.NewsRefreshMinutes)))
-    Start-NewsLoad
+    # asks every source now, also feeds that would answer "not modified"
+    $script:WorkerShared.Cond.Clear()
+    Start-NewsLoad -Force
 })
 $dgvNews.Add_CellDoubleClick({
     param($sender, $e)
     if ($e.RowIndex -lt 0) { return }
     $n = $sender.Rows[$e.RowIndex].Tag
-    if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) }
+    Open-NewsItem $n
 })
 $dgvNews.Add_CellClick({
     param($sender, $e)
@@ -1290,7 +1224,16 @@ $miNewsCopy = $newsMenu.Items.Add("Link kopieren")
 $miNewsTicker = $newsMenu.Items.Add("Ticker öffnen")
 [void]$newsMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $miNewsMute = $newsMenu.Items.Add("Quelle ausblenden")
-$miNewsOpen.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) } })
+[void]$newsMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miNewsSave = $newsMenu.Items.Add("Merken (S)")
+$miNewsRead = $newsMenu.Items.Add("Als gelesen markieren (M)")
+$miNewsPrev = $newsMenu.Items.Add("Vorschau anzeigen (V)")
+$miNewsCsv = $newsMenu.Items.Add("Gemerkte als CSV speichern ...")
+$miNewsSave.Add_Click({ Switch-NewsSaved $script:NewsMenuItem })
+$miNewsRead.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n) { Set-NewsReadMark -Item $n -Read ([bool](Test-NewsUnread -Item $n -Since $script:NewsBoldSince -ReadKeys $script:NewsRead -UnreadKeys $script:NewsUnread)) } })
+$miNewsPrev.Add_Click({ Set-NewsPreview (-not [bool]$script:Config.NewsPreview) })
+$miNewsCsv.Add_Click({ Export-SavedNews })
+$miNewsOpen.Add_Click({ Open-NewsItem $script:NewsMenuItem })
 $miNewsCopy.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and $n.Link) { try { [System.Windows.Forms.Clipboard]::SetText([string]$n.Link); Set-TransientStatus (Tr "Link kopiert") 2 } catch { } } })
 $miNewsTicker.Add_Click({ $n = $script:NewsMenuItem; if ($null -ne $n -and @($n.Syms).Count -gt 0) { Switch-ActiveTicker -NewTicker ([string]@($n.Syms)[0]) -SkipResolve $true } })
 $miNewsMute.Add_Click({
@@ -1315,6 +1258,10 @@ $dgvNews.Add_CellMouseDown({
     $miNewsCopy.Enabled = [bool]$n.Link
     $miNewsTicker.Enabled = (@($n.Syms).Count -gt 0)
     $miNewsTicker.Text = if (@($n.Syms).Count -gt 0) { "{0}: {1}" -f (Tr "Ticker öffnen"), @($n.Syms)[0] } else { Tr "Ticker öffnen" }
+    $miNewsSave.Text = if (Test-NewsSaved $n) { Tr "Nicht mehr merken (S)" } else { Tr "Merken (S)" }
+    $miNewsRead.Text = if (Test-NewsUnread -Item $n -Since $script:NewsBoldSince -ReadKeys $script:NewsRead -UnreadKeys $script:NewsUnread) { Tr "Als gelesen markieren (M)" } else { Tr "Als ungelesen markieren (M)" }
+    $miNewsPrev.Text = if ([bool]$script:Config.NewsPreview) { Tr "Vorschau ausblenden (V)" } else { Tr "Vorschau anzeigen (V)" }
+    $miNewsCsv.Enabled = (@($script:NewsSaved).Count -gt 0)
     $miNewsMute.Enabled = [bool]$n.Publisher
     $miNewsMute.Text = if ($n.Publisher) { "{0}: {1}" -f (Tr "Quelle ausblenden"), [string]$n.Publisher } else { Tr "Quelle ausblenden" }
     $newsMenu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
@@ -1324,13 +1271,10 @@ $dgvNews.Add_KeyDown({
     param($sender, $e)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $sender.SelectedRows.Count -gt 0) {
         $n = $sender.SelectedRows[0].Tag
-        if ($null -ne $n -and $n.Link) { Open-Link ([string]$n.Link) }
+        Open-NewsItem $n
         $e.Handled = $true
     }
 })
-Update-NewsFilterCombo
-Refresh-NewsGrid
-
 $lblAlTitle = New-Object System.Windows.Forms.Label
 $lblAlTitle.Location = New-Object System.Drawing.Point((S 496), (S 8))
 $lblAlTitle.Size = New-Object System.Drawing.Size((S 168), (S 20))

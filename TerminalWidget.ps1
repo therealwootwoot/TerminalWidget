@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "7.5.1"
+$script:AppVersion    = "7.7"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -853,7 +853,7 @@ function Backup-DataFiles {
     # Returns the backup folder, or "" when there was nothing to copy / it failed.
     param([string]$Reason = "manuell")
     try {
-        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json", "alert-log.json", "cash.json", "savingsplans.json", "drawings.json", "notes.json") |
+        $files = @(@("config.json", "portfolio.json", "alerts.json", "transactions.json", "profiles.json", "events.json", "alert-log.json", "cash.json", "savingsplans.json", "drawings.json", "notes.json", "news.json") |
             ForEach-Object { Join-Path $script:DataDir $_ } | Where-Object { Test-Path $_ })
         if ($files.Count -eq 0) { return "" }
         $safe = ($Reason -replace '[^A-Za-z0-9_.-]', '_')
@@ -903,7 +903,21 @@ $defaultConfig = [PSCustomObject]@{
     ShowSR                = $false            # v5.5: support / resistance (daily, from TA) in the chart
     SignalAlerts          = "Depot"           # v5.7: signal-change alerts for Depot / Alle (+ watchlist) / Aus
     PeerGroups            = [PSCustomObject]@{} # v5.7: own comparison group per ticker
-    NewsFeeds             = ""                # v5.7: extra RSS / Atom feeds (one URL per line)
+    NewsFeeds             = ""                # v5.7: extra RSS / Atom feeds (one URL per line); since v7.7 only read once
+    NewsSources           = @()               # v7.7: own feeds @{ Id; Url; Name; On; Notify; Group; Ticker; Minutes; MaxAgeDays }
+    NewsSourcesMigrated   = $false            # v7.7: the old NewsFeeds text was taken over
+    NewsYahoo             = $true             # v7.7: Yahoo Finance as a news source
+    NewsYahooNotify       = $true             # v7.7: Yahoo headlines may trigger keyword notices
+    NewsViewHidden        = @()               # v7.7: source ids hidden with the "Quellen" menu (still loaded)
+    NewsAliases           = ""                # v7.7: "ABBN.SW = ABB, Asea" per line
+    NewsInclude           = ""                # v7.7: show only headlines with one of these words
+    NewsExclude           = ""                # v7.7: hide headlines with one of these words
+    NewsHighlight         = ""                # v7.7: highlight headlines with one of these words
+    NewsMergeSimilar      = $true             # v7.7: near-identical headlines become one row
+    NewsPreview           = $false            # v7.7: preview pane under the news list
+    NewsImages            = $true             # v7.7: load the picture of an item in the preview pane
+    NewsHistoryDays       = 14                # v7.7: how long news stay in the history
+    ShowNewsMarkers       = $false            # v7.7: news of the ticker as marks in the chart
     TwelveDataKeyEnc      = ""                # V6: API keys (Windows DPAPI, this user only)
     FinnhubKeyEnc         = ""
     ProviderCaps          = [PSCustomObject]@{} # V6: "Provider|Kind" -> works with this key (from the test)
@@ -1090,6 +1104,14 @@ $script:Config.ConcentrationWarnPct = [math]::Max(5, [math]::Min(90, [int]$scrip
 if ([string]$script:Config.TerminalBottom -notin @("Watchlist", "Portfolio", "News")) { $script:Config.TerminalBottom = "Watchlist" }
 $script:Config.NewsRefreshMinutes = [math]::Max(5, [math]::Min(240, [int]$script:Config.NewsRefreshMinutes))
 $script:Config.NewsMoveThreshold  = [math]::Max(0, [math]::Min(50, [int]$script:Config.NewsMoveThreshold))
+$script:Config.NewsHistoryDays    = [math]::Max(1, [math]::Min(90, [int]$script:Config.NewsHistoryDays))
+# v7.7: the feeds of the old text setting become selectable sources, once. NewsFeeds
+# stays untouched, so an older version still finds its feeds.
+$script:Config.NewsSources = @(ConvertTo-NewsSourceList $script:Config.NewsSources)
+if (-not [bool]$script:Config.NewsSourcesMigrated) {
+    $script:Config.NewsSources = @(Add-LegacyNewsFeeds -Sources $script:Config.NewsSources -Text ([string]$script:Config.NewsFeeds))
+    $script:Config.NewsSourcesMigrated = $true
+}
 if ([int]$script:Config.FontScale -notin @(Get-FontScaleSteps)) { $script:Config.FontScale = 100 }
 if ([string]$script:Config.MonoFont -notin @(Get-MonoFontNames)) { $script:Config.MonoFont = "Consolas" }
 if (-not (Get-NormalizedCurrencyCode ([string]$script:Config.ReportBase))) { $script:Config.ReportBase = "EUR" }
@@ -1724,7 +1746,7 @@ function Set-EventEntry {
 # message loop, so its load time is not measured; "window shown after" covers it.
 $script:StartupParts = New-Object System.Collections.Generic.List[string]
 Write-WidgetLog ("Startup: main script ready after {0} ms" -f $script:StartWatch.ElapsedMilliseconds)
-foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "13-Startup")) {
+foreach ($twPart in @("02-Data", "03-Theme", "04-ChartRender", "05-ChartViews", "05b-News", "06-MainWindow", "07-Events", "08-Analysis", "09-Dialogs", "10-Palette", "11-System", "12-Shell", "13-Startup")) {
     $twPartStart = $script:StartWatch.ElapsedMilliseconds
     if ($twPart -eq "13-Startup") { Write-WidgetLog ("Startup: parts 02-12 loaded after {0} ms" -f $twPartStart) }
     . (Join-Path (Join-Path $script:ScriptDir "ui") "$twPart.ps1")

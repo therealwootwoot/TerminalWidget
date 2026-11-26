@@ -216,6 +216,7 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnNewsRefresh -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
     Style-DataGrid -Grid $dgvNews
     $dgvNews.ShowCellToolTips = $true
+    Apply-NewsTheme
     if ($viewNews.Visible) { Refresh-NewsGrid }
 
     Set-ActiveTab -TabName $script:Config.ActiveTab

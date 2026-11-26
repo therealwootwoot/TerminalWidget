@@ -371,6 +371,11 @@ $script:GlobalKeyHandler = {
             if (Copy-GridAsTable -Grid $gc) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
         }
     }
+    # v7.7: Ctrl+F = search in the news list
+    if ($e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F -and $viewNews.Visible) {
+        [void]$txtNewsSearch.Focus(); $txtNewsSearch.SelectAll()
+        $e.Handled = $true; $e.SuppressKeyPress = $true; return
+    }
     # Other Ctrl/Alt combos (Ctrl+C, Alt+F4, ...) are never widget shortcuts
     if ($e.Control -or $e.Alt) { return }
     $ac = $sender.ActiveControl
@@ -382,6 +387,9 @@ $script:GlobalKeyHandler = {
     if (($ac -is [System.Windows.Forms.TextBox] -or $ac -is [System.Windows.Forms.ComboBox] -or $ac -is [System.Windows.Forms.ListBox]) -and -not $isFKey) { return }
     # Arrow keys belong to the grid when a grid has focus
     if ($ac -is [System.Windows.Forms.DataGridView] -and $e.KeyCode -in @([System.Windows.Forms.Keys]::Left, [System.Windows.Forms.Keys]::Right)) { return }
+
+    # v7.7: J / K / O / S / M / V belong to the news list while it has the focus
+    if ([object]::ReferenceEquals($ac, $dgvNews) -and -not $e.Shift -and (Invoke-NewsKey $e)) { $e.Handled = $true; $e.SuppressKeyPress = $true; return }
 
     # 1-6 (top row or numpad): timeframe 1D / 5D / 1M / 3M / 6M / 1Y
     $kc = [int]$e.KeyCode
@@ -591,7 +599,8 @@ $uiTimer.Add_Tick({
         # v4.9: news feed (also in the background, for the unread count)
         if ($script:StartupDone -and $nowTick -ge $script:NextNewsLoad) {
             $allClosed = Test-AllPrioClosed
-            $script:NextNewsLoad = $nowTick.AddMinutes((Get-NewsPollMinutes -Minutes ([int]$script:Config.NewsRefreshMinutes) -AllClosed $allClosed))
+            $script:NextNewsLoad = $nowTick.AddMinutes(1)
+            $script:NewsAllClosed = $allClosed
             Start-NewsLoad
         }
     } catch {
@@ -1253,6 +1262,78 @@ function Invoke-SmokeTest {
     [void](Invoke-TerminalCommand "STYLE FRESH")
     Invoke-SmokeStep "Design ticker analysis" { & $probeRun { Show-TickerAnalysis "NVDA" } { & $script:SmokeShot "07-fresh-ticker-analysis" ([System.Windows.Forms.Form]::ActiveForm); "" } 8000 } 10000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
+    Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
+        for ($i = 0; $i -lt 80 -and $script:NewsLoading; $i++) { Start-Sleep -Milliseconds 250; & $pump }
+        $keepItems = @($script:NewsItems)
+        $src = @(ConvertTo-NewsSourceList @([PSCustomObject]@{ Url = "https://example.invalid/rss"; Name = "SmokeFeed"; Group = "Test" }))
+        $script:Config.NewsSources = $src
+        $fid = [string]$src[0].Id
+        $mk = { param($k, $title, $sid) [PSCustomObject]@{ Key = $k; Title = $title; Publisher = $sid; Link = ""; Time = (Get-Date).AddMinutes(-3); Syms = @("NVDA"); Summary = "Kurztext zum Test"; Image = ""; Sources = @($sid); Also = @() } }
+        $script:NewsItems = @((& $mk "s-y" "Smoke yahoo headline about chips today" "yahoo"), (& $mk "s-f" "Completely different feed story regarding energy" $fid))
+        Set-NewsFilter "All"; Update-NewsViews; & $pump
+        if ($dgvNews.Rows.Count -ne 2) { throw "two sources, rows: $($dgvNews.Rows.Count)" }
+        Set-NewsViewHidden @($fid); & $pump
+        if ($dgvNews.Rows.Count -ne 1) { throw "hidden source still shown: $($dgvNews.Rows.Count)" }
+        Set-NewsViewHidden @(); $script:Config.NewsSources[0].On = $false; Update-NewsViews; & $pump
+        if ($dgvNews.Rows.Count -ne 1) { throw "switched-off source still shown: $($dgvNews.Rows.Count)" }
+        $script:Config.NewsSources[0].On = $true; Update-NewsViews; & $pump
+        Build-NewsSourceMenu
+        if ($script:NewsSourceMenu.Items.Count -lt 6) { throw "source menu items: $($script:NewsSourceMenu.Items.Count)" }
+        $script:NewsSourceMenu.Show($btnNewsSources, 0, $btnNewsSources.Height); & $pump
+        $script:NewsSourceMenu.Items[0].PerformClick(); & $pump
+        if (@($script:Config.NewsViewHidden).Count -ne 1) { throw "menu tick did not hide a source" }
+        $script:NewsSourceMenu.Close(); Set-NewsViewHidden @()
+        $txtNewsSearch.Text = "energy"; & $pump
+        if ($dgvNews.Rows.Count -ne 1) { throw "search rows: $($dgvNews.Rows.Count)" }
+        $txtNewsSearch.Text = ""; & $pump
+        $dgvNews.ClearSelection(); $dgvNews.Rows[0].Selected = $true; & $pump
+        $one = Get-SelectedNews
+        Switch-NewsSaved $one; & $pump
+        $btnNewsSaved.PerformClick(); & $pump
+        if ($dgvNews.Rows.Count -ne 1 -or $null -eq $dgvNews.Rows[0].Tag) { throw "saved view rows: $($dgvNews.Rows.Count)" }
+        $btnNewsSaved.PerformClick(); & $pump
+        Switch-NewsSaved $one
+        Set-NewsReadMark -Item $one -Read $false
+        if (-not (Test-NewsUnread -Item $one -Since ([DateTime]::MaxValue) -ReadKeys $script:NewsRead -UnreadKeys $script:NewsUnread)) { throw "unread mark lost" }
+        Set-NewsReadMark -Item $one -Read $true
+        Set-NewsPreview $true; & $pump
+        $dgvNews.ClearSelection(); $dgvNews.Rows[0].Selected = $true; & $pump
+        if (-not $pnlNewsPreview.Visible -or $lblNpText.Text -ne "Kurztext zum Test") { throw "preview: visible=$($pnlNewsPreview.Visible) text=$($lblNpText.Text)" }
+        if ($pnlNewsPreview.Top -lt $dgvNews.Bottom -or $pnlNewsPreview.Bottom -gt $viewNews.Height) { throw "preview overlaps the list or leaves the tab" }
+        Set-NewsPreview $false; & $pump
+        # a feed answer goes through parsing, matching and status; 429 pauses only that host
+        $u = "https://example.invalid/rss"
+        $box = @{ Results = @{ $u = '<rss><channel><title>S</title><item><title>NVIDIA smoke feed item</title><link>https://example.invalid/a?id=1</link></item></channel></rss>' }; Meta = @{ $u = @{ Code = 200; Error = ""; ETag = ""; Modified = "" } } }
+        $before = $script:BackoffUntil
+        Receive-FeedResults -Box $box -Requests @([PSCustomObject]@{ Url = $u; Id = $fid; Ticker = "NVDA" })
+        if ($script:FeedStatus[$fid].Error -or $script:FeedStatus[$fid].Count -ne 1) { throw "feed status: $($script:FeedStatus[$fid].Error) / $($script:FeedStatus[$fid].Count)" }
+        $box = @{ Results = @{ $u = $null }; Meta = @{ $u = @{ Code = 429; Error = "" } } }
+        Receive-FeedResults -Box $box -Requests @([PSCustomObject]@{ Url = $u; Id = $fid; Ticker = "" })
+        if ($script:BackoffUntil -ne $before) { throw "a feed rate limit changed the price back-off" }
+        if (-not $script:FeedPause.ContainsKey((Get-ProviderOfUrl $u))) { throw "feed host not paused" }
+        Update-NewsViews; & $pump
+        if ($lblNewsInfo.Text -notmatch "SmokeFeed") { throw "failed feed not named: $($lblNewsInfo.Text)" }
+        $script:Config.ShowNewsMarkers = $true; Set-ActiveTab -TabName "Chart"; $script:ChartSignature = ""; Update-AllUiViews; & $pump; if ($script:SmokeShot) { & $script:SmokeShot "12-news-markers" }
+        $script:Config.ShowNewsMarkers = $false
+        Set-ActiveTab -TabName "News"; Set-NewsPreview $true; & $pump; if ($script:SmokeShot) { & $script:SmokeShot "13-news-preview" }; Set-NewsPreview $false
+        $script:FeedPause.Clear(); $script:FeedStatus.Remove($fid)
+        $script:NewsHistory = @(); $script:NewsSaved = @()
+        $script:Config.NewsSources = @(); $script:NewsItems = $keepItems; Update-NewsViews
+        Set-ActiveTab -TabName "Chart"
+    }
+    Invoke-SmokeStep "V7.7 feed manager" -CloseAfterMs 5000 -Action {
+        $script:Config.NewsSources = @(ConvertTo-NewsSourceList @([PSCustomObject]@{ Url = "https://example.invalid/rss?q={name}"; Name = "Vorlage" }))
+        & $probeRun { Show-FeedManager } {
+            if ($null -eq $script:FeedDlg -or $script:FeedDlg.Dlg.IsDisposed) { return "window not open" }
+            if ($script:FeedDlg.Grid.Rows.Count -ne 2) { return "rows: $($script:FeedDlg.Grid.Rows.Count)" }
+            if ($script:SmokeShot) { & $script:SmokeShot "14-feed-manager" $script:FeedDlg.Dlg }
+            return ""
+        } 1500
+        & $pump
+        if (@($script:Config.NewsSources).Count -ne 1) { throw "cancelling the manager changed the feeds" }
+        $script:Config.NewsSources = @()
+    }
     # V7.0: contrast of every theme (text 4.5:1, muted text and accent 3:1) against card and background
     Invoke-SmokeStep "Theme contrast" {
         $saved = [string]$script:Config.Theme
