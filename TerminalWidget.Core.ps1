@@ -1073,6 +1073,7 @@ function Get-SnoozeUntil {
         "1h"       { return $Now.AddHours(1) }
         "4h"       { return $Now.AddHours(4) }
         "Tomorrow" { return $Now.Date.AddDays(1).AddHours(8) }
+        "Week"     { return $Now.Date.AddDays(7).AddHours(8) }
         default    { return [DateTime]::MinValue }
     }
 }
@@ -4280,6 +4281,22 @@ function Get-WatchGroupSymbols {
     return @($wl | Where-Object { $set.Contains($_) })
 }
 
+function ConvertTo-FlatWatchGroups {
+    # v8.0: before 8.0 the group list could be saved as a list inside a list
+    # (and the next change then merged the groups). Returns a flat, clean list.
+    param($Groups)
+    $out = @()
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Groups)
+    while ($stack.Count -gt 0) {
+        $g = $stack.Pop()
+        if ($null -eq $g) { continue }
+        if ($g -is [System.Array]) { for ($i = $g.Count - 1; $i -ge 0; $i--) { $stack.Push($g[$i]) }; continue }
+        if ($g.Name) { $out += [PSCustomObject]@{ Name = [string]$g.Name; Symbols = @(@($g.Symbols) | Where-Object { $_ } | ForEach-Object { ([string]$_).ToUpperInvariant() }) } }
+    }
+    return ,$out
+}
+
 function Set-WatchGroupMember {
     # Adds (In = $true) or removes a ticker in a group; a new name creates the
     # group. Returns the new group list (name order kept, empty groups stay).
@@ -5192,7 +5209,9 @@ function Get-PortableSettingKeys {
         "UserLayouts", "GridLayouts",
         "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds",
         "NewsSources", "NewsSourcesMigrated", "NewsYahoo", "NewsYahooNotify", "NewsViewHidden", "NewsAliases",
-        "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers"
+        "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers",
+        "ColorRules", "CustomThemes", "OwnTargets", "ColumnSets", "ColumnSetMap", "KeyMap", "Favorites", "KpiTiles", "UserProfiles",
+        "AlertTemplates", "EarningsLeadDays", "ExDivLeadDays", "SummaryAuto", "GoalDepotValue", "GoalDividendYear"
     )
 }
 
@@ -5312,7 +5331,7 @@ function Get-DiagnosticConfig {
     foreach ($k in @("PushTokenEnc", "PushTopic", "PushChatId", "PushServer", "TwelveDataKeyEnc", "FinnhubKeyEnc")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = $(if ([string]$c.$k) { "(entfernt)" } else { "" }) }
     }
-    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups")) {
+    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups", "OwnTargets", "UserProfiles", "GoalDepotValue", "GoalDividendYear", "AlertTemplates")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
     }
     # v7.7: feed addresses may carry personal tokens or tickers
@@ -6579,4 +6598,454 @@ function ConvertFrom-Opml {
         $rows += [PSCustomObject]@{ Url = [string]$o.GetAttribute("xmlUrl"); Name = $name; Group = $group }
     }
     return @(ConvertTo-NewsSourceList $rows)
+}
+
+# ==============================================================================
+# v8.0: price axis, colour rules, own themes, shortcuts, ordering, alerts,
+#       notices, calendar export, summary, goals, risk figures, watchlist CSV
+# ==============================================================================
+function Get-ScaledPriceRange {
+    # Visible price range after the user scrolled the price axis.
+    # Scale 1 / Shift 0 = automatic; Scale > 1 shows a wider range; Shift is a
+    # share of the automatic range (positive = higher prices).
+    param([double]$MinP, [double]$SpanP, [bool]$Log = $false, [double]$Scale = 1.0, [double]$Shift = 0.0)
+    $sc = [math]::Min(8.0, [math]::Max(0.1, $Scale))
+    $sh = [math]::Min(4.0, [math]::Max(-4.0, $Shift))
+    $lo = Get-PriceFromFrac (0.5 + $sh - $sc / 2.0) $MinP $SpanP $Log
+    $hi = Get-PriceFromFrac (0.5 + $sh + $sc / 2.0) $MinP $SpanP $Log
+    return @{ Min = $lo; Span = ($hi - $lo) }
+}
+
+# ---- colour rules ------------------------------------------------------------
+function Get-ColorRuleFields {
+    return [ordered]@{
+        "DayPct"    = "Tagesänderung %"
+        "DayAbsPct" = "Tagesänderung % (egal welche Richtung)"
+        "Near"      = "Abstand zu Alarm / Zielkurs %"
+        "Rsi"       = "RSI (1h)"
+        "TotalPct"  = "Gewinn / Verlust zum Einstand %"
+        "High52Pct" = "Abstand zum 52W-Hoch %"
+    }
+}
+
+function New-ColorRule {
+    param([string]$Id, [string]$Name, [string]$Field, [string]$Op, [double]$Value, [string]$Color, [bool]$On = $false)
+    return [PSCustomObject]@{ Id = $Id; Name = $Name; On = $On; Field = $Field; Op = $Op; Value = $Value; Color = $Color }
+}
+
+function Get-DefaultColorRules {
+    # ready-made rules, all off until the user switches them on
+    return @(
+        (New-ColorRule "bigmove" "Große Tagesbewegung" "DayAbsPct" ">=" 3 "#F59E0B")
+        (New-ColorRule "near" "Nahe Alarm oder Zielkurs" "Near" "<=" 2 "#A855F7")
+        (New-ColorRule "rsihigh" "RSI überkauft" "Rsi" ">=" 70 "#F43F5E")
+        (New-ColorRule "rsilow" "RSI überverkauft" "Rsi" "<=" 30 "#10B981")
+        (New-ColorRule "gain" "Position im Gewinn" "TotalPct" ">=" 10 "#10B981")
+        (New-ColorRule "loss" "Position im Verlust" "TotalPct" "<=" -10 "#F43F5E")
+    )
+}
+
+function Get-MatchingColorRule {
+    # First switched-on rule that matches the facts of one row, else $null.
+    # Facts: hashtable field -> number; missing / NaN values never match.
+    param($Rules, [hashtable]$Facts)
+    foreach ($r in @($Rules)) {
+        if ($null -eq $r -or -not [bool]$r.On) { continue }
+        $f = [string]$r.Field
+        if (-not $Facts.ContainsKey($f) -or $null -eq $Facts[$f]) { continue }
+        $v = [double]$Facts[$f]
+        if ([double]::IsNaN($v)) { continue }
+        $t = [double]$r.Value
+        if (([string]$r.Op -eq ">=" -and $v -ge $t) -or ([string]$r.Op -eq "<=" -and $v -le $t)) { return $r }
+    }
+    return $null
+}
+
+function Get-NearestDistancePct {
+    # smallest distance in % between the price and any of the levels (> 0); NaN if none
+    param([double]$Price, [double[]]$Levels)
+    $best = [double]::NaN
+    if ($Price -le 0) { return $best }
+    foreach ($l in @($Levels)) {
+        if ($null -eq $l -or $l -le 0) { continue }
+        $d = [math]::Abs($l / $Price - 1.0) * 100.0
+        if ([double]::IsNaN($best) -or $d -lt $best) { $best = $d }
+    }
+    return $best
+}
+
+# ---- own themes --------------------------------------------------------------
+function Get-ThemeColorKeys {
+    return [ordered]@{
+        HeaderBg = "Kopfzeile"; BodyBg = "Hintergrund"; PanelBg = "Flächen"; Card = "Karten und Listen"; Input = "Eingabefelder"
+        Hover = "Maus darüber"; Grid = "Gitterlinien"; Border = "Rahmen"; Text = "Schrift"; Muted = "Schrift gedämpft"; Accent = "Akzent"; Warn = "Hinweis"
+    }
+}
+
+function ConvertFrom-ThemeData {
+    # Theme object (own config or imported file) -> clean @{ Name; Base; Colors }
+    # or $null. Unknown keys and broken colours are dropped, not guessed.
+    param($Data)
+    if ($null -eq $Data) { return $null }
+    $name = ([string]$Data.Name).Trim()
+    if (-not $name -or $name.Length -gt 30 -or @(Get-ThemeNames) -contains $name) { return $null }
+    $base = [string]$Data.Base
+    if (@(Get-ThemeNames) -notcontains $base) { $base = "Dark" }
+    $colors = [ordered]@{}
+    if ($null -ne $Data.Colors) {
+        foreach ($k in (Get-ThemeColorKeys).Keys) {
+            $p = $Data.Colors.PSObject.Properties[$k]
+            $v = if ($null -ne $p) { [string]$p.Value } elseif ($Data.Colors -is [System.Collections.IDictionary]) { [string]$Data.Colors[$k] } else { "" }
+            $rgb = ConvertFrom-HexColor $v
+            if ($null -ne $rgb) { $colors[$k] = ConvertTo-HexColor $rgb[0] $rgb[1] $rgb[2] }
+        }
+    }
+    return [PSCustomObject]@{ Name = $name; Base = $base; Colors = [PSCustomObject]$colors }
+}
+
+# ---- own shortcuts -----------------------------------------------------------
+function ConvertTo-ShortcutText {
+    # "ctrl + shift+a" -> "Strg+Shift+A"; "" when not allowed.
+    # Allowed: optional Strg / Alt / Shift plus A-Z, 0-9 or F1-F12.
+    param([string]$Text)
+    $parts = @(([string]$Text) -split '\+' | ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ })
+    if ($parts.Count -eq 0) { return "" }
+    $key = $parts[$parts.Count - 1]
+    if ($key -notmatch '^([A-Z]|[0-9]|F([1-9]|1[0-2]))$') { return "" }
+    $c = $false; $a = $false; $s = $false
+    for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+        switch -regex ($parts[$i]) {
+            '^(CTRL|STRG|CONTROL)$' { $c = $true }
+            '^ALT$'                 { $a = $true }
+            '^(SHIFT|UMSCHALT)$'    { $s = $true }
+            default                 { return "" }
+        }
+    }
+    $out = @()
+    if ($c) { $out += "Strg" }
+    if ($a) { $out += "Alt" }
+    if ($s) { $out += "Shift" }
+    $out += $key
+    $t = $out -join "+"
+    # keys the widget or Windows need
+    if ($t -in @("Strg+C", "Strg+V", "Strg+X", "Strg+Z", "Strg+Y", "Strg+A", "Strg+K", "Alt+F4", "F10")) { return "" }
+    # plain digits switch the time range
+    if ($t -match '^[0-9]$') { return "" }
+    return $t
+}
+
+function Get-KeyShortcutText {
+    # the same text form for a pressed key
+    param([string]$KeyName, [bool]$Ctrl, [bool]$Alt, [bool]$Shift)
+    $k = [string]$KeyName
+    if ($k -match '^D([0-9])$') { $k = $Matches[1] }
+    if ($k -notmatch '^([A-Z]|[0-9]|F([1-9]|1[0-2]))$') { return "" }
+    $p = @()
+    if ($Ctrl) { $p += "Strg" }
+    if ($Alt) { $p += "Alt" }
+    if ($Shift) { $p += "Shift" }
+    $p += $k.ToUpperInvariant()
+    return ($p -join "+")
+}
+
+function Select-OrderedIds {
+    # Chosen ids in the chosen order (unknown ones dropped, no doubles);
+    # an empty choice means all available in their normal order
+    param([string[]]$Available, [string[]]$Chosen, [switch]$EmptyIsNone)
+    $out = @()
+    foreach ($c in @($Chosen)) { if ($c -and @($Available) -contains $c -and $out -notcontains $c) { $out += $c } }
+    if ($out.Count -eq 0 -and -not $EmptyIsNone) { return @($Available) }
+    return $out
+}
+
+# ---- alerts: two conditions, templates ---------------------------------------
+function Test-AlertCombination {
+    # "" when the two conditions can be combined, else the reason
+    param([string]$First, [string]$Second)
+    $a = Get-AlertKind $First; $b = Get-AlertKind $Second
+    if ($a -eq "TREND" -or $b -eq "TREND") { return "Trendlinien-Alarme lassen sich nicht kombinieren." }
+    if ($b -eq "TRAIL") { return "Trailing % geht nur als erste Bedingung." }
+    if ((Test-PortfolioAlertKind $a) -ne (Test-PortfolioAlertKind $b)) { return "Depot-Bedingungen lassen sich nur mit Depot-Bedingungen kombinieren." }
+    if ($First -eq $Second) { return "Zwei gleiche Bedingungen ergeben keinen Sinn." }
+    return ""
+}
+
+function Join-AlertEvaluations {
+    # both conditions must be true; no data for one = no data at all
+    param($First, $Second)
+    $res = @{ Ok = ($First.Ok -and $Second.Ok); Value = $First.Value; Met = $false; Text = ""; Peak = $First.Peak }
+    if ($res.Ok) {
+        $res.Met = ($First.Met -and $Second.Met)
+        $res.Text = "{0}  UND  {1}" -f $First.Text, $Second.Text
+    }
+    return $res
+}
+
+function Get-TemplateConditions {
+    # conditions that mean the same thing for every ticker (no absolute prices)
+    return @("Tag% >=", "Tag% <=", "RSI >=", "RSI <=", "> SMA", "< SMA", "Trailing %", "EK% >=", "EK% <=", "52W Hoch", "52W Tief", "Volumen x")
+}
+
+function Test-AlertValue {
+    # "" when the number fits the condition, else the hint text
+    param([string]$Condition, [double]$Value)
+    $kind = Get-AlertKind $Condition
+    $bad = ($kind -in @("PRICE", "PFVAL", "VOL") -and $Value -le 0) -or
+           ($kind -in @("RSI", "TRAIL") -and ($Value -le 0 -or $Value -ge 100)) -or
+           ($kind -in @("HIGH52", "LOW52") -and ($Value -lt 0 -or $Value -gt 50))
+    if ($bad) { return (Get-AlertTargetHint $Condition) }
+    return ""
+}
+
+function Get-TemplateTargets {
+    # Tickers a template gets an alert for: without an equal alert already;
+    # EK% conditions only for tickers with a position
+    param([string[]]$Symbols, $Alerts, [string]$Condition, [double]$Value, [string]$Condition2 = "", [double]$Value2 = 0, [string[]]$Held = @())
+    $out = @()
+    $needsPos = ((Get-AlertKind $Condition) -eq "EKPCT" -or ($Condition2 -and (Get-AlertKind $Condition2) -eq "EKPCT"))
+    foreach ($s0 in @($Symbols)) {
+        $s = ([string]$s0).ToUpperInvariant()
+        if (-not $s -or $out -contains $s) { continue }
+        if ($needsPos -and @($Held) -notcontains $s) { continue }
+        $dup = @($Alerts | Where-Object { $null -ne $_ -and ([string]$_.Ticker).ToUpperInvariant() -eq $s -and [string]$_.Condition -eq $Condition -and
+            [math]::Abs([double]$_.TargetPrice - $Value) -lt 1e-9 -and [string]$_.Condition2 -eq $Condition2 -and
+            (-not $Condition2 -or [math]::Abs([double]$_.Target2 - $Value2) -lt 1e-9) })
+        if ($dup.Count -eq 0) { $out += $s }
+    }
+    return $out
+}
+
+# ---- notices ahead of dates --------------------------------------------------
+function Get-DueDateNotices {
+    # Earnings / ex-dividend notices that are due now: 0..lead days ahead and
+    # not sent yet for that date. A lead of -1 switches a kind off.
+    param([hashtable]$Events, [string[]]$Symbols, [int]$EarningsLead = 1, [int]$ExDivLead = -1, [string]$AsOf = "")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $out = @()
+    foreach ($s0 in @($Symbols)) {
+        $s = ([string]$s0).ToUpperInvariant()
+        $e = $Events[$s]
+        if ($null -eq $e) { continue }
+        foreach ($k in @(@("Earnings", "EarningsDate", "NotifiedEarnings", $EarningsLead), @("ExDiv", "ExDividendDate", "NotifiedExDiv", $ExDivLead))) {
+            $lead = [int]$k[3]
+            if ($lead -lt 0) { continue }
+            $v = [string]$e.($k[1])
+            if (-not $v -or [string]$e.($k[2]) -eq $v) { continue }
+            $d = [DateTime]::MinValue
+            if (-not [DateTime]::TryParseExact($v, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { continue }
+            $days = [int]($d - $now).TotalDays
+            if ($days -lt 0 -or $days -gt $lead) { continue }
+            $out += [PSCustomObject]@{ Ticker = $s; Kind = $k[0]; Date = $v; Days = $days; Flag = $k[2] }
+        }
+    }
+    return $out
+}
+
+# ---- calendar export (.ics) --------------------------------------------------
+function ConvertTo-IcsText {
+    # Events @(@{ Date; Ticker; Kind }) -> iCalendar text with all-day entries
+    param($Events, [DateTime]$Now = (Get-Date))
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $esc = { param([string]$t) $t.Replace('\', '\\').Replace(';', '\;').Replace(',', '\,').Replace("`r", "").Replace("`n", '\n') }
+    $fold = {
+        # lines are limited to 75 bytes; continuation lines start with a space
+        param([string]$line)
+        $parts = New-Object System.Collections.Generic.List[string]
+        $cur = ""; $bytes = 0
+        foreach ($ch in $line.ToCharArray()) {
+            $b = [System.Text.Encoding]::UTF8.GetByteCount([string]$ch)
+            if ($bytes + $b -gt 73) { $parts.Add($cur); $cur = " "; $bytes = 1 }
+            $cur += $ch; $bytes += $b
+        }
+        $parts.Add($cur)
+        return ($parts.ToArray() -join "`r`n")
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($h in @("BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//TerminalWidget//Termine//DE", "CALSCALE:GREGORIAN")) { $lines.Add($h) }
+    $stamp = $Now.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'", $inv)
+    foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        $d = [DateTime]::MinValue
+        if (-not [DateTime]::TryParseExact([string]$e.Date, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { continue }
+        $uid = (("{0}-{1}-{2}" -f $e.Date, $e.Ticker, $e.Kind) -replace '[^A-Za-z0-9\-]', '') + "@terminalwidget"
+        $lines.Add("BEGIN:VEVENT")
+        $lines.Add("UID:$uid")
+        $lines.Add("DTSTAMP:$stamp")
+        $lines.Add("DTSTART;VALUE=DATE:" + $d.ToString("yyyyMMdd", $inv))
+        $lines.Add("DTEND;VALUE=DATE:" + $d.AddDays(1).ToString("yyyyMMdd", $inv))
+        $lines.Add((& $fold ("SUMMARY:" + (& $esc ("{0}: {1}" -f $e.Ticker, $e.Kind)))))
+        $lines.Add("TRANSP:TRANSPARENT")
+        $lines.Add("END:VEVENT")
+    }
+    $lines.Add("END:VCALENDAR")
+    return (($lines.ToArray() -join "`r`n") + "`r`n")
+}
+
+# ---- summary -----------------------------------------------------------------
+function Get-ReferenceClose {
+    # last daily close on or before (AsOf - DaysBack); NaN when the history does
+    # not reach back that far or the match is more than 10 days older
+    param([string[]]$Dates, [double[]]$Closes, [int]$DaysBack = 7, [string]$AsOf = "")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $now = if ($AsOf) { [DateTime]::ParseExact($AsOf, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $limit = $now.AddDays(-$DaysBack).ToString("yyyy-MM-dd")
+    $oldest = $now.AddDays(-$DaysBack - 10).ToString("yyyy-MM-dd")
+    $n = [math]::Min(@($Dates).Count, @($Closes).Count)
+    for ($i = $n - 1; $i -ge 0; $i--) {
+        if ([string]::CompareOrdinal([string]$Dates[$i], $limit) -gt 0) { continue }
+        if ([string]::CompareOrdinal([string]$Dates[$i], $oldest) -lt 0) { break }
+        if ($Closes[$i] -gt 0) { return [double]$Closes[$i] }
+    }
+    return [double]::NaN
+}
+
+function Select-SummaryMovers {
+    # items @{ Ticker; Pct } -> the Top rising and the Top falling ones
+    param($Items, [int]$Top = 3)
+    $list = @($Items | Where-Object { $null -ne $_ -and -not [double]::IsNaN([double]$_.Pct) })
+    return [PSCustomObject]@{
+        Up   = @($list | Where-Object { [double]$_.Pct -gt 0 } | Sort-Object -Property @{ Expression = { [double]$_.Pct }; Descending = $true } | Select-Object -First $Top)
+        Down = @($list | Where-Object { [double]$_.Pct -lt 0 } | Sort-Object -Property @{ Expression = { [double]$_.Pct } } | Select-Object -First $Top)
+    }
+}
+
+function Test-SummaryDue {
+    # show the summary window by itself? Daily = once per day, Weekly = once per
+    # calendar week (Monday-based)
+    param([string]$Mode, [string]$LastShown, [DateTime]$Now = (Get-Date))
+    if ($Mode -notin @("Daily", "Weekly")) { return $false }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $last = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact([string]$LastShown, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$last)) { return $true }
+    if ($Mode -eq "Daily") { return ($last.Date -lt $Now.Date) }
+    $monday = $Now.Date.AddDays(-(([int]$Now.DayOfWeek + 6) % 7))
+    return ($last.Date -lt $monday)
+}
+
+# ---- fees and interest, goals ------------------------------------------------
+function Get-FeeOverview {
+    # One depot -> per year: order fees (bookings), account fees and interest
+    # (cash account), converted to Base with the rate of the booking day.
+    # Approx = some rate had to be taken from today.
+    param($Transactions, $CashEntries, [string]$Base = "EUR", [hashtable]$History = @{}, [hashtable]$FallbackFromEur = @{})
+    $years = @{}
+    $row = {
+        param([string]$y)
+        if (-not $years.ContainsKey($y)) { $years[$y] = [PSCustomObject]@{ Year = $y; OrderFees = 0.0; AccountFees = 0.0; Interest = 0.0; Orders = 0; Approx = $false } }
+        return $years[$y]
+    }
+    $add = {
+        param($r, [string]$field, [double]$amount, [string]$cur, [string]$date)
+        $c = Get-NormalizedCurrencyCode $cur
+        if (-not $c) { $c = $Base }
+        $cv = Convert-AmountOnDate -Amount $amount -From $c -To $Base -Date $date -History $History -FallbackFromEur $FallbackFromEur
+        if ([bool]$cv.Approx -and $c -ne $Base) { $r.Approx = $true }
+        $r.$field += [double]$cv.Value
+    }
+    foreach ($t in @($Transactions)) {
+        if ($null -eq $t -or ([string]$t.Date).Length -lt 4) { continue }
+        $fee = [double]$t.Fee
+        $r = & $row ([string]$t.Date).Substring(0, 4)
+        if ([string]$t.Type -in @("Kauf", "Verkauf")) { $r.Orders++ }
+        if ($fee -ne 0) { & $add $r "OrderFees" $fee ([string]$t.Currency) ([string]$t.Date) }
+    }
+    foreach ($e in @($CashEntries)) {
+        if ($null -eq $e -or ([string]$e.Date).Length -lt 4) { continue }
+        $kind = [string]$e.Kind
+        if ($kind -ne "Gebühr" -and $kind -ne "Zinsen") { continue }
+        $r = & $row ([string]$e.Date).Substring(0, 4)
+        # account fees are stored negative: shown as a positive cost
+        if ($kind -eq "Gebühr") { & $add $r "AccountFees" (-[double]$e.Amount) ([string]$e.Currency) ([string]$e.Date) }
+        else { & $add $r "Interest" ([double]$e.Amount) ([string]$e.Currency) ([string]$e.Date) }
+    }
+    return @($years.Values | Sort-Object -Property @{ Expression = { $_.Year }; Descending = $true })
+}
+
+function Get-GoalProgress {
+    param([double]$Current, [double]$Target)
+    if ($Target -le 0 -or [double]::IsNaN($Current)) { return $null }
+    $pct = [math]::Max(0.0, $Current / $Target * 100.0)
+    return [PSCustomObject]@{ Pct = $pct; BarPct = [math]::Min(100.0, $pct); Remaining = [math]::Max(0.0, $Target - $Current); Reached = ($Current -ge $Target) }
+}
+
+# ---- risk figures ------------------------------------------------------------
+function Get-SortinoRatio {
+    # (return p.a. - risk-free) / downside deviation p.a. Only periods below
+    # the risk-free rate count as risk. Returns: fractions, AnnReturn: %.
+    param([double[]]$Returns, [double]$AnnReturn, [double]$PeriodsPerYear = 252, [double]$RiskFreePct = 0.0)
+    if ($null -eq $Returns -or $Returns.Count -lt 2 -or [double]::IsNaN($AnnReturn)) { return [double]::NaN }
+    $mar = $RiskFreePct / 100.0 / $PeriodsPerYear
+    $ss = 0.0
+    foreach ($r in $Returns) { $d = [math]::Min(0.0, $r - $mar); $ss += $d * $d }
+    $dd = [math]::Sqrt($ss / $Returns.Count) * [math]::Sqrt($PeriodsPerYear) * 100.0
+    if ($dd -le 0) { return [double]::NaN }
+    return (($AnnReturn - $RiskFreePct) / $dd)
+}
+
+function Get-HistoricVaR {
+    # historic Value-at-Risk for one period: the loss (in %, positive number)
+    # that was exceeded in only (100 - Level) % of the periods. 0 = even that
+    # quantile was no loss. NaN with fewer than 20 returns.
+    param([double[]]$Returns, [double]$Level = 95)
+    if ($null -eq $Returns -or $Returns.Count -lt 20) { return [double]::NaN }
+    $s = [double[]]@($Returns | Sort-Object)
+    $pos = (1.0 - $Level / 100.0) * ($s.Count - 1)
+    $lo = [int][math]::Floor($pos); $hi = [int][math]::Ceiling($pos)
+    $q = $s[$lo] + ($s[$hi] - $s[$lo]) * ($pos - $lo)
+    return [math]::Max(0.0, -$q * 100.0)
+}
+
+# ---- watchlist CSV -----------------------------------------------------------
+function ConvertTo-WatchlistCsv {
+    # Rows @{ Ticker; Groups (string[]); Target; Currency; Note }
+    param($Rows)
+    $inv = [System.Globalization.CultureInfo]::GetCultureInfo("de-DE")
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Ticker;Gruppen;Zielkurs;Währung;Notiz")
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $tg = if ([double]$r.Target -gt 0) { ([double]$r.Target).ToString("0.########", $inv) } else { "" }
+        $note = (([string]$r.Note) -replace '[\r\n]+', ' ').Trim()
+        $lines.Add((@((ConvertTo-CsvField ([string]$r.Ticker)), (ConvertTo-CsvField (@($r.Groups) -join "|")), $tg, $(if ($tg) { [string]$r.Currency } else { "" }), (ConvertTo-CsvField $note)) -join ";"))
+    }
+    return (($lines.ToArray() -join "`r`n") + "`r`n")
+}
+
+function ConvertFrom-WatchlistCsv {
+    # -> @{ Rows; Skipped }. A header line with "Ticker" is expected; other
+    # columns are optional. ^GSPC style symbols are allowed.
+    param([string]$Text)
+    $res = [PSCustomObject]@{ Rows = @(); Skipped = 0 }
+    $csv = ConvertFrom-CsvText $Text
+    $h = @($csv.Headers | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+    $col = { param([string[]]$names) foreach ($n in $names) { $i = [array]::IndexOf([string[]]$h, $n); if ($i -ge 0) { return $i } } return -1 }
+    $iT = & $col @("ticker", "symbol")
+    if ($iT -lt 0) {
+        # a single column without header options still needs the header word
+        $lines = @(([string]$Text) -split "`r?`n" | ForEach-Object { $_.Trim().Trim([char]0xFEFF) } | Where-Object { $_ })
+        if ($lines.Count -eq 0 -or $lines[0].ToLowerInvariant() -notin @("ticker", "symbol")) { return $res }
+        $csv = @{ Rows = @($lines | Select-Object -Skip 1 | ForEach-Object { ,[string[]]@($_) }) }
+        $h = @("ticker"); $iT = 0
+    }
+    $iG = & $col @("gruppen", "gruppe", "groups"); $iP = & $col @("zielkurs", "target"); $iC = & $col @("währung", "currency"); $iN = & $col @("notiz", "note")
+    $get = { param($row, [int]$i) if ($i -ge 0 -and $i -lt @($row).Count) { return ([string]$row[$i]).Trim() } return "" }
+    $seen = @{}
+    $rows = @()
+    foreach ($row in @($csv.Rows)) {
+        $sym = (& $get $row $iT).TrimStart("'").ToUpperInvariant()
+        if ($sym -notmatch '^[A-Z0-9\^][A-Z0-9\.\-=\^]{0,19}$' -or $seen.ContainsKey($sym)) { $res.Skipped++; continue }
+        $seen[$sym] = $true
+        $tg = 0.0
+        $raw = & $get $row $iP
+        if ($raw) { $x = ConvertFrom-CsvNumber $raw; if (-not [double]::IsNaN($x) -and $x -gt 0) { $tg = $x } }
+        $cur = (& $get $row $iC).ToUpperInvariant()
+        if ($cur -notmatch '^[A-Z]{3}$') { $cur = "" }
+        $note = & $get $row $iN
+        if ($note -match "^'[=+\-@]") { $note = $note.Substring(1) }
+        $grp = @((& $get $row $iG).TrimStart("'") -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_.Length -le 40 })
+        $rows += [PSCustomObject]@{ Ticker = $sym; Groups = $grp; Target = $tg; Currency = $cur; Note = $note }
+    }
+    $res.Rows = $rows
+    return $res
 }

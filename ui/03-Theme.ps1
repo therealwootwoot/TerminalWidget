@@ -240,7 +240,36 @@ $fontGridUiBold = New-Object System.Drawing.Font("Segoe UI", (Get-ScaledFontSize
 
 $script:GdiCache = @{}
 
+function Get-CustomTheme {
+    # a theme of the user by name, cleaned; $null for built-in or unknown names
+    param([string]$Name)
+    foreach ($t in @($script:Config.CustomThemes)) {
+        if ($null -ne $t -and [string]$t.Name -eq $Name) { return (ConvertFrom-ThemeData $t) }
+    }
+    return $null
+}
+
+function Get-AllThemeNames {
+    return @(Get-ThemeNames) + @(@($script:Config.CustomThemes) | Where-Object { $null -ne $_ -and $null -ne (ConvertFrom-ThemeData $_) } | ForEach-Object { [string]$_.Name })
+}
+
 function Get-ThemeBaseColors {
+    # v8.0: an own theme is a built-in one with some colours replaced
+    $ct = Get-CustomTheme ([string]$script:Config.Theme)
+    if ($null -eq $ct) { return (Get-BuiltinThemeColors -ThemeName ([string]$script:Config.Theme)) }
+    $t = Get-BuiltinThemeColors -ThemeName ([string]$ct.Base)
+    foreach ($pp in $ct.Colors.PSObject.Properties) {
+        $rgb = ConvertFrom-HexColor ([string]$pp.Value)
+        if ($null -ne $rgb) { $t[$pp.Name] = [System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]) }
+    }
+    # title bar colours are Windows COLORREF numbers (0x00BBGGRR), not Color objects
+    $ref = { param($c) [int](([int]$c.B * 65536) + ([int]$c.G * 256) + [int]$c.R) }
+    $t["DwmCap"] = (& $ref $t["HeaderBg"]); $t["DwmBdr"] = (& $ref $t["Border"]); $t["DwmDark"] = [int]($t["BodyBg"].GetBrightness() -lt 0.5)
+    return $t
+}
+
+function Get-BuiltinThemeColors {
+    param([string]$ThemeName)
     $accent = switch ($script:Config.AccentColor) {
         "Eigene" {
             $rgb = ConvertFrom-HexColor ([string]$script:Config.AccentHex)
@@ -259,7 +288,7 @@ function Get-ThemeBaseColors {
     # v5.2: warning colour per theme (amber, darker on light backgrounds)
     $warn = [System.Drawing.Color]::FromArgb(245, 158, 11)
 
-    switch ($script:Config.Theme) {
+    switch ($ThemeName) {
         "Terminal" {
             # v4.0: amber on black, in the spirit of the classic terminals
             $amberAcc = if ($script:Config.AccentColor -eq "Sky") { [System.Drawing.Color]::FromArgb(255, 159, 28) } else { $accent }
@@ -387,7 +416,7 @@ function Get-ThemeColors {
     $p = Get-ThemeBaseColors
     $toRgb = { param($c) return @([int]$c.R, [int]$c.G, [int]$c.B) }
     $acc = & $toRgb $p.Accent
-    $light = ([string]$script:Config.Theme -eq "Light")
+    $light = ($p.BodyBg.GetBrightness() -gt 0.5)
     $st = Get-AccentStates -Rgb $acc -Surface (& $toRgb $p.Card) -DarkSurface (-not $light)
     $p["AccentHover"]   = [System.Drawing.Color]::FromArgb($st.Hover[0], $st.Hover[1], $st.Hover[2])
     $p["AccentPressed"] = [System.Drawing.Color]::FromArgb($st.Pressed[0], $st.Pressed[1], $st.Pressed[2])
@@ -861,6 +890,13 @@ function Render-ChartAndRsi {
         $maxP += $padRange
     }
     $spanP = $maxP - $minP
+    # v8.0: price axis scrolled by the user; another series starts automatic again
+    if ($script:PriceScaleKey -ne [string]$script:ActiveSeriesKey) { $script:PriceScale = 1.0; $script:PriceShift = 0.0; $script:PriceScaleKey = [string]$script:ActiveSeriesKey }
+    $priceScaled = Test-PriceScaled
+    if ($priceScaled) {
+        $sr0 = Get-ScaledPriceRange -MinP $minP -SpanP $spanP -Log $isLog -Scale $script:PriceScale -Shift $script:PriceShift
+        $minP = $sr0.Min; $spanP = $sr0.Span; $maxP = $minP + $spanP
+    }
 
     # Horizontal Grid & Right Y-Axis
     $gridSteps = 5
@@ -873,6 +909,9 @@ function Render-ChartAndRsi {
         $axTxt = if ([bool]$script:Config.PctAxis -and [double]$series[0].Close -gt 0) { Format-PctAxisLabel -Value $val -Base ([double]$series[0].Close) } else { "{0:N2}" -f $val }
         $g.DrawString($axTxt, $fontAxis, $c["axisTextBrush"], ($priceRect.Right + (S 6)), ($y - (S 6)))
     }
+
+    # a scaled price range can push lines outside the panel: clip everything up to the axis tag
+    if ($priceScaled) { $g.SetClip($priceRect) }
 
     # Extended-hours shading (pre-/after-market bars in the 1D chart)
     $hasExtBars = $false
@@ -1174,14 +1213,18 @@ function Render-ChartAndRsi {
     # Right Y-Axis Current Price Pill Tag
     $lastY = [int]$pts[$n - 1].Y
     $tagH  = S 18
-    $tagRect = New-Object System.Drawing.Rectangle(($priceRect.Right + 2), ($lastY - [int]($tagH / 2)), ($rightAxisWidth - 4), $tagH)
+    if ($priceScaled) { $g.ResetClip() }
+    # the tag stays at the edge when the last price is scrolled out of view
+    $lastInView = ($lastY -ge $priceRect.Top -and $lastY -le $priceRect.Bottom)
+    $tagY = [math]::Max($priceRect.Top, [math]::Min($priceRect.Bottom, $lastY))
+    $tagRect = New-Object System.Drawing.Rectangle(($priceRect.Right + 2), ($tagY - [int]($tagH / 2)), ($rightAxisWidth - 4), $tagH)
     $tagBrush = New-Object System.Drawing.SolidBrush($lineColor)
     # v5.2: dotted guide from the last point to the axis, a dot with a halo, rounded tag
     $guide = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(140, $lineColor.R, $lineColor.G, $lineColor.B), 1)
     $guide.DashPattern = [float[]]@(2, 3)
-    $g.DrawLine($guide, [float]$pts[$n - 1].X, [float]$lastY, [float]$priceRect.Right, [float]$lastY)
+    if ($lastInView) { $g.DrawLine($guide, [float]$pts[$n - 1].X, [float]$lastY, [float]$priceRect.Right, [float]$lastY) }
     $guide.Dispose()
-    if (-not $isCandle) {
+    if (-not $isCandle -and $lastInView) {
         $halo = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, $lineColor.R, $lineColor.G, $lineColor.B))
         $hr = [float](S 6); $dr = [float](S 3)
         $g.FillEllipse($halo, ([float]$pts[$n - 1].X - $hr), ([float]$pts[$n - 1].Y - $hr), (2 * $hr), (2 * $hr))
@@ -1480,6 +1523,8 @@ function Refresh-ChartView {
 function Reset-ChartZoom {
     $script:ViewCount = 0
     $script:ViewOffset = 0
+    $script:PriceScale = 1.0
+    $script:PriceShift = 0.0
     Refresh-ChartView
 }
 

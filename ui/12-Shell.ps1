@@ -1458,7 +1458,7 @@ $script:RowMenuHandler = {
         $gi.Tag = [string]$gr.Name
         $gi.Add_Click({
             param($s2, $e2)
-            $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$s2.Tag) -Symbol $script:RowMenuSym -In (-not $s2.Checked))
+            $script:Config.WatchGroups = Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$s2.Tag) -Symbol $script:RowMenuSym -In (-not $s2.Checked)
             Save-JsonState -Path $script:ConfigPath -Data $script:Config
             Update-WatchGroupCombo
             Refresh-WatchlistAndAlerts

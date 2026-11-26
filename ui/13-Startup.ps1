@@ -1,10 +1,33 @@
 ﻿# TerminalWidget UI part 13 (Startup) - dot-sourced by TerminalWidget.ps1 in order, same scope as the main script.
 # Keep UTF-8 with BOM. Part of the former single-file script (split in V7.0).
 
+function Get-AlertCurrency {
+    # what the number of an alert is measured in
+    param([string]$Kind, [string]$Symbol)
+    $qc = if ($script:QuoteStore.ContainsKey($Symbol)) { [string]$script:QuoteStore[$Symbol].Currency } else { "" }
+    $c = switch ($Kind) {
+        "PCT"    { "%" }
+        "RSI"    { "RSI" }
+        "SMA"    { "SMA" }
+        "HIGH52" { "52W" }
+        "LOW52"  { "52W" }
+        "VOL"    { "VOL" }
+        "PFPCT"  { "%" }
+        # percent to the average cost in the position's currency (no FX effect)
+        "EKPCT"  { if ($script:Portfolio.ContainsKey($Symbol)) { [string]$script:Portfolio[$Symbol].Currency } else { [string]$script:Config.Currency } }
+        # trailing high in the instrument's own currency
+        "TRAIL"  { if ($qc) { $qc } else { $script:Config.Currency } }
+        # v5.1: a price alert is entered in the currency the price is shown in
+        "PRICE"  { Get-PriceCurrency $Symbol }
+        default  { $script:Config.Currency }
+    }
+    return [string]$c
+}
+
 function New-AlertChecked {
     # Validates and creates an alert (alert panel + command line).
     # Returns "" when created, "CANCEL" when the user declined, else an error text.
-    param([string]$RawTicker, [string]$Cond, [double]$Value, [string]$Note = "", [int]$Rearm = 0, [int]$ExpDays = 0)
+    param([string]$RawTicker, [string]$Cond, [double]$Value, [string]$Note = "", [int]$Rearm = 0, [int]$ExpDays = 0, [string]$Cond2 = "", [double]$Value2 = 0)
     $kind = Get-AlertKind $Cond
     if ($kind -ne "SMA") {
         # value ranges per kind (Tag% / EK% / Depot Tag% may be negative)
@@ -21,24 +44,17 @@ function New-AlertChecked {
         if ([string]::IsNullOrWhiteSpace($aSym)) { return "Ticker '$RawTicker' nicht gefunden." }
     }
     if ($kind -eq "EKPCT" -and -not $script:Portfolio.ContainsKey($aSym)) { return "EK%-Alarme gehen nur für Positionen im Portfolio ($aSym fehlt)." }
-    $qc = if ($script:QuoteStore.ContainsKey($aSym)) { [string]$script:QuoteStore[$aSym].Currency } else { "" }
-    $curr = switch ($kind) {
-        "PCT"    { "%" }
-        "RSI"    { "RSI" }
-        "SMA"    { "SMA" }
-        "HIGH52" { "52W" }
-        "LOW52"  { "52W" }
-        "VOL"    { "VOL" }
-        "PFPCT"  { "%" }
-        # percent to the average cost in the position's currency (no FX effect)
-        "EKPCT"  { [string]$script:Portfolio[$aSym].Currency }
-        # trailing high in the instrument's own currency
-        "TRAIL"  { if ($qc) { $qc } else { $script:Config.Currency } }
-        # v5.1: a price alert is entered in the currency the price is shown in
-        "PRICE"  { Get-PriceCurrency $aSym }
-        default  { $script:Config.Currency }
+    $curr = Get-AlertCurrency -Kind $kind -Symbol $aSym
+    $curr2 = ""
+    if ($Cond2) {
+        $why = Test-AlertCombination -First $Cond -Second $Cond2
+        if ($why) { return $why }
+        $kind2 = Get-AlertKind $Cond2
+        if ($kind2 -eq "SMA") { $Value2 = 0.0 } else { $bad2 = Test-AlertValue -Condition $Cond2 -Value $Value2; if ($bad2) { return ("Ungültiger Alarm-Wert {0} ({1})" -f $Value2, $bad2) } }
+        if ($kind2 -eq "EKPCT" -and -not $script:Portfolio.ContainsKey($aSym)) { return "EK%-Alarme gehen nur für Positionen im Portfolio ($aSym fehlt)." }
+        $curr2 = Get-AlertCurrency -Kind $kind2 -Symbol $aSym
     }
-    $ok = Add-WidgetAlert -Ticker $aSym -Condition $Cond -Target $Value -Currency $curr -Note $Note -RearmMin $Rearm -ExpiresAt (Get-AlertExpiryDate -Days $ExpDays)
+    $ok = Add-WidgetAlert -Ticker $aSym -Condition $Cond -Target $Value -Currency $curr -Note $Note -RearmMin $Rearm -ExpiresAt (Get-AlertExpiryDate -Days $ExpDays) -Condition2 $Cond2 -Target2 $Value2 -Currency2 $curr2
     if (-not $ok) { return "CANCEL" }
     Refresh-AllMarketData
     Evaluate-GlobalAlerts
@@ -164,12 +180,14 @@ $alertMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $miSnz1 = $alertMenu.Items.Add("1 Stunde pausieren")
 $miSnz4 = $alertMenu.Items.Add("4 Stunden pausieren")
 $miSnzT = $alertMenu.Items.Add("Bis morgen 08:00 pausieren")
+$miSnzW = $alertMenu.Items.Add("1 Woche pausieren")
 $miSnzOff = $alertMenu.Items.Add("Pause beenden")
 [void]$alertMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $miAlDel = $alertMenu.Items.Add("Löschen (Entf)")
 $miSnz1.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "1h" })
 $miSnz4.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "4h" })
 $miSnzT.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "Tomorrow" })
+$miSnzW.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "Week" })
 $miSnzOff.Add_Click({ Set-AlertSnooze -Index $lstAlerts.SelectedIndex -Kind "" })
 $miAlDel.Add_Click({ $btnDelAlert.PerformClick() })
 $lstAlerts.Add_MouseUp({
@@ -341,6 +359,8 @@ $script:GlobalKeyHandler = {
         Set-TerminalFull ""
         return
     }
+    # v8.0: own shortcuts win over the built-in ones
+    if (Invoke-UserShortcut -Sender $sender -E $e) { return }
     # Ctrl+F: jump to the ticker search (main window only)
     if (-not $isFs -and $e.Control -and -not $e.Alt -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
         $e.Handled = $true
@@ -1001,7 +1021,7 @@ function Invoke-SmokeTest {
         if ($viewChart.Top -lt $pnlNav.Bottom) { throw "view overlaps the navigation" }
         if ($viewChart.Bottom -gt $form.ClientSize.Height) { throw "view below the window edge" }
         $names = @($script:MenuBar.Items | ForEach-Object { $_.Text }) -join ","
-        if ($script:MenuBar.Items.Count -ne 5) { throw "menus: $names" }
+        if ($script:MenuBar.Items.Count -ne 6) { throw "menus: $names" }
         foreach ($m in $script:MenuBar.Items) { $m.ShowDropDown(); & $pump; $m.HideDropDown(); & $pump }
         $script:Config.PortSimOpen = $false; Update-PortSimLayout
         $script:MbCalc.PerformClick(); & $pump
@@ -1016,7 +1036,7 @@ function Invoke-SmokeTest {
     }
     Invoke-SmokeStep "Watchlist groups" {
         Set-ActiveTab -TabName "Watchlist"; & $pump
-        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @() -Group "Tech" -Symbol "NVDA")
+        $script:Config.WatchGroups = Set-WatchGroupMember -Groups @() -Group "Tech" -Symbol "NVDA"
         Set-WatchGroup "Tech"; & $pump
         if ($dgvWatchlist.Rows.Count -ne 1) { throw "group view shows $($dgvWatchlist.Rows.Count) rows" }
         $me = New-Object System.Windows.Forms.MouseEventArgs([System.Windows.Forms.MouseButtons]::Right, 1, 10, 10, 0)
@@ -1715,6 +1735,124 @@ function Invoke-SmokeTest {
 
     Invoke-SmokeStep "Design analysis" { & $probeRun { Show-AnalysisDialog -Page "Bench" } { & $script:SmokeShot "09-fresh-analysis-bench" ([System.Windows.Forms.Form]::ActiveForm); "" } 9000 } 11000
     [void](Invoke-TerminalCommand "STYLE REFINED")
+    Invoke-SmokeStep "V8.0 price axis" {
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "Chart"; & $pump
+        for ($i = 0; $i -lt 40 -and $null -eq (Get-CanvasLayout -Canvas $pnlChartCanvas); $i++) { Start-Sleep -Milliseconds 100; & $pump }
+        Reset-ChartZoom; $pnlChartCanvas.Refresh(); & $pump
+        $L = Get-CanvasLayout -Canvas $pnlChartCanvas
+        if ($null -eq $L) { $script:SmokeNotes.Add("price axis: no chart data, skipped"); return }
+        $span0 = [double]$L.SpanP
+        $x = [int]$L.PriceRect.Right + 12; $y = [int]$L.PriceRect.Top + [int]$L.OffsetY + 40
+        if (-not (Test-PriceAxisHit -L $L -X $x -Y $y)) { throw "axis not recognised" }
+        $mk = { param($X, $Y, $D) New-Object System.Windows.Forms.MouseEventArgs([System.Windows.Forms.MouseButtons]::Left, 1, $X, $Y, $D) }
+        & $script:ChartWheelHandler $pnlChartCanvas (& $mk $x $y -120); $pnlChartCanvas.Refresh(); & $pump
+        $span1 = [double](Get-CanvasLayout -Canvas $pnlChartCanvas).SpanP
+        if ($span1 -le $span0) { throw "wheel did not widen the range: $span0 -> $span1" }
+        & $script:ChartMouseDownHandler $pnlChartCanvas (& $mk $x $y 0)
+        Start-Sleep -Milliseconds 60
+        & $script:ChartMouseMoveHandler $pnlChartCanvas (& $mk $x ($y + 60) 0)
+        & $script:ChartMouseUpHandler $pnlChartCanvas (& $mk $x ($y + 60) 0)
+        $pnlChartCanvas.Refresh(); & $pump
+        if ($script:PriceShift -le 0) { throw "dragging down did not move the range up: $($script:PriceShift)" }
+        if ($null -ne $script:PriceDrag) { throw "drag still active" }
+        # far out of view: the chart must still draw
+        Set-PriceScale -Scale 0.1 -Shift 4; $pnlChartCanvas.Refresh(); & $pump
+        Reset-ChartZoom; $pnlChartCanvas.Refresh(); & $pump
+        if (Test-PriceScaled) { throw "reset left the axis scaled" }
+    }
+    Invoke-SmokeStep "V8.0 colour rules, columns, theme" {
+        $old = @{ Rules = $script:Config.ColorRules; Themes = $script:Config.CustomThemes; Theme = [string]$script:Config.Theme }
+        try {
+            $rules = @(Get-DefaultColorRules); $rules[0].Value = 0; $rules[0].On = $true
+            $script:Config.ColorRules = $rules
+            foreach ($c in @("OwnTgt", "AlertDist", "Note", "DayBase")) { $dgvWatchlist.Columns[$c].Visible = $true }
+            $s0 = ([string]$script:Config.Watchlist[0]).ToUpper()
+            Set-OwnTarget -Sym $s0 -Price 123.45 -Currency "USD"
+            Set-ActiveTab -TabName "Watchlist"; Refresh-WatchlistAndAlerts; & $pump
+            if ($null -ne $script:QuoteStore[$s0]) {
+                $row = @($dgvWatchlist.Rows | Where-Object { [string]$_.Cells[0].Value -eq $s0 })[0]
+                if ([string]$row.Cells["OwnTgt"].Value -notlike "*123*") { throw "own target missing: $($row.Cells['OwnTgt'].Value)" }
+                if ($row.DefaultCellStyle.BackColor.IsEmpty) { throw "colour rule not applied" }
+            }
+            Save-ColumnSet "Smoke"
+            foreach ($c in @("OwnTgt", "AlertDist", "Note", "DayBase")) { $dgvWatchlist.Columns[$c].Visible = $false }
+            if (-not (Use-ColumnSet "Smoke")) { throw "column set not found" }
+            if (-not $dgvWatchlist.Columns["OwnTgt"].Visible) { throw "column set did not show the column" }
+            foreach ($c in @("OwnTgt", "AlertDist", "Note", "DayBase")) { $dgvWatchlist.Columns[$c].Visible = $false }
+            $script:Config.ColumnSets = @(); $script:ActiveColumnSet = ""
+            Set-OwnTarget -Sym $s0 -Price 0 -Currency ""
+            Save-CustomTheme (ConvertFrom-ThemeData ([PSCustomObject]@{ Name = "Smoke Theme"; Base = "Light"; Colors = [PSCustomObject]@{ Card = "#123456" } }))
+            Set-ThemeByName "Smoke Theme"; & $pump
+            if ($script:Pal.Card.R -ne 0x12 -or $script:Pal.Card.B -ne 0x56) { throw "own theme colour not used: $($script:Pal.Card)" }
+            foreach ($dk in @("DwmCap", "DwmBdr", "DwmDark")) { if ($script:Pal[$dk] -isnot [int]) { throw "title bar value $dk is not a number: $($script:Pal[$dk])" } }
+        } finally {
+            $script:Config.ColorRules = $old.Rules; $script:Config.CustomThemes = $old.Themes
+            Set-ThemeByName $old.Theme; Set-ActiveTab -TabName "Chart"
+        }
+    }
+    Invoke-SmokeStep "V8.0 shortcuts, favourites, profiles" {
+        $script:Config.KeyMap = [PSCustomObject]@{ privacy = "Strg+Shift+P" }
+        $script:Config.Favorites = @("calendar", "privacy")
+        Update-FavoritesMenu
+        if ($script:MbFavorites.DropDownItems.Count -ne 2) { throw "favourites: $($script:MbFavorites.DropDownItems.Count)" }
+        $p0 = [bool]$script:Config.PrivacyMode
+        $ke = New-Object System.Windows.Forms.KeyEventArgs(([System.Windows.Forms.Keys]::P -bor [System.Windows.Forms.Keys]::Control -bor [System.Windows.Forms.Keys]::Shift))
+        if (-not (Invoke-UserShortcut -Sender $form -E $ke)) { throw "shortcut not recognised" }
+        if ([bool]$script:Config.PrivacyMode -eq $p0) { throw "shortcut did nothing" }
+        Set-PrivacyMode $p0
+        $script:Config.KeyMap = $null; $script:Config.Favorites = @(); Update-FavoritesMenu
+        $th = [string]$script:Config.Theme
+        Save-WidgetProfile "Smoke A"
+        $script:Config.Theme = "OLED"; Apply-ThemeToAllControls
+        if (-not (Use-WidgetProfile "Smoke A")) { throw "profile not found" }
+        & $pump
+        if ([string]$script:Config.Theme -ne $th) { throw "profile did not restore the theme: $($script:Config.Theme)" }
+        Update-ProfileMenu; Update-ThemeMenu; Update-ColumnSetMenu
+        $script:Config.UserProfiles = @(); $script:Config.ActiveProfile = ""
+    }
+    foreach ($v8 in @(@("colour rules", { Show-ColorRulesDialog }), @("theme editor", { Show-ThemeEditor }), @("keys", { Show-KeysFavoritesDialog }), @("tiles", { Show-KpiTilesDialog }),
+                      @("combined alert", { Show-ComboAlertDialog }), @("templates", { Show-AlertTemplatesDialog }), @("notices", { Show-NoticeSettingsDialog }),
+                      @("summary", { Show-SummaryDialog }), @("summary week", { Show-SummaryDialog -Period "Week" }), @("goals", { Show-GoalsCostsDialog }), @("own target", { Show-OwnTargetDialog "NVDA" }), @("calendar export button", { Show-CalendarDialog }))) {
+        Invoke-SmokeStep ("V8.0 window: " + $v8[0]) $v8[1]
+    }
+    Invoke-SmokeStep "V8.0 combined alert + template" {
+        $n0 = $script:Alerts.Count
+        [void](Add-WidgetAlert -Ticker "AAPL" -Condition ">=" -Target 999999 -Currency "USD" -Condition2 "Volumen x" -Target2 2 -Currency2 "VOL" -NoConfirm)
+        $a = $script:Alerts[$script:Alerts.Count - 1]
+        if ((Format-AlertLine -Alert $a) -notlike "* & *") { throw "second condition not shown: $(Format-AlertLine -Alert $a)" }
+        if ((Get-AlertState -Alert $a).Met) { throw "combined alert met although the price condition is not" }
+        $added = Add-TemplateAlerts -Template ([PSCustomObject]@{ Name = "Smoke"; Condition = "RSI >="; Value = 99.0; Condition2 = ""; Value2 = 0.0 }) -Symbols @("AAPL", "MSFT")
+        if ($added -ne 2) { throw "template added $added alerts" }
+        Refresh-WatchlistAndAlerts; & $pump
+        while ($script:Alerts.Count -gt $n0) { $script:Alerts.RemoveAt($script:Alerts.Count - 1) }
+        Save-Alerts; Refresh-WatchlistAndAlerts
+    }
+    Invoke-SmokeStep "V8.0 summary rows, CSV, calendar file, goals" {
+        foreach ($per in @("Day", "Week")) { if (@(Get-SummaryRows -Period $per).Count -lt 3) { throw "summary $per too short" } }
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("tw-v8-{0}.csv" -f [Guid]::NewGuid().ToString("N"))
+        try {
+            Export-WatchlistCsv -Path $tmp
+            $r = ConvertFrom-WatchlistCsv ([System.IO.File]::ReadAllText($tmp))
+            if (@($r.Rows).Count -ne @($script:Config.Watchlist).Count) { throw "CSV rows $(@($r.Rows).Count) / watchlist $(@($script:Config.Watchlist).Count)" }
+            $wl = @($script:Config.Watchlist); $wg = $script:Config.WatchGroups
+            $n = Import-WatchlistRows -Rows @([PSCustomObject]@{ Ticker = "SMOKE.XX"; Groups = @("G1", "G2", "G3"); Target = 0; Currency = ""; Note = "" })
+            if ($n -ne 1) { throw "import added $n" }
+            if (@($script:Config.WatchGroups | Where-Object { [string]$_.Name -in @("G1", "G2", "G3") }).Count -ne 3) { throw "groups merged: $(@($script:Config.WatchGroups | ForEach-Object { $_.Name }) -join ',')" }
+            $script:Config.Watchlist = $wl; $script:Config.WatchGroups = $wg; Save-Config
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+        $ev = $script:Events["NVDA"]
+        $script:Events["NVDA"] = New-EventEntry; $script:Events["NVDA"].EarningsDate = (Get-Date).AddDays(5).ToString("yyyy-MM-dd")
+        $ics = Join-Path ([System.IO.Path]::GetTempPath()) "tw-v8.ics"
+        try { if ((Export-CalendarIcs -Symbols @("NVDA") -Path $ics) -ne 1) { throw "calendar export wrote nothing" } }
+        finally { Remove-Item $ics -ErrorAction SilentlyContinue; if ($null -ne $ev) { $script:Events["NVDA"] = $ev } else { $script:Events.Remove("NVDA") } }
+        [void](Get-FeeRows)
+        [void](Get-DividendForecast -Base ([string]$script:Config.Currency))
+    }
+    Invoke-SmokeStep "V8.0 English" {
+        $lg = [string]$script:Config.Language
+        $script:Config.Language = "EN"
+        try { Show-GoalsCostsDialog } finally { $script:Config.Language = $lg }
+    }
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
 
     $rep = [PSCustomObject]@{

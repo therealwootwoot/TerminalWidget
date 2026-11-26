@@ -2967,3 +2967,152 @@ Describe "News sources and reading (v7.7)" {
         ($script:fail -join "`n") | Should -BeNullOrEmpty
     }
 }
+
+Describe "V8.0 logic" {
+    It "keeps three watchlist groups apart and repairs nested lists" {
+        $cfg = [PSCustomObject]@{ WatchGroups = @() }
+        foreach ($p in @(@("Tech", "AAA"), @("ETF", "BBB"), @("Div", "CCC"))) {
+            # the form the app uses: no @() around the call
+            $cfg.WatchGroups = Set-WatchGroupMember -Groups @($cfg.WatchGroups) -Group $p[0] -Symbol $p[1] -In $true
+        }
+        @($cfg.WatchGroups | ForEach-Object { $_.Name }) -join "," | Should -Be "Tech,ETF,Div"
+        $old = '{"WatchGroups":[[{"Name":"Tech","Symbols":["aaa"]},{"Name":"ETF","Symbols":["BBB"]}]]}' | ConvertFrom-Json
+        $flat = ConvertTo-FlatWatchGroups $old.WatchGroups
+        @($flat | ForEach-Object { $_.Name }) -join "," | Should -Be "Tech,ETF"
+        $flat[0].Symbols -join "," | Should -Be "AAA"
+        (ConvertTo-FlatWatchGroups @()).Count | Should -Be 0
+    }
+    It "scales and moves the price axis" {
+        $r = Get-ScaledPriceRange -MinP 100 -SpanP 100
+        $r.Min | Should -Be 100; $r.Span | Should -Be 100
+        $r = Get-ScaledPriceRange -MinP 100 -SpanP 100 -Scale 2
+        $r.Min | Should -Be 50; $r.Span | Should -Be 200
+        $r = Get-ScaledPriceRange -MinP 100 -SpanP 100 -Shift 0.5
+        $r.Min | Should -Be 150
+        $l = Get-ScaledPriceRange -MinP 100 -SpanP 300 -Log $true -Scale 2
+        $l.Min | Should -BeGreaterThan 0
+        (Get-ScaledPriceRange -MinP 100 -SpanP 100 -Scale 99).Span | Should -Be 800
+    }
+    It "picks the first matching colour rule that is on" {
+        $rules = @(Get-DefaultColorRules)
+        Get-MatchingColorRule -Rules $rules -Facts @{ DayAbsPct = 9 } | Should -BeNullOrEmpty
+        foreach ($r in $rules) { $r.On = $true }
+        (Get-MatchingColorRule -Rules $rules -Facts @{ DayAbsPct = 3; Rsi = 80 }).Id | Should -Be "bigmove"
+        (Get-MatchingColorRule -Rules $rules -Facts @{ DayAbsPct = 1; Rsi = 25 }).Id | Should -Be "rsilow"
+        (Get-MatchingColorRule -Rules $rules -Facts @{ TotalPct = -12 }).Id | Should -Be "loss"
+        Get-MatchingColorRule -Rules $rules -Facts @{ Rsi = [double]::NaN } | Should -BeNullOrEmpty
+        [math]::Round((Get-NearestDistancePct -Price 100 -Levels @(0, 90, 103)), 4) | Should -Be 3
+        [double]::IsNaN((Get-NearestDistancePct -Price 100 -Levels @())) | Should -BeTrue
+    }
+    It "reads own themes and drops broken parts" {
+        $t = ConvertFrom-ThemeData ('{"Name":"Mein","Base":"Nope","Colors":{"Card":"#112233","Text":"rot","Other":"#000000"}}' | ConvertFrom-Json)
+        $t.Base | Should -Be "Dark"
+        $t.Colors.Card | Should -Be "#112233"
+        @($t.Colors.PSObject.Properties).Count | Should -Be 1
+        ConvertFrom-ThemeData ('{"Name":"Dark"}' | ConvertFrom-Json) | Should -BeNullOrEmpty
+        ConvertFrom-ThemeData ('{"Name":""}' | ConvertFrom-Json) | Should -BeNullOrEmpty
+    }
+    It "normalises shortcuts and refuses reserved ones" {
+        ConvertTo-ShortcutText "ctrl + shift+p" | Should -Be "Strg+Shift+P"
+        ConvertTo-ShortcutText "j" | Should -Be "J"
+        foreach ($bad in @("Strg+C", "Strg+K", "Alt+F4", "3", "Strg+", "Win+X", "Enter", "")) { ConvertTo-ShortcutText $bad | Should -Be "" }
+        Get-KeyShortcutText -KeyName "D7" -Ctrl $true -Alt $false -Shift $false | Should -Be "Strg+7"
+        Get-KeyShortcutText -KeyName "Left" -Ctrl $false -Alt $false -Shift $false | Should -Be ""
+    }
+    It "orders chosen ids" {
+        @(Select-OrderedIds -Available @("a", "b", "c") -Chosen @("c", "x", "a", "c")) -join "," | Should -Be "c,a"
+        @(Select-OrderedIds -Available @("a", "b") -Chosen @()) -join "," | Should -Be "a,b"
+        @(Select-OrderedIds -Available @("a", "b") -Chosen @() -EmptyIsNone).Count | Should -Be 0
+    }
+    It "combines two alert conditions" {
+        Test-AlertCombination ">=" "Volumen x" | Should -Be ""
+        Test-AlertCombination "Depot >=" "Depot Tag% >=" | Should -Be ""
+        Test-AlertCombination ">=" "Depot >=" | Should -Not -Be ""
+        Test-AlertCombination ">=" "Trailing %" | Should -Not -Be ""
+        Test-AlertCombination "RSI >=" "RSI >=" | Should -Not -Be ""
+        $a = @{ Ok = $true; Value = 1.0; Met = $true; Text = "A"; Peak = 5.0 }
+        $b = @{ Ok = $true; Value = 2.0; Met = $false; Text = "B"; Peak = [double]::NaN }
+        (Join-AlertEvaluations $a $b).Met | Should -BeFalse
+        $b.Met = $true
+        $j = Join-AlertEvaluations $a $b
+        $j.Met | Should -BeTrue; $j.Peak | Should -Be 5; $j.Text | Should -Be "A  UND  B"
+        (Join-AlertEvaluations $a @{ Ok = $false; Value = 0; Met = $true; Text = ""; Peak = 0 }).Met | Should -BeFalse
+    }
+    It "applies templates without doubles" {
+        $al = @([PSCustomObject]@{ Ticker = "AAA"; Condition = "RSI >="; TargetPrice = 70.0 })
+        @(Get-TemplateTargets -Symbols @("aaa", "bbb", "BBB") -Alerts $al -Condition "RSI >=" -Value 70) -join "," | Should -Be "BBB"
+        @(Get-TemplateTargets -Symbols @("AAA", "BBB") -Alerts $al -Condition "EK% <=" -Value -10 -Held @("BBB")) -join "," | Should -Be "BBB"
+        @(Get-TemplateTargets -Symbols @("AAA") -Alerts $al -Condition "RSI >=" -Value 70 -Condition2 "Volumen x" -Value2 2).Count | Should -Be 1
+        Test-AlertValue "RSI >=" 120 | Should -Not -Be ""
+        Test-AlertValue "RSI >=" 70 | Should -Be ""
+    }
+    It "finds due notices with lead times" {
+        $ev = @{ AAA = [PSCustomObject]@{ EarningsDate = "2026-03-10"; ExDividendDate = "2026-03-12"; NotifiedEarnings = "" } }
+        @(Get-DueDateNotices -Events $ev -Symbols @("AAA") -AsOf "2026-03-08").Count | Should -Be 0
+        @(Get-DueDateNotices -Events $ev -Symbols @("AAA") -AsOf "2026-03-09").Count | Should -Be 1
+        @(Get-DueDateNotices -Events $ev -Symbols @("AAA") -AsOf "2026-03-07" -EarningsLead 3 -ExDivLead 5).Count | Should -Be 2
+        @(Get-DueDateNotices -Events $ev -Symbols @("AAA") -AsOf "2026-03-11" -EarningsLead 3).Count | Should -Be 0
+        $ev.AAA.NotifiedEarnings = "2026-03-10"
+        @(Get-DueDateNotices -Events $ev -Symbols @("AAA") -AsOf "2026-03-10").Count | Should -Be 0
+    }
+    It "writes a calendar file" {
+        $t = ConvertTo-IcsText -Events @([PSCustomObject]@{ Date = "2026-12-31"; Ticker = "AAA"; Kind = "Quartalszahlen, Q4; neu" }) -Now ([DateTime]::new(2026, 1, 2, 3, 4, 5, [DateTimeKind]::Utc))
+        $t | Should -Match "DTSTART;VALUE=DATE:20261231"
+        $t | Should -Match "DTEND;VALUE=DATE:20270101"
+        $t | Should -Match "SUMMARY:AAA: Quartalszahlen\\, Q4\\; neu"
+        $long = ConvertTo-IcsText -Events @([PSCustomObject]@{ Date = "2026-01-01"; Ticker = "AAA"; Kind = ("ü" * 90) })
+        foreach ($l in ($long -split "`r`n")) { [System.Text.Encoding]::UTF8.GetByteCount($l) | Should -BeLessOrEqual 75 }
+    }
+    It "finds the reference close, movers and the summary day" {
+        $d = @("2026-03-01", "2026-03-02", "2026-03-06", "2026-03-09"); $c = [double[]]@(10, 11, 12, 13)
+        Get-ReferenceClose -Dates $d -Closes $c -DaysBack 7 -AsOf "2026-03-09" | Should -Be 11
+        [double]::IsNaN((Get-ReferenceClose -Dates $d -Closes $c -DaysBack 30 -AsOf "2026-03-09")) | Should -BeTrue
+        $m = Select-SummaryMovers -Items @(@{ Ticker = "A"; Pct = 1 }, @{ Ticker = "B"; Pct = -5 }, @{ Ticker = "C"; Pct = 4 }) -Top 1
+        $m.Up[0].Ticker | Should -Be "C"; $m.Down[0].Ticker | Should -Be "B"
+        $now = [DateTime]::new(2026, 3, 11, 9, 0, 0)   # Wednesday
+        Test-SummaryDue -Mode "Daily" -LastShown "2026-03-11" -Now $now | Should -BeFalse
+        Test-SummaryDue -Mode "Daily" -LastShown "2026-03-10" -Now $now | Should -BeTrue
+        Test-SummaryDue -Mode "Weekly" -LastShown "2026-03-09" -Now $now | Should -BeFalse
+        Test-SummaryDue -Mode "Weekly" -LastShown "2026-03-08" -Now $now | Should -BeTrue
+        Test-SummaryDue -Mode "Off" -LastShown "" -Now $now | Should -BeFalse
+    }
+    It "sums fees and interest per year" {
+        $tx = @([PSCustomObject]@{ Date = "2025-05-01"; Type = "Kauf"; Fee = 2.0; Currency = "EUR" }, [PSCustomObject]@{ Date = "2026-01-05"; Type = "Verkauf"; Fee = 3.0; Currency = "USD" })
+        $cash = @([PSCustomObject]@{ Date = "2026-02-01"; Kind = "Gebühr"; Amount = -5.0; Currency = "EUR" }, [PSCustomObject]@{ Date = "2026-02-02"; Kind = "Zinsen"; Amount = 7.5; Currency = "EUR" }, [PSCustomObject]@{ Date = "2026-02-03"; Kind = "Einzahlung"; Amount = 100; Currency = "EUR" })
+        $r = @(Get-FeeOverview -Transactions $tx -CashEntries $cash -Base "EUR" -FallbackFromEur @{ EUR = 1.0; USD = 1.5 })
+        $r[0].Year | Should -Be "2026"; $r[0].OrderFees | Should -Be 2; $r[0].Approx | Should -BeTrue
+        $r[0].AccountFees | Should -Be 5; $r[0].Interest | Should -Be 7.5
+        $r[1].OrderFees | Should -Be 2; $r[1].Approx | Should -BeFalse; $r[1].Orders | Should -Be 1
+    }
+    It "measures goal progress" {
+        (Get-GoalProgress -Current 50 -Target 200).Pct | Should -Be 25
+        $g = Get-GoalProgress -Current 300 -Target 200
+        $g.BarPct | Should -Be 100; $g.Reached | Should -BeTrue; $g.Remaining | Should -Be 0
+        Get-GoalProgress -Current 1 -Target 0 | Should -BeNullOrEmpty
+    }
+    It "computes Sortino and historic VaR" {
+        # downside: one period of -2 % out of 4 -> sqrt(0.0004 / 4) = 0.01 -> 1 % per period
+        [math]::Round((Get-SortinoRatio -Returns ([double[]]@(0.01, -0.02, 0.03, 0.0)) -AnnReturn 10 -PeriodsPerYear 4), 6) | Should -Be 5
+        [double]::IsNaN((Get-SortinoRatio -Returns ([double[]]@(0.01, 0.02)) -AnnReturn 10)) | Should -BeTrue
+        # -10 % ... +10 % in 21 steps: the 5 % quantile is the second value (-9 %)
+        $r = [double[]]@(-10..10 | ForEach-Object { $_ / 100.0 })
+        [math]::Round((Get-HistoricVaR -Returns $r -Level 95), 6) | Should -Be 9
+        Get-HistoricVaR -Returns ([double[]]@(1..25 | ForEach-Object { 0.01 })) | Should -Be 0
+        [double]::IsNaN((Get-HistoricVaR -Returns ([double[]]@(0.1, 0.2)))) | Should -BeTrue
+    }
+    It "writes and reads the watchlist CSV" {
+        $rows = @([PSCustomObject]@{ Ticker = "^GSPC"; Groups = @("Index", "US"); Target = 1234.5; Currency = "USD"; Note = "=cmd; `"x`"`r`nzwei" },
+                  [PSCustomObject]@{ Ticker = "ABBN.SW"; Groups = @(); Target = 0; Currency = ""; Note = "" })
+        $csv = ConvertTo-WatchlistCsv $rows
+        $csv | Should -Match "'=cmd"
+        $r = ConvertFrom-WatchlistCsv $csv
+        $r.Skipped | Should -Be 0
+        @($r.Rows).Count | Should -Be 2
+        $r.Rows[0].Ticker | Should -Be "^GSPC"; $r.Rows[0].Target | Should -Be 1234.5
+        $r.Rows[0].Groups -join "," | Should -Be "Index,US"
+        $r.Rows[0].Note | Should -Be "=cmd; `"x`" zwei"
+        $one = ConvertFrom-WatchlistCsv "Ticker`r`nnvda`r`nbad symbol`r`nNVDA"
+        @($one.Rows).Count | Should -Be 1; $one.Skipped | Should -Be 2
+        @((ConvertFrom-WatchlistCsv "a;b`r`n1;2").Rows).Count | Should -Be 0
+    }
+}

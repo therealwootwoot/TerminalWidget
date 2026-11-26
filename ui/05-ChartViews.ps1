@@ -99,7 +99,7 @@ function Toggle-ChartFullscreen {
     $cv.Add_MouseUp($script:ChartMouseUpHandler)
     $cv.Add_MouseLeave($script:ChartMouseLeaveHandler)
     $cv.Add_MouseWheel($script:ChartWheelHandler)
-    $cv.Add_DoubleClick({ Close-ChartFullscreen })
+    $cv.Add_DoubleClick({ if ($script:OnPriceAxis) { Reset-PriceScale } else { Close-ChartFullscreen } })
     $fs.Controls.Add($cv)
     # v5.5: small toolbar top right: drawing tools, zoom reset, close
     $tb0 = New-Object System.Windows.Forms.Panel
@@ -562,6 +562,7 @@ function Set-WatchGroup {
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     Update-WatchGroupCombo
     Refresh-WatchlistAndAlerts
+    Update-LinkedColumnSet
 }
 function New-WatchGroup {
     param([string]$Symbol = "")
@@ -569,9 +570,9 @@ function New-WatchGroup {
     if (-not $nm) { return "" }
     $nm = $nm.Trim()
     if (@($script:Config.WatchGroups | Where-Object { $null -ne $_ -and [string]$_.Name -eq $nm }).Count -eq 0) {
-        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true)
+        $script:Config.WatchGroups = Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true
     } elseif ($Symbol) {
-        $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true)
+        $script:Config.WatchGroups = Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group $nm -Symbol $Symbol -In $true
     }
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     return $nm
@@ -730,7 +731,7 @@ $script:PnlWlChips.Add_DragDrop({
             $nm = New-WatchGroup -Symbol $sym
             if ($nm) { Set-WatchGroup $nm }
         } elseif ($ch.Kind -eq "group" -and [string]$ch.Key) {
-            $script:Config.WatchGroups = @(Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$ch.Key) -Symbol $sym -In $true)
+            $script:Config.WatchGroups = Set-WatchGroupMember -Groups @($script:Config.WatchGroups) -Group ([string]$ch.Key) -Symbol $sym -In $true
             Save-JsonState -Path $script:ConfigPath -Data $script:Config
             Set-TransientStatus ("{0} -> {1}" -f $sym, [string]$ch.Key) 3
             Update-WatchGroupCombo
@@ -803,6 +804,11 @@ Enable-DoubleBuffering -Control $dgvWatchlist
 $dgvWatchlist.Columns["Target"].Visible = $false
 [void]$dgvWatchlist.Columns.Add("Signal", "Signal")   # v5.5: score from the ticker analysis, hidden by default
 $dgvWatchlist.Columns["Signal"].Visible = $false
+# v8.0: more columns, hidden by default
+foreach ($c8 in @(@("OwnTgt", "Zielkurs"), @("AlertDist", "Alarm-Abstand"), @("Note", "Notiz"), @("DayBase", "Heute (Währung)"))) {
+    [void]$dgvWatchlist.Columns.Add($c8[0], $c8[1])
+    $dgvWatchlist.Columns[$c8[0]].Visible = $false
+}
 
 # Design widths = minimum widths (sum fits the 480 px grid incl. scrollbar)
 $dgvWatchlist.Columns["Sym"].Width    = S 64
@@ -815,6 +821,10 @@ $dgvWatchlist.Columns["Dist"].Width   = S 54
 $dgvWatchlist.Columns["Market"].Width = S 56
 $dgvWatchlist.Columns["Target"].Width = S 84
 $dgvWatchlist.Columns["Signal"].Width = S 52
+$dgvWatchlist.Columns["OwnTgt"].Width = S 120
+$dgvWatchlist.Columns["AlertDist"].Width = S 64
+$dgvWatchlist.Columns["Note"].Width = S 110
+$dgvWatchlist.Columns["DayBase"].Width = S 96
 $dgvWatchlist.Columns["Signal"].ToolTipText = "Signal-Score der Ticker-Analyse (Tageskurse, einmal am Tag): Summe der positiven und negativen Signale. Keine Anlageberatung."
 
 function Apply-GridColumnTips {
@@ -867,7 +877,7 @@ function Apply-NumberAlignment {
     $right = [bool]$script:Config.AlignNumbersRight
     $cell = if ($right) { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight } else { [System.Windows.Forms.DataGridViewContentAlignment]::MiddleLeft }
     $sets = @(
-        @($dgvWatchlist, @("Price", "Day", "Ext", "Rsi", "Dist", "Target", "Signal")),
+        @($dgvWatchlist, @("Price", "Day", "Ext", "Rsi", "Dist", "Target", "Signal", "OwnTgt", "AlertDist", "DayBase")),
         @($dgvPortfolio, @("Shares", "Avg", "Price", "Val", "Weight", "Pnl", "Day", "Contrib"))
     )
     foreach ($set in $sets) {

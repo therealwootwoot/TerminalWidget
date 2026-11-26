@@ -253,6 +253,7 @@ function Update-AnalysisPerf {
         $dateNote = "Stand der Werte: Tagesschlusskurse und Wechselkurs-Verlauf bis {0}. Das Hauptfenster rechnet mit aktuellen Kursen und kann abweichen." -f $ld
         try {
             $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
+            $ac.Kpi = @(Select-KpiTiles $ac.Kpi)
         } catch { $ac.Kpi = @(); Write-WidgetLog "Analysis tiles failed: $($_.Exception.Message)" "WARN" }
         $ac.Sum.Text = ((@($bl) + $dateNote) -join "`r`n")
         $ac.Sum.ForeColor = $script:Pal.Muted
@@ -752,6 +753,15 @@ function Update-AnalysisRisk {
     & $add "Rendite im Zeitraum" (& $fmtP $sP.Total) $(if ($hasB) { & $fmtP $sB.Total } else { "-" })
     & $add "Volatilität p.a." (& $fmtP $sP.Vol "{0:0.00}%") $(if ($hasB) { & $fmtP $sB.Vol "{0:0.00}%" } else { "-" })
     & $add "Sharpe" (& $fmtP $sP.Sharpe "{0:0.00}") $(if ($hasB) { & $fmtP $sB.Sharpe "{0:0.00}" } else { "-" })
+    # v8.0: Sortino and historic Value-at-Risk
+    $so = Get-SortinoRatio -Returns $rP -AnnReturn ([double]$sP.AnnReturn) -PeriodsPerYear $ppy -RiskFreePct $rf
+    $soB = if ($hasB) { Get-SortinoRatio -Returns $rB -AnnReturn ([double]$sB.AnnReturn) -PeriodsPerYear $ppy -RiskFreePct $rf } else { [double]::NaN }
+    & $add "Sortino" (& $fmtP $so "{0:0.00}") (& $fmtP $soB "{0:0.00}")
+    $var = Get-HistoricVaR -Returns $rP -Level 95
+    $varB = if ($hasB) { Get-HistoricVaR -Returns $rB -Level 95 } else { [double]::NaN }
+    $varKey = if ($ppy -gt 150) { "Value-at-Risk 95% (1 Tag, historisch)" } else { "Value-at-Risk 95% (1 Zeitschritt, historisch)" }
+    & $add $varKey (& $fmtP $var "{0:0.00}%") (& $fmtP $varB "{0:0.00}%")
+    $g.Rows[$g.Rows.Count - 1].Cells[0].ToolTipText = Tr "In 95 von 100 Zeitschritten war der Verlust kleiner als dieser Wert (aus dem gewählten Zeitraum, keine Garantie)."
     $ddTxt = & $fmtP $sP.MaxDd "{0:0.00}%"
     if ($sP.DdTrough -ge 0) { $ddTxt += "  ({0} > {1})" -f $(if ($sP.DdPeak -ge 0) { & $dateAt $sP.DdPeak } else { $dd[0] }), (& $dateAt $sP.DdTrough) }
     & $add "Max. Drawdown" $ddTxt $(if ($hasB) { & $fmtP $sB.MaxDd "{0:0.00}%" } else { "-" }) $colRed
