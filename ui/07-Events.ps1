@@ -314,12 +314,15 @@ function Update-StatusLine {
         # Time of the last successful refresh, NOT a clock
         $stand = if ($null -ne $script:LastDataTime) { $script:LastDataTime.ToString("HH:mm:ss") } else { "--:--:--" }
         # v7.1.1: show only as many pairs as fit (all rates stay in the tooltip)
+        # With the status bar on, the time is already shown there, so the rates get the room.
+        $tail = if ([bool]$script:Config.ShowStatusBar -and $shown.Count -gt 0) { @() } else { @("Stand $stand") }
+        $minShow = if ($tail.Count -gt 0) { 0 } else { 1 }
         $nShow = $shown.Count
         do {
-            $txt = if ($nShow -gt 0) { (@($shown)[0..($nShow - 1)] -join " | ") + " | Stand $stand" } else { "Stand $stand" }
+            $txt = (@($shown | Select-Object -First $nShow) + $tail) -join " | "
             $tooWide = $lblStatus.Width -gt 0 -and [System.Windows.Forms.TextRenderer]::MeasureText($txt, $lblStatus.Font).Width -gt $lblStatus.Width
             $nShow--
-        } while ($tooWide -and $nShow -ge 0)
+        } while ($tooWide -and $nShow -ge $minShow)
         $tip = "Wechselkurse (Anzeige in $($script:Config.Currency)):"
         foreach ($fp in $pairs) { $tip += "`r`n  {0,-8} {1:N4}{2}" -f $fp.Pair, $fp.Rate, $(if ($fp.Live) { "" } else { "  (Fallback)" }) }
         $tip += "`r`nStand = Uhrzeit der letzten erfolgreichen Datenaktualisierung (gelb = veraltet)"

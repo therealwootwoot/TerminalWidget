@@ -13,7 +13,7 @@ Builds on 7.1 (branch `v7.1`). No new data sources, no data format or config cha
 - Shorter watchlist title (the hint stays in the tooltip) and shorter sort entries.
 - Wider "valid until" drop-down in the alarm panel (the note field is narrower).
 - Wider settings navigation.
-- The exchange rate bar shows as many pairs as fit; all rates stay in the tooltip.
+- The exchange rate bar shows as many pairs as fit; all rates stay in the tooltip. With the status bar on, the data time is left out here because the status bar shows it.
 - RSI is drawn below its label row, so the line no longer runs over the label or the top edge.
 - HEALTH / help text window: app icon and dark scrollbars.
 - Portfolio editor shows numbers with the system's decimal separator; comma and point are both accepted.
