@@ -4756,9 +4756,66 @@ function Get-AccentStates {
     return [PSCustomObject]@{ Hover = $hover; Pressed = $pressed; Subtle = $subtle; OnAccent = $onAccent }
 }
 
+function Get-PollNote {
+    # v7.3: why data is refreshed less often than selected ("" = normal polling)
+    param([bool]$AllClosed, [int]$ClosedMinutes, [int]$RefreshSec, $BackoffUntil = $null, [DateTime]$Now = (Get-Date))
+    if ($null -ne $BackoffUntil -and [DateTime]$BackoffUntil -gt $Now) { return ("Yahoo-Pause bis {0:HH:mm}" -f [DateTime]$BackoffUntil) }
+    if ($AllClosed -and $ClosedMinutes -gt 0 -and ($ClosedMinutes * 60) -gt $RefreshSec) { return "Märkte zu - Abfrage alle $ClosedMinutes min" }
+    return ""
+}
+
+function Get-ShortMarketText {
+    # v7.3: shorter market status for narrow windows
+    param([string]$Text)
+    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in) ', ' · ' -replace ' - öffnet ', ' · ')
+}
+
+function Get-WatchPanelWidths {
+    # v7.5: watchlist view widths in design pixels. Alarm column 252..420; a 260 px detail
+    # panel only when the list keeps at least 560 px next to it.
+    param([int]$ViewW, [bool]$WantDetail = $true)
+    $alarm = [int][math]::Floor($ViewW * 0.28)
+    $alarm = [math]::Max(252, [math]::Min(420, $alarm))
+    $alarm = [math]::Max(252, [math]::Min($alarm, $ViewW - 504))   # list: at least 480
+    $can = (($ViewW - $alarm - 260 - 32) -ge 640)
+    $detail = if ($can -and $WantDetail) { 260 } else { 0 }
+    $grid = $ViewW - $alarm - 24 - $(if ($detail -gt 0) { $detail + 8 } else { 0 })
+    return [PSCustomObject]@{ Grid = [int]$grid; Detail = [int]$detail; Alarm = [int]$alarm; CanDetail = [bool]$can }
+}
+
+function Get-TickerDetailLines {
+    # v7.5: text lines for the watchlist detail panel (prices in the quote currency)
+    param([string]$Symbol, $Quote = $null, $Position = $null, [string]$Note = "", [bool]$Privacy = $false)
+    $dots = [string][char]0x2022 * 3
+    $out = @($Symbol)
+    if ($null -eq $Quote) { $out += "Noch keine Kursdaten." }
+    else {
+        $cur = [string]$Quote.Currency
+        if ($Quote.LongName -and [string]$Quote.LongName -ne $Symbol) { $out += [string]$Quote.LongName }
+        $out += ""
+        $out += ("Kurs      {0:N2} {1}" -f [double]$Quote.Price, $cur)
+        $out += ("Tag       {0:+0.00;-0.00;0.00} %" -f [double]$Quote.ChangePct)
+        if ([double]$Quote.PrevClose -gt 0) { $out += ("Vortag    {0:N2}" -f [double]$Quote.PrevClose) }
+        if ([double]$Quote.ExtPrice -gt 0) { $out += ("Ext       {0:N2} ({1:+0.00;-0.00;0.00} %)" -f [double]$Quote.ExtPrice, [double]$Quote.ExtPct) }
+        if ([double]$Quote.High52 -gt 0 -and [double]$Quote.Low52 -gt 0) {
+            $out += ("52W Hoch  {0:N2} ({1:+0.0;-0.0;0.0} %)" -f [double]$Quote.High52, (([double]$Quote.Price - [double]$Quote.High52) / [double]$Quote.High52 * 100.0))
+            $out += ("52W Tief  {0:N2}" -f [double]$Quote.Low52)
+        }
+        if ($null -ne $Quote.Rsi14 -and -not [double]::IsNaN([double]$Quote.Rsi14)) { $out += ("RSI 1h    {0:N1}" -f [double]$Quote.Rsi14) }
+    }
+    if ($null -ne $Position -and [double]$Position.Shares -gt 0) {
+        $out += ""
+        $out += "Position"
+        $out += ("Stück     {0}" -f $(if ($Privacy) { $dots } else { "{0:N2}" -f [double]$Position.Shares }))
+        $out += ("EK        {0:N2} {1}" -f [double]$Position.AvgPrice, [string]$Position.Currency)
+    }
+    if ($Note.Trim()) { $out += ""; $out += "Notiz"; $out += $Note.Trim() }
+    return $out
+}
+
 function Get-StatusBarParts {
     # V7.0: the pieces of the status bar at the bottom of the window
-    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1)
+    param([double]$AgeSec = [double]::NaN, [string]$Stand = "", [string]$Market = "", [bool]$Privacy = $false, [int]$ReqPerMin = -1, [string]$PollNote = "")
     $parts = @()
     if ($Stand) {
         $a = ""
@@ -4769,6 +4826,7 @@ function Get-StatusBarParts {
     }
     else { $parts += "Noch keine Daten" }
     if ($Market) { $parts += $Market }
+    if ($PollNote) { $parts += $PollNote }
     if ($ReqPerMin -ge 0) { $parts += ("{0} Abfragen/min" -f $ReqPerMin) }
     if ($Privacy) { $parts += "Privat-Modus" }
     return $parts
@@ -4800,10 +4858,23 @@ function Get-ChipLayout {
     return [PSCustomObject]@{ Shown = $shown; Overflow = ($shown -lt $n); X = $x }
 }
 
+function Get-XirrNote {
+    # v7.3: why the return p.a. shows "-" ("" when there is a value). Needs 30 days since the first booking.
+    param([double]$Xirr, [string]$FirstDate = "", [string]$Today = "", [int]$MinDays = 30)
+    if (-not [double]::IsNaN($Xirr)) { return "" }
+    if (-not $FirstDate) { return "keine gebuchte Position" }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $end = if ($Today) { [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv) } else { (Get-Date).Date }
+    $left = $MinDays - [int]($end - [DateTime]::ParseExact($FirstDate.Substring(0, 10), "yyyy-MM-dd", $inv)).TotalDays
+    if ($left -eq 1) { return "ab $MinDays Tagen (noch 1 Tag)" }
+    if ($left -gt 1) { return "ab $MinDays Tagen (noch $left Tage)" }
+    return "nicht berechenbar"
+}
+
 function Get-AnalysisKpiTiles {
     # V7.0: the key figures at the top of the Analyse "Wertentwicklung" page.
     # Kind = up / down / flat decides the colour (green / red only for gains / losses).
-    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "")
+    param([double]$Value, [double]$Invested, [double]$Dividends, [double]$Xirr, [string]$Base = "EUR", [double]$WindowResult = [double]::NaN, [string]$RangeLabel = "", [string]$XirrNote = "")
     $res = $Value + $Dividends - $Invested
     $kindOf = { param([double]$x) if ([double]::IsNaN($x) -or [math]::Abs($x) -lt 0.005) { return "flat" } elseif ($x -gt 0) { return "up" } else { return "down" } }
     $pct = [double]::NaN
@@ -4811,7 +4882,7 @@ function Get-AnalysisKpiTiles {
     $tiles = @()
     $tiles += [PSCustomObject]@{ Id = "Value"; Label = "Depotwert"; Text = ("{0:N0} {1}" -f $Value, $Base); Sub = ("Investiert {0:N0}" -f $Invested); Kind = "flat" }
     $tiles += [PSCustomObject]@{ Id = "Result"; Label = "Ergebnis"; Text = ("{0:+#,##0;-#,##0;0} {1}" -f $res, $Base); Sub = $(if ([double]::IsNaN($pct)) { "" } else { "{0:+0.0;-0.0;0.0} % auf Einsatz" -f $pct }); Kind = (& $kindOf $res) }
-    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = "XIRR"; Kind = (& $kindOf $Xirr) }
+    $tiles += [PSCustomObject]@{ Id = "Xirr"; Label = "Rendite p.a."; Text = $(if ([double]::IsNaN($Xirr)) { "-" } else { "{0:+0.0;-0.0;0.0} %" -f ($Xirr * 100.0) }); Sub = $(if ($XirrNote) { $XirrNote } else { "XIRR" }); Kind = (& $kindOf $Xirr) }
     $tiles += [PSCustomObject]@{ Id = "Div"; Label = "Dividenden"; Text = ("{0:N0} {1}" -f $Dividends, $Base); Sub = "bisher erhalten"; Kind = "flat" }
     if (-not [double]::IsNaN($WindowResult)) {
         $tiles += [PSCustomObject]@{ Id = "Window"; Label = $(if ($RangeLabel) { "Im Zeitraum ($RangeLabel)" } else { "Im Zeitraum" }); Text = ("{0:+#,##0;-#,##0;0} {1}" -f $WindowResult, $Base); Sub = ""; Kind = (& $kindOf $WindowResult) }
@@ -5082,7 +5153,7 @@ function Get-PortableSettingKeys {
         "RefreshSeconds", "SlowRefreshSeconds", "HttpTimeoutSeconds", "ClosedPollMinutes",
         "SmaFastPeriod", "SmaSlowPeriod", "RsiPeriod", "RsiOverbought", "RsiOversold", "MaType", "LowerPanel",
         "Theme", "AccentColor", "AccentHex", "Language", "TopMost", "CompactTape",
-        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "ShowToasts", "PerMonitorDpi", "DayChangePill", "Animations", "FollowHighContrast",
+        "UiStyle", "RowDensity", "TapeSpeed", "ZebraRows", "UseIcons", "ShowStatusBar", "PortSimOpen", "WatchDetail", "ShowToasts", "PerMonitorDpi", "DayChangePill", "Animations", "FollowHighContrast",
         "ShowTrayNotifications", "NotifyMarketOpen", "NotifyEarnings", "QuietFrom", "QuietTo",
         "Layout", "Opacity", "TerminalShowWatch", "TerminalShowPortfolio", "TerminalChartPct", "CompactShow",
         "UpDownScheme", "UpColor", "DownColor", "ShowArrows", "PriceFlash", "TrayFollowsDepot", "SnapToEdges",

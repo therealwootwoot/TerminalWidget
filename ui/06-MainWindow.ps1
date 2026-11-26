@@ -30,23 +30,16 @@ function Update-MainLayout {
 
     # Navigation bar: status text uses the extra width
     $pnlNav.Width = $W - (S 24)
-    # v4.9: the command button gets narrower before the status text vanishes
-    $cmdX = S ($script:NavX + 200)
-    $cmdW = [math]::Max((S 110), [math]::Min((S 170), $pnlNav.Width - $cmdX - (S 220)))
-    $btnCmd.SetBounds($cmdX, (S 3), $cmdW, (S 24))
-    # v4.9: short label when the button is narrow (the tooltip names Ctrl+K)
-    $cmdTxt = if ($cmdW -lt (S 150)) { "> Befehl" } else { "> Befehl     Strg+K" }
-    $cmdTxt = Tr $cmdTxt
-    if ($btnCmd.Text -ne $cmdTxt) { $btnCmd.Text = $cmdTxt }
-    $stX = $cmdX + $cmdW + (S 8)
+    # v7.5.1: the command box moved into the menu bar; the status text gets its space
+    $stX = S ($script:NavX + 200)
     $pnlHealth.SetBounds($stX, (S 10), (S 12), (S 12))
     $stX += S 16
     $lblStatus.SetBounds($stX, (S 6), [math]::Max(0, $pnlNav.Width - $stX), (S 20))
 
     $vx = S 12
-    $vy = S 92
+    $vy = (S 92) + $script:MenuH
     $vw = $W - (S 24)
-    $vh = $H - (S 92) - (S 12) - $sbH
+    $vh = $H - $vy - (S 12) - $sbH
     if ([string]$script:Config.Layout -eq "Terminal") {
         # v4.0: chart on top, watchlist / portfolio below (side by side when wide enough)
         $r = Get-TerminalLayoutRects -X $vx -Y $vy -W $vw -H $vh -ChartPct ([double]$script:Config.TerminalChartPct) `
@@ -151,11 +144,11 @@ function Apply-ThemeToAllControls {
     Style-FlatButton -Btn $btnThemeCycle -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
     $btnThemeCycle.Text = $script:Config.Theme
     Style-FlatButton -Btn $btnSettings -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
-    Style-FlatButton -Btn $btnCmd -BgColor $p.Input -FgColor $p.Muted -BorderColor $p.Border
     $pnlTape.BackColor = $p.HeaderBg
     $script:TapeSignature = ""
     $lblStatus.ForeColor = $p.Muted
 
+    if ($null -ne $script:MenuBar) { Update-MenuBarTheme }
     $viewChart.BackColor = $p.BodyBg
     $pnlChartCanvas.BackColor = $p.BodyBg
     $pnlChartControls.BackColor = $p.BodyBg
@@ -509,16 +502,17 @@ function Get-FullLayoutClientSize {
     param([string]$Layout)
     $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
     $maxW = [math]::Max((S 780), $wa.Width - (S 20))
-    $maxH = [math]::Max((S 560), $wa.Height - (S 40))
+    $minFull = (S 560) + $script:MenuH
+    $maxH = [math]::Max($minFull, $wa.Height - (S 40))
     if ($Layout -eq "Terminal") {
         $w = [int]$script:Config.TerminalW
         $h = [int]$script:Config.TerminalH
         if ($w -le 0) { $w = [int]($wa.Width * 0.85) }
         if ($h -le 0) { $h = [int]($wa.Height * 0.85) }
-        $minH = [math]::Min((S 760), $maxH)
+        $minH = [math]::Min(((S 760) + $script:MenuH), $maxH)
         return (New-Object System.Drawing.Size([math]::Min([math]::Max((S 780), $w), $maxW), [math]::Min([math]::Max($minH, $h), $maxH)))
     }
-    return (New-Object System.Drawing.Size([math]::Min([math]::Max((S 780), [int]$script:Config.WindowW), $maxW), [math]::Min([math]::Max((S 560), [int]$script:Config.WindowH), $maxH)))
+    return (New-Object System.Drawing.Size([math]::Min([math]::Max((S 780), [int]$script:Config.WindowW), $maxW), [math]::Min([math]::Max($minFull, [int]$script:Config.WindowH), $maxH)))
 }
 
 function Save-WindowSize {
@@ -556,6 +550,7 @@ function Apply-Layout {
         $form.FormBorderStyle = if ($isTicker) { [System.Windows.Forms.FormBorderStyle]::None } else { [System.Windows.Forms.FormBorderStyle]::FixedSingle }
         $pnlNav.Visible = $false
         Set-ViewVisibility @{}
+        Set-MenuBarVisible $false
 
         $barW = if ($isTicker) { S 600 } else { S 760 }
         $pnlHeader.Size = New-Object System.Drawing.Size($barW, (S 48))
@@ -599,6 +594,7 @@ function Apply-Layout {
         $btnTray.Location    = New-Object System.Drawing.Point((S 742), (S 11))
 
         $pnlNav.Visible = $true
+        Set-MenuBarVisible $true
         $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
         $form.MaximizeBox     = $true
         $form.MinimumSize     = $script:MinFormSize
@@ -659,6 +655,9 @@ function Update-NachkaufSimulation {
         $lines.Add(("{0,-8} | Aktueller Marktkurs: {1:N2} {2}" -f $sym, $mktPrice, $dispCurr))
     }
 
+    # v7.5: closed calculator -> only the position line
+    if (-not [bool]$script:Config.PortSimOpen) { $lblNachkaufOut.Text = ($lines -join "`r`n"); return }
+
     if ($buyAmount -gt 0) {
         $addShares = $buyAmount / $mktPrice
         $newTotalShares = $shares + $addShares
@@ -682,6 +681,20 @@ function Update-NachkaufSimulation {
     }
 
     $lblNachkaufOut.Text = ($lines -join "`r`n")
+}
+
+function Update-WatchDetail {
+    # v7.5: facts about the selected watchlist ticker from the data already loaded
+    $sym = ""
+    if ($null -ne $dgvWatchlist.CurrentRow -and $dgvWatchlist.CurrentRow.Index -ge 0) { $sym = [string]$dgvWatchlist.CurrentRow.Cells[0].Value }
+    if (-not $sym) { $sym = [string]$script:Config.ActiveTicker }
+    $sym = $sym.ToUpper()
+    $q = if ($script:QuoteStore.ContainsKey($sym)) { $script:QuoteStore[$sym] } else { $null }
+    $pos = if ($script:Portfolio.ContainsKey($sym)) { $script:Portfolio[$sym] } else { $null }
+    $txt = (@(Get-TickerDetailLines -Symbol $sym -Quote $q -Position $pos -Note ([string](Get-TickerNote $sym)) -Privacy ([bool]$script:Config.PrivacyMode)) -join "`r`n")
+    if ($lblWlDetail.Text -ne $txt) { $lblWlDetail.Text = $txt }
+    $lblWlDetail.BackColor = $script:Pal.Input
+    $lblWlDetail.ForeColor = $script:Pal.Text
 }
 
 # Grid rebuild helpers: keep selection + scroll position across refreshes and
@@ -776,6 +789,11 @@ function Refresh-PortfolioGrid {
         default { $rows | Sort-Object Value -Descending }
     } }
 
+    # v7.3: EK and price are shown in the base currency - say so in the header
+    foreach ($hc in @(@("Avg", "EK"), @("Price", "Kurs"))) {
+        $ht = "{0} ({1})" -f (Tr $hc[1]), $curr
+        if ($dgvPortfolio.Columns[$hc[0]].HeaderText -ne $ht) { $dgvPortfolio.Columns[$hc[0]].HeaderText = $ht }
+    }
     $gridState = Save-GridState -Grid $dgvPortfolio
     $script:SuppressGridSelection = $true
     try {
@@ -1044,6 +1062,7 @@ function Refresh-WatchlistAndAlerts {
     } finally {
         $script:SuppressGridSelection = $false
     }
+    if ($lblWlDetail.Visible) { Update-WatchDetail }
 
     $alSel = $lstAlerts.SelectedIndex
     $lstAlerts.BeginUpdate()
@@ -1291,6 +1310,8 @@ function Update-MarketStatusUi {
             else { "$zu - öffnet " + (Format-LocalTime $ms.NextSec) }
         }
     }
+    # v7.3: short form when the full text does not fit (narrow window); the tooltip has the details
+    if ($lblMarketStatus.Width -gt 0 -and [System.Windows.Forms.TextRenderer]::MeasureText($txt, $lblMarketStatus.Font).Width -gt $lblMarketStatus.Width) { $txt = Get-ShortMarketText $txt }
     if ($lblMarketStatus.Text -ne $txt) { $lblMarketStatus.Text = $txt }
     $lblMarketStatus.ForeColor = Get-MarketStateColor $ms.State
 

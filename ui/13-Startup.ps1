@@ -630,6 +630,7 @@ $form.Add_Shown({
         $form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
     }
     $script:StartupDone = $true
+    Add-FocusRings $form
     Update-PrivacyIndicator
     # v5.0: back to where you were: full-page list, open Analyse window
     if ([string]$script:Config.Layout -eq "Terminal" -and [string]$script:Config.TerminalFull -in @("Portfolio", "Watchlist", "News")) { Set-TerminalFull ([string]$script:Config.TerminalFull) }
@@ -957,6 +958,52 @@ function Invoke-SmokeTest {
         Set-TerminalFull ""
         Apply-Layout "Standard"; & $pump
         if ($splitChart.Visible) { throw "divider visible in Standard" }
+    }
+    Invoke-SmokeStep "V7.5 layouts" {
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "Portfolio"; & $pump
+        $script:Config.PortSimOpen = $false; Update-PortSimLayout; & $pump
+        $g0 = $dgvPortfolio.Height
+        if ($txtPortBuyAmt.Visible) { throw "calculator inputs visible while closed" }
+        if ($dgvPortfolio.Bottom -gt $pnlPortBottom.Top) { throw "portfolio list overlaps the editor (closed)" }
+        $btnPortSim.PerformClick(); & $pump
+        if (-not $txtPortBuyAmt.Visible) { throw "calculator did not open" }
+        if ($dgvPortfolio.Height -ge $g0 -or $dgvPortfolio.Bottom -gt $pnlPortBottom.Top) { throw "portfolio list did not make room: $g0 -> $($dgvPortfolio.Height)" }
+        $btnPortSim.PerformClick(); & $pump
+        if ($dgvPortfolio.Height -ne $g0) { throw "closing did not restore the list height" }
+        Set-ActiveTab -TabName "Watchlist"; & $pump
+        $old = $viewWatch.Size
+        $viewWatch.Size = New-Object System.Drawing.Size((S 1600), $old.Height); $script:Config.WatchDetail = $true; Update-WatchLayout; & $pump
+        if (-not $lblWlDetail.Visible) { throw "no detail panel in a wide watchlist" }
+        if ($dgvWatchlist.Right -gt $lblWlDetail.Left -or $lblWlDetail.Right -gt $lstAlerts.Left) { throw "wide watchlist panels overlap" }
+        if ($lstAlerts.Width -le (S 252) -or $cmbAlertRearm.Right -gt $viewWatch.ClientSize.Width) { throw "alarm column did not widen correctly: $($lstAlerts.Width)" }
+        if ($lblWlDetail.Text.Length -eq 0) { throw "detail panel is empty" }
+        $viewWatch.Size = $old; Update-WatchLayout; & $pump
+        if ($lblWlDetail.Visible) { throw "detail panel visible in a narrow watchlist" }
+        if ($dgvWatchlist.Right -gt $lstAlerts.Left) { throw "list overlaps the alarm column" }
+        Add-FocusRings $form
+        if ($script:RingDone.Count -eq 0) { throw "no focus rings registered" }
+        Set-ActiveTab -TabName "Portfolio"
+    }
+    Invoke-SmokeStep "V7.5.1 menu bar" {
+        Apply-Layout "Standard"; Set-ActiveTab -TabName "Chart"; & $pump
+        if (-not $script:MenuBar.Visible) { throw "menu bar hidden in Standard" }
+        if ($pnlHeader.Top -lt $script:MenuBar.Bottom) { throw "header under the menu bar: $($pnlHeader.Top) < $($script:MenuBar.Bottom)" }
+        if ($pnlNav.Top -lt $pnlHeader.Bottom) { throw "navigation overlaps the header" }
+        if ($viewChart.Top -lt $pnlNav.Bottom) { throw "view overlaps the navigation" }
+        if ($viewChart.Bottom -gt $form.ClientSize.Height) { throw "view below the window edge" }
+        $names = @($script:MenuBar.Items | ForEach-Object { $_.Text }) -join ","
+        if ($script:MenuBar.Items.Count -ne 5) { throw "menus: $names" }
+        foreach ($m in $script:MenuBar.Items) { $m.ShowDropDown(); & $pump; $m.HideDropDown(); & $pump }
+        $script:Config.PortSimOpen = $false; Update-PortSimLayout
+        $script:MbCalc.PerformClick(); & $pump
+        if (-not ($viewPortfolio.Visible -and $txtPortBuyAmt.Visible)) { throw "menu did not show the calculator" }
+        $script:MbCalc.PerformClick(); & $pump
+        if ($txtPortBuyAmt.Visible) { throw "menu did not close the calculator" }
+        Apply-Layout "Compact"; & $pump
+        if ($script:MenuBar.Visible -or $pnlHeader.Top -ne 0) { throw "menu bar / header wrong in Compact" }
+        Apply-Layout "Standard"; & $pump
+        if (-not $script:MenuBar.Visible -or $pnlHeader.Top -ne $script:MenuH) { throw "menu bar not restored" }
+        Set-ActiveTab -TabName "Chart"
     }
     Invoke-SmokeStep "Watchlist groups" {
         Set-ActiveTab -TabName "Watchlist"; & $pump
