@@ -378,6 +378,7 @@ function Show-AnalysisDialog {
     $lblMonInfo.SetBounds((S 274), (S 4), (S 700), (S 18)); $lblMonInfo.ForeColor = $p.Muted; $lblMonInfo.Anchor = $aT -bor $aL -bor $aR; $lblMonInfo.AutoEllipsis = $true
     $pm.Controls.Add($lblMonInfo)
     $gMon = New-Object System.Windows.Forms.DataGridView
+    $gMon.Tag = "percent-only"
     $gMon.SetBounds(0, (S 32), (S 976), (S 464)); $gMon.Anchor = $aAll
     Style-DataGrid -Grid $gMon
     [void]$gMon.Columns.Add("Year", "Jahr")
@@ -717,7 +718,7 @@ function Show-AnalysisDialog {
     Set-DynTip $btnExp "Aktuelle Seite als HTML-Bericht oder CSV (Excel) speichern, oder als Bild"
     $dlg.Controls.Add($btnExp)
     $expMenu = New-Object System.Windows.Forms.ContextMenuStrip
-    foreach ($ei in @(@("Html", "HTML-Bericht speichern ..."), @("Csv", "CSV für Excel speichern ..."), @("ImgCopy", "Als Bild kopieren"), @("ImgSave", "Als Bild speichern ..."))) {
+    foreach ($ei in @(@("Report", "Gesamtbericht aller Seiten (HTML) ..."), @("Html", "HTML-Bericht speichern ..."), @("Csv", "CSV für Excel speichern ..."), @("ImgCopy", "Als Bild kopieren"), @("ImgSave", "Als Bild speichern ..."))) {
         $mi = New-Object System.Windows.Forms.ToolStripMenuItem($ei[1]); $mi.Tag = $ei[0]; [void]$expMenu.Items.Add($mi)
     }
     Apply-Language $expMenu
@@ -729,6 +730,7 @@ function Show-AnalysisDialog {
         $pg = $ac.Pages[[string]$ac.Page]
         $title = "{0} - {1}" -f (Tr "Portfolio-Analyse"), (Tr ([string]$ac.PageButtons[[string]$ac.Page].Text))
         switch ([string]$e.ClickedItem.Tag) {
+            "Report"  { [void](Export-AnalysisReport) }
             "Html"    { [void](Export-GridsReport -Grids (Get-ChildGrids $pg) -Title $title -Format "Html" -Note (Get-ChildLabelText $pg)) }
             "Csv"     { [void](Export-GridsReport -Grids (Get-ChildGrids $pg) -Title $title -Format "Csv") }
             "ImgCopy" { [void](Export-ControlImage -Ctl $ac.Dlg -Mode "Copy") }

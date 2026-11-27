@@ -760,7 +760,7 @@ function Draw-DividendBars {
             $bh = if ($max -gt 0) { ($bot - $top) * $v / $max } else { 0 }
             if ($v -gt 0) {
                 $g.FillRectangle($brA, [float]($x + $slot * 0.18), [float]($bot - $bh), [float]($slot * 0.64), [float][math]::Max(1, $bh))
-                $g.DrawString(("{0:N0}" -f $v), $fontUi, $brT, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot - $bh - (S 18)), [float]$slot, [float](S 18))), $sfC)
+                $g.DrawString((Protect-Amount ("{0:N0}" -f $v) ([bool]$script:Config.PrivacyMode)), $fontUi, $brT, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot - $bh - (S 18)), [float]$slot, [float](S 18))), $sfC)
             }
             $g.DrawString([string]$bk[$i].Label, $fontUi, $brM, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot + (S 4)), [float]$slot, [float](S 18))), $sfC)
         }
@@ -792,6 +792,99 @@ function Set-TargetWeights {
     foreach ($k in @($Weights.Keys | Sort-Object)) { $o[$k] = [double]$Weights[$k] }
     $script:Config.TargetWeights | Add-Member -NotePropertyName (Get-DepotKey) -NotePropertyValue ([PSCustomObject]$o) -Force
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
+function Get-AnalysisReportSections {
+    # v12.0: every part of the analysis as report sections (privacy mode applies like on screen)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.Model) { return }
+    $m = $ac.Model
+    $priv = [bool]$script:Config.PrivacyMode
+    $base = [string]$m.Base
+    $sec = { param([string]$T, $H = @(), $R = @(), [string]$N = "", [string]$Html = "") [PSCustomObject]@{ Title = (Tr $T); Headers = @($H); Rows = @($R); Note = $N; Html = $Html } }
+    $fromGrid = {
+        param([string]$T, $Grid, [string]$N = "")
+        if ($null -eq $Grid -or $Grid.Rows.Count -eq 0 -or $Grid.Columns.Count -eq 0) { return }
+        $d = Get-GridExportData $Grid
+        [PSCustomObject]@{ Title = (Tr $T); Headers = $d.Headers; Rows = $d.Rows; Note = $N; Html = "" }
+    }
+
+    $warn = @()
+    if (@($m.Uncovered).Count -gt 0) { $warn += (Tr "Ohne vollständige Buchungen und daher nicht im Verlauf:") + " " + ((@($m.Uncovered) | ForEach-Object { $_.Ticker }) -join ", ") }
+    if (@($ac.Failed).Count -gt 0) { $warn += (Tr "Ohne Kursverlauf:") + " " + (@($ac.Failed) -join ", ") }
+
+    $sr = $m.Series
+    if ($null -ne $sr -and @($sr.Dates).Count -gt 1) {
+        $last = @($sr.Dates).Count - 1
+        $i0 = Get-SeriesWindowStart -Dates $sr.Dates -Range ([string]$script:Config.AnalysisRange)
+        $win = ($sr.Value[$last] - $sr.Value[$i0]) - ($sr.Invested[$last] - $sr.Invested[$i0]) + ($sr.Dividends[$last] - $sr.Dividends[$i0])
+        $tiles = @(Get-AnalysisKpiTiles -Value ([double]$sr.Value[$last]) -Invested ([double]$sr.Invested[$last]) -Dividends ([double]$sr.Dividends[$last]) -Xirr ([double]$m.TotalXirr) -Base $base -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
+        $tiles = @($tiles) + @(Get-AnalysisMoreTiles -Model $m -Base $base)
+        $tiles = @(Protect-KpiTiles $tiles $priv)
+        $rows = @(foreach ($t in $tiles) { ,@((Tr-Status (Tr ([string]$t.Label))), [string]$t.Text, (Tr-Status ([string]$t.Sub))) })
+        & $sec "Kennzahlen" @((Tr "Kennzahl"), (Tr "Wert"), "") $rows ($warn -join "  |  ")
+
+        $lines = @(
+            @{ Name = (Tr "Depotwert"); Values = $sr.Value; Color = "#0969da"; Dashed = $false }
+            @{ Name = (Tr "Netto investiert"); Values = $sr.Invested; Color = "#656d76"; Dashed = $true }
+        )
+        if ($null -ne $sr.Bench -and @($sr.Bench | Where-Object { $_ -gt 0 }).Count -gt 10) { $lines += @{ Name = [string]$script:Config.AnalysisBenchmark; Values = $sr.Bench; Color = "#bf8700"; Dashed = $false } }
+        $svg = ConvertTo-SvgLineChart -Dates ([string[]]$sr.Dates) -Lines $lines -HideValues:$priv
+        & $sec "Wertentwicklung" @() @() ((Tr "Werte in {0}") -f $base) $svg
+    } elseif ($warn.Count -gt 0) { & $sec "Hinweise" @() @() ($warn -join "  |  ") }
+
+    & $fromGrid "Rendite je Position" $ac.RetGrid
+
+    $keepDim = [string]$ac.Dim
+    try {
+        foreach ($dim in @(@("Position", "Aufteilung nach Position"), @("Currency", "Aufteilung nach Währung"), @("Sector", "Aufteilung nach Sektor"), @("Country", "Aufteilung nach Land"))) {
+            $ac.Dim = $dim[0]
+            $groups = @(Get-AllocationBreakdown -Items @(Get-AllocationItems))
+            if ($groups.Count -eq 0) { continue }
+            $rows = @(foreach ($grp in $groups) { ,@((Tr ([string]$grp.Key)), (Protect-Amount ("{0:N2} {1}" -f $grp.Value, $base) $priv), ("{0:N1} %" -f $grp.Pct)) })
+            & $sec $dim[1] @((Tr "Gruppe"), (Tr "Wert"), (Tr "Anteil")) $rows
+        }
+    } finally { $ac.Dim = $keepDim }
+
+    # the months page may be switched to benchmark or gap: the report always shows the depot
+    $keepMode = $ac.MonShow.SelectedIndex
+    try {
+        $ac.MonShow.SelectedIndex = 0
+        & $fromGrid "Rendite je Monat (zeitgewichtet)" $ac.MonGrid ([string]$ac.MonInfo.Text)
+    } finally { $ac.MonShow.SelectedIndex = $keepMode }
+    & $fromGrid "Risiko" $ac.RiskGrid ([string]$ac.RiskRange.Text)
+    & $fromGrid "Beitrag je Position" $ac.CGrid
+    Update-AnalysisIncome
+    & $fromGrid "Erhaltene Dividenden" $ac.IGrid
+    & $fromGrid "Erwartete Dividenden" $ac.DivGrid
+}
+
+function Export-AnalysisReport {
+    # v12.0: the whole analysis as one self-contained HTML file
+    param([string]$Path = "")
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.Model) { Set-TransientStatus (Tr "Die Analyse lädt noch - bitte kurz warten.") 4; return "" }
+    $title = "{0} - {1}" -f (Tr "Depotbericht"), (Get-DepotName ([string]$script:Config.ActiveDepot))
+    if (-not $Path) {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = (Tr "HTML-Bericht (*.html)") + "|*.html"
+        $sfd.FileName = "{0}_{1}.html" -f (($title -replace '[^\w\-]+', '_').Trim('_')), (Get-Date -Format "yyyyMMdd")
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $Path = $sfd.FileName }
+        $sfd.Dispose()
+        if (-not $Path) { return "" }
+    }
+    try {
+        $sections = @(Get-AnalysisReportSections)
+        $foot = "{0} {1} - {2}{3}" -f $script:AppTitle, (Get-Date -Format "dd.MM.yyyy HH:mm"), (Tr "keine Anlageberatung"), $(if ([bool]$script:Config.PrivacyMode) { " - " + (Tr "Privat-Modus: Beträge ausgeblendet") } else { "" })
+        [IO.File]::WriteAllText($Path, (ConvertTo-HtmlReport -Title $title -Sections $sections -Footer $foot), (New-Object System.Text.UTF8Encoding($false)))
+        Write-WidgetLog "Full report exported: $Path"
+        Set-TransientStatus ((Tr "Exportiert:") + " " + [IO.Path]::GetFileName($Path)) 4
+        return $Path
+    } catch {
+        Write-WidgetLog "Full report: $($_.Exception.Message)" "WARN"
+        Show-InfoBox -Text ((Tr "Export fehlgeschlagen:") + " " + $_.Exception.Message) -Title "Export"
+        return ""
+    }
 }
 
 function Update-AnalysisMonths {

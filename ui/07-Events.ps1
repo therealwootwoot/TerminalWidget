@@ -898,6 +898,7 @@ function Register-DialogPlacement {
 $script:PrivacyCellFmt = {
     param($sender, $e)
     if (-not [bool]$script:Config.PrivacyMode -or $e.ColumnIndex -lt 0 -or $e.RowIndex -lt 0) { return }
+    if ([string]$sender.Tag -eq "percent-only") { return }   # 12.0: monthly returns (the gap view has no % sign)
     $col = $sender.Columns[$e.ColumnIndex]
     if (-not (Test-AmountColumn ([string]$col.HeaderText))) { return }
     $v = [string]$e.Value

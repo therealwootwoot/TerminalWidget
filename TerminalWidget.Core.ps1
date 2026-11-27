@@ -5806,11 +5806,12 @@ function Test-AmountColumn {
     $h = ConvertTo-SearchKey $Header
     if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
     foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
-                     "realisiert", "realized", "realised",
+                     "realisiert", "realized", "realised", "erwartet 12", "expected 12",
                      "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
         if ($h.Contains($w)) { return $true }
     }
-    return ($h -eq "gesamt")   # the money column next to "Gesamt %"
+    # money columns of the contribution and scenario tables, and "Gesamt" next to "Gesamt %" (whole header only)
+    return ($h -in @("gesamt", "anfang", "kaufe", "verkaufe", "ende", "veranderung", "start", "end", "buys", "sales", "change"))
 }
 
 function Hide-AmountsInText {
@@ -5840,6 +5841,56 @@ function ConvertTo-CsvText {
     return ($lines.ToArray() -join "`r`n")
 }
 
+function ConvertTo-SvgLineChart {
+    # v12.0: simple line chart for the HTML report. Lines: @{ Name; Values; Color; Dashed }.
+    # Numbers are written culture-independent (SVG needs a decimal point). HideValues drops the axis amounts.
+    param([string[]]$Dates, $Lines, [int]$Width = 900, [int]$Height = 300, [switch]$HideValues)
+    $list = @($Lines | Where-Object { $null -ne $_ -and @($_.Values).Count -gt 1 })
+    if ($null -eq $Dates -or $Dates.Count -lt 2 -or $list.Count -eq 0) { return "" }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $min = [double]::MaxValue; $max = [double]::MinValue
+    foreach ($ln in $list) {
+        foreach ($v in @($ln.Values)) {
+            $d = [double]$v
+            if ([double]::IsNaN($d)) { continue }
+            if ($d -lt $min) { $min = $d }
+            if ($d -gt $max) { $max = $d }
+        }
+    }
+    if ($max -lt $min) { return "" }
+    if ($max -eq $min) { $max += 1.0; $min -= 1.0 }
+    $L = 70.0; $R = $Width - 10.0; $T = 26.0; $B = $Height - 24.0
+    $num = { param([double]$x) $x.ToString("0.#", $inv) }
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("<svg viewBox=`"0 0 $Width $Height`" width=`"100%`" style=`"max-width:${Width}px`" xmlns=`"http://www.w3.org/2000/svg`" font-size=`"11`" fill=`"#656d76`">")
+    for ($k = 0; $k -le 4; $k++) {
+        $val = $min + ($max - $min) * $k / 4.0
+        $y = & $num ($B - ($B - $T) * $k / 4.0)
+        [void]$sb.Append("<line x1=`"$L`" x2=`"$R`" y1=`"$y`" y2=`"$y`" stroke=`"#d0d7de`"/>")
+        if (-not $HideValues) { [void]$sb.Append("<text x=`"$($L - 6)`" y=`"$y`" text-anchor=`"end`" dominant-baseline=`"middle`">" + (& $enc $val.ToString("N0")) + "</text>") }
+    }
+    $lx = $L
+    foreach ($ln in $list) {
+        $vals = @($ln.Values)
+        $n = [math]::Min($vals.Count, $Dates.Count)
+        $pts = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $n; $i++) {
+            $d = [double]$vals[$i]
+            if ([double]::IsNaN($d)) { continue }
+            $x = $L + ($R - $L) * $i / [double]($Dates.Count - 1)
+            $y = $B - ($B - $T) * ($d - $min) / ($max - $min)
+            [void]$pts.Append((& $num $x) + "," + (& $num $y) + " ")
+        }
+        $dash = if ($ln.Dashed) { " stroke-dasharray=`"5 4`"" } else { "" }
+        [void]$sb.Append("<polyline fill=`"none`" stroke=`"$(& $enc $ln.Color)`" stroke-width=`"1.6`"$dash points=`"$($pts.ToString().Trim())`"/>")
+        [void]$sb.Append("<line x1=`"$(& $num $lx)`" x2=`"$(& $num ($lx + 18))`" y1=`"12`" y2=`"12`" stroke=`"$(& $enc $ln.Color)`" stroke-width=`"2`"$dash/><text x=`"$(& $num ($lx + 24))`" y=`"16`">" + (& $enc $ln.Name) + "</text>")
+        $lx += 44 + 7 * ([string]$ln.Name).Length
+    }
+    [void]$sb.Append("<text x=`"$L`" y=`"$($Height - 6)`">" + (& $enc $Dates[0]) + "</text><text x=`"$R`" y=`"$($Height - 6)`" text-anchor=`"end`">" + (& $enc $Dates[$Dates.Count - 1]) + "</text></svg>")
+    return $sb.ToString()
+}
+
 function ConvertTo-HtmlReport {
     # Sections: @(@{ Title; Headers; Rows; Note }) -> one self-contained HTML page
     param([string]$Title, $Sections, [string]$Footer = "")
@@ -5848,12 +5899,13 @@ function ConvertTo-HtmlReport {
     [void]$sb.Append("<!DOCTYPE html>`r`n<html lang=`"de`"><head><meta charset=`"utf-8`"><title>" + (& $enc $Title) + "</title>`r`n<style>")
     [void]$sb.Append("body{font-family:'Segoe UI',sans-serif;margin:24px;color:#1f2328}h1{font-size:20px}h2{font-size:15px;margin-top:24px}")
     [void]$sb.Append("table{border-collapse:collapse;font-size:13px}th,td{padding:4px 10px;border-bottom:1px solid #d0d7de;text-align:left}")
-    [void]$sb.Append("td.n{text-align:right;font-family:Consolas,monospace}th{background:#f6f8fa}p.note,footer{color:#656d76;font-size:12px}</style></head><body>`r`n")
+    [void]$sb.Append("td.n{text-align:right;font-family:Consolas,monospace}td.pos{color:#116329}td.neg{color:#a40e26}th{background:#f6f8fa}p.note,footer{color:#656d76;font-size:12px}</style></head><body>`r`n")
     [void]$sb.Append("<h1>" + (& $enc $Title) + "</h1>`r`n")
     foreach ($sec in @($Sections)) {
         if ($null -eq $sec) { continue }
         if ($sec.Title) { [void]$sb.Append("<h2>" + (& $enc $sec.Title) + "</h2>`r`n") }
         if ($sec.Note) { [void]$sb.Append("<p class=`"note`">" + (& $enc $sec.Note) + "</p>`r`n") }
+        if ($sec.Html) { [void]$sb.Append([string]$sec.Html + "`r`n") }   # own markup only (the SVG chart)
         if (@($sec.Headers).Count -eq 0) { continue }
         [void]$sb.Append("<table><tr>")
         foreach ($h in @($sec.Headers)) { [void]$sb.Append("<th>" + (& $enc $h) + "</th>") }
@@ -5864,6 +5916,8 @@ function ConvertTo-HtmlReport {
             foreach ($v in @($r)) {
                 $sv = [string]$v
                 $cls = if ($sv -match '^[-+−]?[\d.,'' ]+\s?(%|[A-Z]{3})?$' -and $sv -match '\d') { " class=`"n`"" } else { "" }
+                if ($cls -and $sv -match '^\+.*%$') { $cls = " class=`"n pos`"" }          # signed percentages in colour
+                elseif ($cls -and $sv -match '^[-−].*%$') { $cls = " class=`"n neg`"" }
                 [void]$sb.Append("<td$cls>" + (& $enc $sv) + "</td>")
             }
             [void]$sb.Append("</tr>`r`n")

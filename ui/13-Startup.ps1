@@ -1630,6 +1630,55 @@ function Invoke-SmokeTest {
             return ""
         } 6000
     } 9000
+    Invoke-SmokeStep "V12.0 full report" {
+        $keepP = $script:Config.PrivacyMode
+        try {
+            foreach ($priv in @($false, $true)) {
+                $script:Config.PrivacyMode = $priv
+                & $probeRun { Show-AnalysisDialog -Page "Perf" } {
+                    $ac = $script:AnaCtl
+                    if ($null -eq $ac -or $null -eq $ac.Model) { return "analysis not loaded" }
+                    $name = if ([bool]$script:Config.PrivacyMode) { "report-private.html" } else { "report.html" }
+                    $file = Join-Path $env:TEMP "tw-$name"
+                    $got = Export-AnalysisReport -Path $file
+                    if (-not $got) { return "no file" }
+                    $html = [IO.File]::ReadAllText($file)
+                    $heads = @([regex]::Matches($html, '<h2>(.*?)</h2>') | ForEach-Object { $_.Groups[1].Value })
+                    $script:SmokeNotes.Add("report: $($heads.Count) sections, $($html.Length) chars: $($heads -join '; ')")
+                    if ($heads.Count -lt 8) { return "only $($heads.Count) sections: $($heads -join '; ')" }
+                    if ($html -notmatch '<svg ') { return "no chart" }
+                    if ([bool]$script:Config.PrivacyMode) {
+                        $figures = @([regex]::Split($html, '(?=<h2>)') | Where-Object { $_ -match '<h2>' })[0]
+                        $left = [regex]::Match($figures, '<td[^>]*>[^<]*\d[^<]*\s(EUR|USD)</td>')
+                        if ($left.Success) { return "amount in private key figures: $($left.Value)" }
+                        if ($html -match 'text-anchor="end" dominant-baseline') { return "axis amounts in private report" }
+                        # strict: apart from the key figures (masked by id) a number may only stand in these columns
+                        $free = @("Ticker", "Seit", "XIRR p.a.", "Gruppe", "Anteil", "Jahr", "Jan", "Feb", "Mär", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez", "Gesamt %", "Kennzahl", "Depot", "Benchmark",
+                            "Rendite", "zum Vorjahr", "Rhythmus", "Letzte", "Pro Jahr", "auf EK", "Nächster Ex-Tag", "Zahltag", "Quartalszahlen")
+                        $sectionNo = 0
+                        foreach ($part in [regex]::Split($html, '(?=<h2>)')) {
+                            if ($part -notmatch '<h2>') { continue }
+                            $sectionNo++
+                            if ($sectionNo -eq 1) { continue }
+                            $isMonths = $part -match 'zeitgewichtet\)</h2>'
+                            $cols = @([regex]::Matches($part, '<th>(.*?)</th>') | ForEach-Object { [System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value) })
+                            foreach ($tr in [regex]::Matches($part, '(?s)<tr><td.*?</tr>')) {
+                                $cells = @([regex]::Matches($tr.Value, '<td[^>]*>(.*?)</td>') | ForEach-Object { [System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value) })
+                                for ($ci = 0; $ci -lt $cells.Count; $ci++) {
+                                    if ($cells[$ci] -notmatch '\d' -or $cells[$ci].Contains("%") -or $free -contains $cols[$ci]) { continue }
+                                    if ($isMonths) { continue }
+                                    return "number in private report, section $sectionNo, column '$($cols[$ci])': $($cells[$ci])"
+                                }
+                            }
+                        }
+                    }
+                    if ($env:TW_SMOKE_SHOTS -and (Test-Path $env:TW_SMOKE_SHOTS)) { Copy-Item $file (Join-Path $env:TW_SMOKE_SHOTS $name) -Force }   # goes into the CI log for review
+                    Remove-Item $file -ErrorAction SilentlyContinue
+                    return ""
+                } 6000
+            }
+        } finally { $script:Config.PrivacyMode = $keepP }
+    } 20000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
