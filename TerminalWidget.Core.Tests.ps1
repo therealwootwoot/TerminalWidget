@@ -3164,3 +3164,54 @@ Describe "Overview logic (v10.0)" {
         $r[2] | Should -Be 150
     }
 }
+
+Describe "Broker per booking (v10.4)" {
+    BeforeAll {
+        function New-TestBooking($id, $date, $ticker, $type, $shares, $price, $fee, $broker, $note = "") {
+            [PSCustomObject]@{ Id = $id; Date = $date; Ticker = $ticker; Type = $type; Shares = $shares; Price = $price; Fee = $fee; Currency = "EUR"; Broker = $broker; Note = $note }
+        }
+    }
+    BeforeEach {
+        $script:b = @(
+            (New-TestBooking "1" "2026-01-10" "NVDA" "Kauf" 10 100 1 "Flatex"),
+            (New-TestBooking "2" "2026-03-05" "MSFT" "Kauf" 2 300 6 "Hausbank" "Sparplan"),
+            (New-TestBooking "3" "2026-02-01" "NVDA" "Verkauf" 5 120 1 "flatex"),
+            (New-TestBooking "4" "2025-07-01" "SAP.DE" "Kauf" 1 200 2 ""),
+            (New-TestBooking "5" "2026-04-01" "NVDA" "Dividende" 0 50 13 "Flatex"))
+    }
+    It "lists every broker once" {
+        @(Get-BrokerNames $b).Count | Should -Be 2
+    }
+    It "takes the broker of the newest booking of the ticker" {
+        Get-LastBroker -Transactions $b -Ticker "MSFT" | Should -Be "Hausbank"
+        Get-LastBroker -Transactions $b -Ticker "SAP.DE" | Should -Be "Flatex"
+        Get-LastBroker -Transactions @() -Ticker "SAP.DE" | Should -Be ""
+    }
+    It "searches all words in ticker, note, broker and German date" {
+        Test-BookingMatch -Booking $b[1] -Search "msft sparplan" | Should -BeTrue
+        Test-BookingMatch -Booking $b[1] -Search "05.03.2026" | Should -BeTrue
+        Test-BookingMatch -Booking $b[1] -Search "msft flatex" | Should -BeFalse
+        Test-BookingMatch -Booking $b[1] -Search "  " | Should -BeTrue
+    }
+    It "assigns a broker only to the chosen bookings" {
+        Set-BookingBroker -Transactions $b -Ids @("4", "2") -Broker " Hausbank " | Should -Be 1
+        $b[3].Broker | Should -Be "Hausbank"
+        $b[0].Broker | Should -Be "Flatex"
+    }
+    It "adds up orders, volume and fees per year and broker without dividends" {
+        $r = @(Get-BrokerFeeOverview -Transactions $b -Base "EUR")
+        $r.Count | Should -Be 3
+        $f = @($r | Where-Object { $_.Year -eq "2026" -and $_.Broker -eq "Flatex" })[0]
+        $f.Orders | Should -Be 2
+        $f.Volume | Should -Be 1600
+        $f.Fees | Should -Be 2
+        $f.PerOrder | Should -Be 1
+        $f.Pct | Should -Be 0.125
+        $r[2].Year | Should -Be "2025"
+    }
+    It "reads a broker column from a CSV file" {
+        $csv = ConvertFrom-CsvText "Datum;Typ;Ticker;Stück;Kurs;Broker`n01.02.2026;Kauf;SAP.DE;2;100;Flatex"
+        $map = Get-CsvColumnGuess -Headers $csv.Headers
+        @(ConvertFrom-BrokerRows -Rows $csv.Rows -Map $map)[0].Broker | Should -Be "Flatex"
+    }
+}

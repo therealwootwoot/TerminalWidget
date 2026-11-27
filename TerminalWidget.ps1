@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "10.2"
+$script:AppVersion    = "10.4"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1286,6 +1286,7 @@ foreach ($t in @(Load-JsonState -Path $script:TransactionsPath -DefaultValue @()
             Currency = if ($t.Currency) { [string]$t.Currency } else { "EUR" }
             Realized = [double]$t.Realized
             Note     = [string]$t.Note
+            Broker   = [string]$t.Broker                      # 10.4
         })
     }
 }

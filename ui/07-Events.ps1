@@ -628,7 +628,7 @@ function Save-Transactions {
 }
 
 function Add-TransactionRecord {
-    param([string]$Type, [string]$Ticker, [double]$Shares, [double]$Price, [double]$Fee, [string]$Currency, [string]$Date, [double]$Realized = 0.0, [string]$Note = "")
+    param([string]$Type, [string]$Ticker, [double]$Shares, [double]$Price, [double]$Fee, [string]$Currency, [string]$Date, [double]$Realized = 0.0, [string]$Note = "", [string]$Broker = "")
     $script:Transactions.Add([PSCustomObject]@{
         Id       = [Guid]::NewGuid().ToString("N")
         Date     = if ($Date) { $Date } else { (Get-Date).ToString("yyyy-MM-dd") }
@@ -640,6 +640,7 @@ function Add-TransactionRecord {
         Currency = $Currency
         Realized = $Realized
         Note     = $Note
+        Broker   = $Broker.Trim()
     })
     Save-Transactions
 }
@@ -659,7 +660,7 @@ function Get-RealizedTotal {
 
 function Invoke-Transaction {
     # Applies a transaction to the position and logs it. Returns an error text or "".
-    param([string]$Type, [string]$Ticker, [double]$Shares, [double]$Price, [double]$Fee, [string]$Currency, [string]$Date, [string]$Note)
+    param([string]$Type, [string]$Ticker, [double]$Shares, [double]$Price, [double]$Fee, [string]$Currency, [string]$Date, [string]$Note, [string]$Broker = "")
     $sym = $Ticker.ToUpper()
     $pos = if ($script:Portfolio.ContainsKey($sym)) { $script:Portfolio[$sym] } else { $null }
     switch ($Type) {
@@ -677,7 +678,7 @@ function Invoke-Transaction {
                 $pos.Shares = $newSh
                 $Currency = $pos.Currency; $Price = $px; $Fee = $fee
             }
-            Add-TransactionRecord -Type "Kauf" -Ticker $sym -Shares $Shares -Price $Price -Fee $Fee -Currency $Currency -Date $Date -Note $Note
+            Add-TransactionRecord -Type "Kauf" -Ticker $sym -Shares $Shares -Price $Price -Fee $Fee -Currency $Currency -Date $Date -Note $Note -Broker $Broker
         }
         "Verkauf" {
             if ($null -eq $pos) { return "Keine Position '$sym' vorhanden." }
@@ -687,7 +688,7 @@ function Invoke-Transaction {
             $fee = Convert-CurrencyValue -Amount $Fee -FromCurrency $Currency -ToCurrency $pos.Currency
             $realized = (($px - $pos.AvgPrice) * $Shares) - $fee
             $pos.Shares = $pos.Shares - $Shares
-            Add-TransactionRecord -Type "Verkauf" -Ticker $sym -Shares $Shares -Price $px -Fee $fee -Currency $pos.Currency -Date $Date -Realized $realized -Note $Note
+            Add-TransactionRecord -Type "Verkauf" -Ticker $sym -Shares $Shares -Price $px -Fee $fee -Currency $pos.Currency -Date $Date -Realized $realized -Note $Note -Broker $Broker
             if ($pos.Shares -le 0.000001) { $script:Portfolio.Remove($sym) }
         }
         "Dividende" {
@@ -695,7 +696,7 @@ function Invoke-Transaction {
             $tc = if ($null -ne $pos) { $pos.Currency } else { $Currency }
             $amt = Convert-CurrencyValue -Amount $Price -FromCurrency $Currency -ToCurrency $tc
             $fee = Convert-CurrencyValue -Amount $Fee -FromCurrency $Currency -ToCurrency $tc
-            Add-TransactionRecord -Type "Dividende" -Ticker $sym -Shares $Shares -Price $amt -Fee $fee -Currency $tc -Date $Date -Realized ($amt - $fee) -Note $Note
+            Add-TransactionRecord -Type "Dividende" -Ticker $sym -Shares $Shares -Price $amt -Fee $fee -Currency $tc -Date $Date -Realized ($amt - $fee) -Note $Note -Broker $Broker
         }
         default { return "Unbekannter Typ '$Type'." }
     }
@@ -1040,7 +1041,7 @@ function Get-ChildLabelText {
 function Show-TransactionDialog {
     param([string]$Ticker = "")
     $p = $script:Pal
-    $dlg = New-DialogForm -Title "Transaktion erfassen" -W (S 360) -H (S 330)
+    $dlg = New-DialogForm -Title "Transaktion erfassen" -W (S 360) -H (S 362)
     $rowY = @{ Y = (S 14) }
     $addRow = {
         param([string]$Label, [System.Windows.Forms.Control]$Ctl)
@@ -1090,6 +1091,14 @@ function Show-TransactionDialog {
     Select-CurrencyInCombo -Combo $cbCur -Code $preCur
     & $addRow "Währung" $cbCur
 
+    # 10.4: broker, free text with the ones used before
+    $cbBroker = New-Object System.Windows.Forms.ComboBox
+    $cbBroker.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
+    $cbBroker.BackColor = $p.Input; $cbBroker.ForeColor = $p.Text; $cbBroker.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    foreach ($bn in @(Get-BrokerNames $script:Transactions.ToArray())) { [void]$cbBroker.Items.Add($bn) }
+    $cbBroker.Text = Get-LastBroker -Transactions $script:Transactions.ToArray() -Ticker $Ticker.ToUpper()
+    & $addRow "Broker" $cbBroker
+
     $tbNote = & $newTb ""
     & $addRow "Notiz" $tbNote
 
@@ -1098,7 +1107,7 @@ function Show-TransactionDialog {
     $info.ForeColor = $p.Muted
     $dlg.Controls.Add($info)
 
-    $script:TxDlg = @{ Dlg = $dlg; Type = $cbType; Sym = $tbSym; Sh = $tbSh; Px = $tbPx; Fee = $tbFee; Cur = $cbCur; Note = $tbNote; Date = $dtp; Info = $info; LblPx = $lblPx }
+    $script:TxDlg = @{ Dlg = $dlg; Type = $cbType; Sym = $tbSym; Sh = $tbSh; Px = $tbPx; Fee = $tbFee; Cur = $cbCur; Note = $tbNote; Broker = $cbBroker; Date = $dtp; Info = $info; LblPx = $lblPx }
     $cbType.Add_SelectedIndexChanged({
         $t = $script:TxDlg
         $isDiv = ([string]$t.Type.SelectedItem -eq "Dividende")
@@ -1124,7 +1133,7 @@ function Show-TransactionDialog {
         $sym = $t.Sym.Text.Trim().ToUpper()
         if (-not $script:Portfolio.ContainsKey($sym)) { $sym = Resolve-BestSymbol -RawInput $sym }
         $err = Invoke-Transaction -Type ([string]$t.Type.SelectedItem) -Ticker $sym -Shares (Parse-DecimalInput $t.Sh.Text) -Price (Parse-DecimalInput $t.Px.Text) `
-            -Fee (Parse-DecimalInput $t.Fee.Text) -Currency ([string]$t.Cur.SelectedItem) -Date ($t.Date.Value.ToString("yyyy-MM-dd")) -Note $t.Note.Text.Trim()
+            -Fee (Parse-DecimalInput $t.Fee.Text) -Currency ([string]$t.Cur.SelectedItem) -Date ($t.Date.Value.ToString("yyyy-MM-dd")) -Note $t.Note.Text.Trim() -Broker $t.Broker.Text
         if ($err) { $t.Info.ForeColor = $colRed; $t.Info.Text = $err; return }
         $t.Dlg.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $t.Dlg.Close()
@@ -1166,23 +1175,47 @@ function Show-TransactionHistory {
     $dlg.Controls.Add($cbFilter)
 
     $lblSum = New-Object System.Windows.Forms.Label
-    $lblSum.SetBounds((S 164), (S 13), (S 584), (S 20))
+    $lblSum.SetBounds((S 12), (S 42), (S 736), (S 20))
     $lblSum.Font = $fontMono
     $lblSum.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $dlg.Controls.Add($lblSum)
 
+    # 10.4: filter by broker, free search, assign a broker to selected bookings
+    $cbBrokerF = New-Object System.Windows.Forms.ComboBox
+    $cbBrokerF.SetBounds((S 160), (S 10), (S 140), (S 24))
+    $cbBrokerF.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cbBrokerF.BackColor = $p.Input; $cbBrokerF.ForeColor = $p.Text; $cbBrokerF.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $dlg.Controls.Add($cbBrokerF)
+    $lblFind = New-Object System.Windows.Forms.Label
+    $lblFind.SetBounds((S 312), (S 14), (S 52), (S 18)); $lblFind.Text = Tr "Suche"; $lblFind.ForeColor = $p.Muted
+    $dlg.Controls.Add($lblFind)
+    $tbFind = New-Object System.Windows.Forms.TextBox
+    $tbFind.SetBounds((S 366), (S 10), (S 200), (S 24))
+    $tbFind.BackColor = $p.Input; $tbFind.ForeColor = $p.Text; $tbFind.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $tbFind.AccessibleName = Tr "Suche"
+    $dlg.Controls.Add($tbFind)
+    $btnBroker = New-Object System.Windows.Forms.Button
+    $btnBroker.SetBounds((S 598), (S 8), (S 150), (S 28))
+    $btnBroker.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    Style-FlatButton -Btn $btnBroker -BgColor $p.Input -FgColor $p.Accent -BorderColor $p.Border
+    $btnBroker.Text = Tr "Broker zuweisen ..."
+    $dlg.Controls.Add($btnBroker)
+
     $grid = New-Object System.Windows.Forms.DataGridView
-    $grid.SetBounds((S 12), (S 42), (S 736), (S 346))
+    $grid.SetBounds((S 12), (S 66), (S 736), (S 322))
     $grid.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     Style-DataGrid -Grid $grid
+    $grid.MultiSelect = $true
     foreach ($cd in @(@("Date", "Datum", 84), @("Type", "Typ", 72), @("Ticker", "Ticker", 72), @("Shares", "Stück", 70), @("Price", "Kurs/Betrag", 86),
-                      @("Fee", "Gebühr", 64), @("Cur", "Whg", 44), @("Real", "Realisiert", 92), @("Note", "Notiz", 120), @("Id", "Id", 10))) {
+                      @("Fee", "Gebühr", 64), @("Cur", "Whg", 44), @("Real", "Realisiert", 92), @("Broker", "Broker", 86), @("Note", "Notiz", 110), @("Id", "Id", 10))) {
         $ci = $grid.Columns.Add($cd[0], $cd[1])
         $grid.Columns[$ci].Width = S $cd[2]
         $grid.Columns[$ci].FillWeight = [float](S $cd[2])
     }
     $grid.Columns["Id"].Visible = $false
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    # 10.4: date, type and currency are never cut off; the rest shares what is left
+    foreach ($n in @("Date", "Type", "Ticker", "Shares", "Price", "Fee", "Cur")) { $grid.Columns[$n].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }
     $dlg.Controls.Add($grid)
 
     $btnDel = New-Object System.Windows.Forms.Button
@@ -1223,7 +1256,19 @@ function Show-TransactionHistory {
     $dlg.Controls.Add($btnClose)
     $dlg.CancelButton = $btnClose
 
-    $script:TxHist = @{ Grid = $grid; Filter = $cbFilter; Sum = $lblSum; Dlg = $dlg }
+    $script:TxHist = @{ Grid = $grid; Filter = $cbFilter; Sum = $lblSum; Dlg = $dlg; BrokerF = $cbBrokerF; Find = $tbFind; Filling = $false }
+    $script:TxHist.FillBrokers = {
+        # rebuilds the broker filter and keeps the choice if it still exists
+        $h = $script:TxHist
+        $h.Filling = $true
+        $keep = [string]$h.BrokerF.SelectedItem
+        $h.BrokerF.Items.Clear()
+        [void]$h.BrokerF.Items.Add((Tr "Alle Broker"))
+        [void]$h.BrokerF.Items.Add((Tr "(ohne Broker)"))
+        foreach ($bn in @(Get-BrokerNames $script:Transactions.ToArray())) { [void]$h.BrokerF.Items.Add($bn) }
+        $h.BrokerF.SelectedIndex = [math]::Max(0, $h.BrokerF.Items.IndexOf($keep))
+        $h.Filling = $false
+    }
     $fill = {
         $h = $script:TxHist
         $flt = [string]$h.Filter.SelectedItem
@@ -1233,21 +1278,41 @@ function Show-TransactionHistory {
         $yr = [string](Get-Date).Year
         foreach ($t in @($script:Transactions | Sort-Object Date -Descending)) {
             if ($flt -ne "Alle Ticker" -and $t.Ticker -ne $flt) { continue }
+            $bi = $h.BrokerF.SelectedIndex
+            if ($bi -eq 1 -and ([string]$t.Broker).Trim()) { continue }
+            if ($bi -ge 2 -and [string]$t.Broker -ne [string]$h.BrokerF.SelectedItem) { continue }
+            if (-not (Test-BookingMatch -Booking $t -Search $h.Find.Text)) { continue }
             $realDisp = if ([double]$t.Realized -ne 0) { Convert-CurrencyValue -Amount $t.Realized -FromCurrency $t.Currency -ToCurrency $curr } else { 0.0 }
             $sumAll += $realDisp
             if (([string]$t.Date).StartsWith($yr)) { $sumYear += $realDisp }
             $ri = $h.Grid.Rows.Add($t.Date, $t.Type, $t.Ticker, ("{0:N4}" -f $t.Shares), ("{0:N2}" -f $t.Price), ("{0:N2}" -f $t.Fee), $t.Currency,
-                $(if ([double]$t.Realized -ne 0) { "{0:+0.00;-0.00}" -f $t.Realized } else { "" }), $t.Note, $t.Id)
+                $(if ([double]$t.Realized -ne 0) { "{0:+0.00;-0.00}" -f $t.Realized } else { "" }), $t.Broker, $t.Note, $t.Id)
             if ([double]$t.Realized -ne 0) { $h.Grid.Rows[$ri].Cells["Real"].Style.ForeColor = if ($t.Realized -ge 0) { $colGreen } else { $colRed } }
         }
-        $h.Sum.Text = "Realisiert {0}: {1:+0.00;-0.00} {2}  |  gesamt: {3:+0.00;-0.00} {2}  (zum aktuellen Kurs umgerechnet)" -f $yr, $sumYear, $curr, $sumAll
+        $h.Sum.Text = (Tr "{4} Buchungen  |  realisiert {0}: {1:+0.00;-0.00} {2}  |  gesamt: {3:+0.00;-0.00} {2}  (aktueller Kurs)") -f $yr, $sumYear, $curr, $sumAll, $h.Grid.Rows.Count
         $h.Sum.ForeColor = if ($sumAll -ge 0) { $colGreen } else { $colRed }
     }
     $script:TxHist.Fill = $fill
     $cbFilter.Add_SelectedIndexChanged({ & $script:TxHist.Fill })
+    $cbBrokerF.Add_SelectedIndexChanged({ if (-not $script:TxHist.Filling) { & $script:TxHist.Fill } })
+    $tbFind.Add_TextChanged({ & $script:TxHist.Fill })
+    $btnBroker.Add_Click({
+        $h = $script:TxHist
+        $ids = @($h.Grid.SelectedRows | ForEach-Object { [string]$_.Cells["Id"].Value })
+        if ($ids.Count -eq 0) { return }
+        $first = [string]$h.Grid.SelectedRows[0].Cells["Broker"].Value
+        $name = Read-TextInput -Title (Tr "Broker zuweisen") -Prompt ((Tr "Broker für {0} markierte Buchung(en), leer = entfernen") -f $ids.Count) -Value $first
+        if ($null -eq $name) { return }
+        if ((Set-BookingBroker -Transactions $script:Transactions.ToArray() -Ids $ids -Broker $name) -gt 0) {
+            Save-Transactions
+            & $h.FillBrokers
+            & $h.Fill
+        }
+    })
     $btnDel.Add_Click({
         $h = $script:TxHist
         if ($h.Grid.SelectedRows.Count -eq 0) { return }
+        if ($h.Grid.SelectedRows.Count -gt 1) { $h.Sum.Text = Tr "Zum Löschen bitte genau eine Buchung markieren."; return }
         $id = [string]$h.Grid.SelectedRows[0].Cells["Id"].Value
         $delSym = [string]$h.Grid.SelectedRows[0].Cells["Ticker"].Value
         $delType = [string]$h.Grid.SelectedRows[0].Cells["Type"].Value
@@ -1278,17 +1343,19 @@ function Show-TransactionHistory {
         $sfd.FileName = "transaktionen_{0}.csv" -f (Get-Date -Format "yyyyMMdd")
         if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $lines = New-Object System.Collections.Generic.List[string]
-            $lines.Add("Datum;Typ;Ticker;Stück;Kurs/Betrag;Gebühr;Währung;Realisiert;Notiz")
+            $lines.Add("Datum;Typ;Ticker;Stück;Kurs/Betrag;Gebühr;Währung;Realisiert;Notiz;Broker")
             $inv = [System.Globalization.CultureInfo]::InvariantCulture
             foreach ($t in @($script:Transactions | Sort-Object Date)) {
                 # v3.0: text fields escaped (quotes, line breaks, formula injection)
-                $lines.Add(("{0};{1};{2};{3};{4};{5};{6};{7};{8}" -f $t.Date, $t.Type, (ConvertTo-CsvField $t.Ticker), ([double]$t.Shares).ToString($inv), ([double]$t.Price).ToString($inv), ([double]$t.Fee).ToString($inv), $t.Currency, ([double]$t.Realized).ToString($inv), (ConvertTo-CsvField ([string]$t.Note))))
+                $lines.Add(("{0};{1};{2};{3};{4};{5};{6};{7};{8};{9}" -f $t.Date, $t.Type, (ConvertTo-CsvField $t.Ticker), ([double]$t.Shares).ToString($inv), ([double]$t.Price).ToString($inv), ([double]$t.Fee).ToString($inv), $t.Currency, ([double]$t.Realized).ToString($inv), (ConvertTo-CsvField ([string]$t.Note)), (ConvertTo-CsvField ([string]$t.Broker))))
             }
             [System.IO.File]::WriteAllLines($sfd.FileName, $lines, [System.Text.Encoding]::UTF8)
         }
         $sfd.Dispose()
     })
+    & $script:TxHist.FillBrokers
     & $fill
+    Set-DynTip $btnBroker "Mehrere Zeilen mit Strg oder Umschalt markieren und ihnen gemeinsam einen Broker geben"
     # v4.5: CSV import from the history window
     $btnImp = New-Object System.Windows.Forms.Button
     $btnImp.SetBounds((S 572), (S 398), (S 60), (S 28))
@@ -1299,6 +1366,9 @@ function Show-TransactionHistory {
     $dlg.Controls.Add($btnImp)
     Set-DynTip $btnImp "Buchungen aus einer Broker-CSV importieren (Trade Republic, Scalable, Flatex, comdirect, IBKR ... - Spalten werden erkannt). Befehl: IMP"
     $script:TxHist.Import = $false
+    # 10.4: wider by default, so broker and note have room (the anchors move the rest along)
+    $wide = [math]::Min((S 900), [System.Windows.Forms.Screen]::FromControl($form).WorkingArea.Width - (S 40))
+    if ($dlg.ClientSize.Width -lt $wide) { $dlg.ClientSize = New-Object System.Drawing.Size($wide, $dlg.ClientSize.Height) }
     [void]$dlg.ShowDialog($form)
     $doImport = [bool]$script:TxHist.Import
     $script:TxHist = $null

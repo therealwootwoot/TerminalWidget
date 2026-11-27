@@ -3435,6 +3435,7 @@ function Get-CsvColumnGuess {
         AmountCurrency = '^(currency|währung|waehrung) ?\((total|gesamt|betrag)'
         TaxCurrency    = '^(currency|währung|waehrung) ?\((withholding|quellensteuer)'
         Rate           = '^(exchange ?rate|wechselkurs|devisenkurs|fx ?rate)'
+        Broker         = '^(broker|depotbank)$'
     }
     foreach ($f in $extra.Keys) {
         $map[$f] = -1
@@ -3504,7 +3505,8 @@ function ConvertFrom-BrokerRows {
     $feeCols = if ($Map.ContainsKey("FeeExtra")) { @($Map["FeeExtra"]) } else { @() }
     $out = @()
     foreach ($r in @($Rows)) {
-        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = ""; Cash = $false; Amount = 0.0 }
+        $o = [ordered]@{ Date = ""; Type = ""; Ident = ""; Name = ""; Shares = 0.0; Price = 0.0; Fee = 0.0; Currency = $DefaultCurrency; Ok = $false; Note = ""; Cash = $false; Amount = 0.0; Broker = "" }
+        $o.Broker = (& $get $r "Broker").Trim()
         $dRaw = ((& $get $r "Date").Trim()) -replace '[T ,;].*$', ''
         $o.Date = ConvertTo-IsoDate $dRaw
         $o.Ident = (& $get $r "Ident").Trim().ToUpperInvariant()
@@ -6960,6 +6962,86 @@ function Get-FeeOverview {
         else { & $add $r "Interest" ([double]$e.Amount) ([string]$e.Currency) ([string]$e.Date) }
     }
     return @($years.Values | Sort-Object -Property @{ Expression = { $_.Year }; Descending = $true })
+}
+
+# ---- broker per booking (v10.4) ----------------------------------------------
+function Get-BrokerNames {
+    # all brokers used in the bookings, once each (case does not matter), sorted
+    param($Transactions)
+    $seen = @{}
+    foreach ($t in @($Transactions)) {
+        if ($null -eq $t) { continue }
+        $b = ([string]$t.Broker).Trim()
+        if ($b -and -not $seen.ContainsKey($b)) { $seen[$b] = $b }
+    }
+    return @($seen.Values | Sort-Object)
+}
+
+function Get-LastBroker {
+    # broker of the newest booking of this ticker; without one, of the newest booking at all
+    param($Transactions, [string]$Ticker = "")
+    $with = @(@($Transactions) | Where-Object { $null -ne $_ -and ([string]$_.Broker).Trim() })
+    if ($with.Count -eq 0) { return "" }
+    $own = @($with | Where-Object { [string]$_.Ticker -eq $Ticker })
+    $pool = if ($own.Count -gt 0) { $own } else { $with }
+    $best = $pool[0]
+    foreach ($t in $pool) { if ([string]::CompareOrdinal([string]$t.Date, [string]$best.Date) -ge 0) { $best = $t } }
+    return ([string]$best.Broker).Trim()
+}
+
+function Test-BookingMatch {
+    # every word must occur in ticker, note, broker, type or date (ISO or German)
+    param($Booking, [string]$Search = "")
+    if (-not ([string]$Search).Trim()) { return $true }
+    $d = [string]$Booking.Date
+    $de = if ($d -match '^(\d{4})-(\d{2})-(\d{2})') { "{0}.{1}.{2}" -f $Matches[3], $Matches[2], $Matches[1] } else { "" }
+    $hay = (@([string]$Booking.Ticker, [string]$Booking.Note, [string]$Booking.Broker, [string]$Booking.Type, $d, $de) -join " ").ToLowerInvariant()
+    foreach ($w in @($Search.Trim().ToLowerInvariant() -split '\s+')) { if (-not $hay.Contains($w)) { return $false } }
+    return $true
+}
+
+function Set-BookingBroker {
+    # sets the broker of the bookings with these ids -> number of changed bookings
+    param($Transactions, [string[]]$Ids, [string]$Broker = "")
+    $want = @{}
+    foreach ($i in @($Ids)) { if ($i) { $want[$i] = $true } }
+    $name = ([string]$Broker).Trim()
+    $n = 0
+    foreach ($t in @($Transactions)) {
+        if ($null -eq $t -or -not $want.ContainsKey([string]$t.Id)) { continue }
+        if ([string]$t.Broker -cne $name) { $t.Broker = $name; $n++ }
+    }
+    return $n
+}
+
+function Get-BrokerFeeOverview {
+    # buys and sells per year and broker: orders, volume, order fees, fee in
+    # percent of the volume. Dividends are left out (their "fee" holds taxes).
+    param($Transactions, [string]$Base = "EUR", [hashtable]$History = @{}, [hashtable]$FallbackFromEur = @{})
+    $rows = @{}
+    foreach ($t in @($Transactions)) {
+        if ($null -eq $t -or ([string]$t.Date).Length -lt 4) { continue }
+        if ([string]$t.Type -notin @("Kauf", "Verkauf")) { continue }
+        $year = ([string]$t.Date).Substring(0, 4)
+        $name = ([string]$t.Broker).Trim()
+        $key = $year + "|" + $name.ToLowerInvariant()
+        if (-not $rows.ContainsKey($key)) { $rows[$key] = [PSCustomObject]@{ Year = $year; Broker = $name; Orders = 0; Volume = 0.0; Fees = 0.0; PerOrder = 0.0; Pct = 0.0; Approx = $false } }
+        $r = $rows[$key]
+        $cur = Get-NormalizedCurrencyCode ([string]$t.Currency)
+        if (-not $cur) { $cur = $Base }
+        foreach ($part in @(@("Volume", [math]::Abs([double]$t.Shares * [double]$t.Price)), @("Fees", [double]$t.Fee))) {
+            if ([double]$part[1] -eq 0) { continue }
+            $cv = Convert-AmountOnDate -Amount ([double]$part[1]) -From $cur -To $Base -Date ([string]$t.Date) -History $History -FallbackFromEur $FallbackFromEur
+            if ([bool]$cv.Approx -and $cur -ne $Base) { $r.Approx = $true }
+            $r.($part[0]) += [double]$cv.Value
+        }
+        $r.Orders++
+    }
+    foreach ($r in $rows.Values) {
+        $r.PerOrder = $r.Fees / $r.Orders
+        if ($r.Volume -gt 0) { $r.Pct = $r.Fees / $r.Volume * 100.0 }
+    }
+    return @($rows.Values | Sort-Object -Property @{ Expression = { $_.Year }; Descending = $true }, @{ Expression = { $_.Broker }; Descending = $false })
 }
 
 function Get-GoalProgress {
