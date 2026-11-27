@@ -1555,7 +1555,7 @@ function Invoke-SmokeTest {
         $wasPriv = [bool]$script:Config.PrivacyMode
         try {
             $script:Config.PrivacyMode = $false
-            & $probeRun { [void](Invoke-TerminalCommand "POS NVDA") } {
+            & $probeRun { [void](Invoke-TerminalCommand "NVDA POS") } {
                 $c = $script:PosCtl
                 if ($null -eq $c) { return "window not open" }
                 $c.Dlg.Refresh()
