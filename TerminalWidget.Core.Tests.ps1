@@ -3328,3 +3328,21 @@ Describe "Analysis tiles (v11.0)" {
         (Get-TileGrid -Count 15 -Width 976 -RowHeight 56 -Gap 8).Rows | Should -Be 3
     }
 }
+
+Describe "Privacy in the analysis (v11.0)" {
+    It "hides money tiles and keeps percentages" {
+        $dots = [string]([char]0x2022) * 4
+        $t = @(Get-AnalysisKpiTiles -Value 10000 -Invested 8000 -Dividends 200 -Xirr 0.1) + @(Get-AnalysisExtraTiles -Unreal 500 -Fees 12 -Vol 20)
+        $p = @(Protect-KpiTiles $t $true)
+        $p.Count | Should -Be $t.Count
+        foreach ($id in @("Value", "Result", "Div", "Unreal", "Fees")) { @($p | Where-Object { $_.Id -eq $id })[0].Text | Should -Be $dots }
+        @($p | Where-Object { $_.Id -eq "Value" })[0].Sub | Should -Not -Match "\d"
+        @($p | Where-Object { $_.Id -eq "Result" })[0].Sub | Should -Match "%"
+        @($p | Where-Object { $_.Id -eq "Vola" })[0].Text | Should -Match "20"
+        @(Protect-KpiTiles $t $false)[0].Text | Should -Match "EUR"
+    }
+    It "masks the result columns of the return table" {
+        foreach ($h in @("Unrealisiert", "Realisiert", "Gesamt", "Unrealized")) { Test-AmountColumn $h | Should -BeTrue }
+        foreach ($h in @("Gesamt %", "XIRR p.a.", "Seit")) { Test-AmountColumn $h | Should -BeFalse }
+    }
+}

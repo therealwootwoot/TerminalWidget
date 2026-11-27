@@ -1515,6 +1515,14 @@ function Invoke-SmokeTest {
                 $r = @($g.Rects)[$vi]
                 $hit = Get-KpiTileAt (New-Object System.Drawing.Point(($r.X + 5), ($r.Y + 5)))
                 if ($null -eq $hit -or [string]$hit.Id -ne "Drawdown") { return "tile hit test: $($hit.Id)" }
+                $wasPriv = [bool]$script:Config.PrivacyMode
+                try {
+                    $script:Config.PrivacyMode = $true; Update-AnalysisPerf; $ac.Dlg.Refresh()
+                    foreach ($t in @($ac.Kpi | Where-Object { $_.Id -in @("Value", "Result", "Div", "Unreal", "Real", "DivYear", "Fees") })) {
+                        if ([string]$t.Text -match '\d') { return "privacy: tile $($t.Id) shows $($t.Text)" }
+                    }
+                    & $script:SmokeShot "36-analysis-tiles-privacy" $ac.Dlg
+                } finally { $script:Config.PrivacyMode = $wasPriv; Update-AnalysisPerf }
                 Show-AnalysisPage (Get-KpiTilePage "Drawdown")
                 if ([string]$ac.Page -ne "Risk") { return "tile did not lead to the risk page" }
                 return ""

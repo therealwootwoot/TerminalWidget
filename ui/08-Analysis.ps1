@@ -254,7 +254,7 @@ function Update-AnalysisPerf {
         try {
             $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
             $ac.Kpi = @($ac.Kpi) + @(Get-AnalysisMoreTiles -Model $m -Base ([string]$b))
-            $ac.Kpi = @(Select-KpiTiles $ac.Kpi)
+            $ac.Kpi = @(Select-KpiTiles (Protect-KpiTiles $ac.Kpi ([bool]$script:Config.PrivacyMode)))
         } catch { $ac.Kpi = @(); Write-WidgetLog "Analysis tiles failed: $($_.Exception.Message)" "WARN" }
         $ac.Sum.Text = ((@($bl) + $dateNote) -join "`r`n")
         $ac.Sum.ForeColor = $script:Pal.Muted

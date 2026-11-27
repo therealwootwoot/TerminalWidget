@@ -5041,6 +5041,18 @@ function Get-AnalysisExtraTiles {
     return $out
 }
 
+function Protect-KpiTiles {
+    # privacy mode: money tiles show dots, percentages and ratios stay
+    param($Tiles, [bool]$On = $false)
+    if (-not $On) { return $Tiles }
+    return @(foreach ($t in @($Tiles)) {
+        if ([string]$t.Id -notin @("Value", "Result", "Div", "Window", "Unreal", "Real", "DivYear", "Fees")) { $t; continue }
+        $sub = [string]$t.Sub
+        if ([string]$t.Id -eq "Value") { $sub = "Investiert " + (Protect-Amount "0" $true) }
+        [PSCustomObject]@{ Id = $t.Id; Label = $t.Label; Text = (Protect-Amount ([string]$t.Text) $true); Sub = $sub; Kind = $t.Kind }
+    })
+}
+
 function Get-TileGrid {
     # places Count tiles in as few rows as possible (at most PerRowMax each)
     # -> @{ Rows; Height; Rects = @{ X; Y; W; H } }
@@ -5486,10 +5498,11 @@ function Test-AmountColumn {
     $h = ConvertTo-SearchKey $Header
     if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
     foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
+                     "realisiert", "realized", "realised",
                      "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
         if ($h.Contains($w)) { return $true }
     }
-    return $false
+    return ($h -eq "gesamt")   # the money column next to "Gesamt %"
 }
 
 function Hide-AmountsInText {
