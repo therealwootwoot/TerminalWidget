@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "11.4"
+$script:AppVersion    = "11.6"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1054,6 +1054,7 @@ $defaultConfig = [PSCustomObject]@{
     ColumnSetMap          = $null              # "Layout:x" / "Group:y" -> column set name
     KeyMap                = $null              # action -> own shortcut
     Favorites             = @()
+    SavingsCalc           = $null              # v11.6: assumptions of the savings calculator
     KpiTiles              = @()                # empty = all, default order
     UserProfiles          = @()
     ActiveProfile         = ""
