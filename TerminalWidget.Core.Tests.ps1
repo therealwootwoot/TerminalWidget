@@ -3387,3 +3387,57 @@ Describe "English run-time texts (v11.2)" {
         ConvertTo-EnglishStatus "" | Should -BeExactly ""
     }
 }
+
+Describe "One position in detail (v11.4)" {
+    BeforeAll {
+        $mk = { param($tk, $type, $date, $sh, $px, $fee, $br) [PSCustomObject]@{ Ticker = $tk; Type = $type; Date = $date; Shares = $sh; Price = $px; Fee = $fee; Currency = "EUR"; Broker = $br } }
+        $script:ptx = @(
+            (& $mk "ABC" "Kauf" "2025-01-10" 10 100 5 "Flatex"), (& $mk "ABC" "Kauf" "2025-06-10" 10 120 5 "Scalable"),
+            (& $mk "ABC" "Verkauf" "2026-02-10" 5 150 5 "Flatex"), (& $mk "ABC" "Dividende" "2026-03-10" 0 30 8 "Flatex"),
+            (& $mk "XYZ" "Kauf" "2025-01-10" 1 1 0 ""))
+        $script:det = Get-PositionDetail -Transactions $ptx -Ticker "abc" -PriceNow 130 -Today "2026-11-27"
+    }
+    It "adds up cost, result and income of this ticker only" {
+        $det.Shares | Should -Be 15
+        $det.Cost | Should -Be 1657.5
+        $det.AvgCost | Should -Be 110.5
+        $det.Value | Should -Be 1950
+        $det.Unreal | Should -Be 292.5
+        $det.Real | Should -Be 192.5
+        $det.Div | Should -Be 22
+        $det.Div12 | Should -Be 22
+        $det.Total | Should -Be 507
+        $det.Fees | Should -Be 15
+        $det.Orders | Should -Be 3
+        $det.HoldDays | Should -Be 686
+        $det.Xirr | Should -BeGreaterThan 0.1
+    }
+    It "splits the figures per year and per broker" {
+        @($det.Years).Count | Should -Be 2
+        @($det.Years)[0].Year | Should -Be "2026"
+        @($det.Years)[0].Sold | Should -Be 745
+        @($det.Years)[1].Bought | Should -Be 2210
+        @($det.Years)[1].Fees | Should -Be 10
+        $f = @($det.Brokers | Where-Object { $_.Broker -eq "Flatex" })[0]
+        $f.Shares | Should -Be 5
+        $f.Orders | Should -Be 2
+        $f.Fees | Should -Be 10
+    }
+    It "lists the newest booking first" { @($det.Bookings)[0].Date | Should -Be "2026-03-10" }
+    It "copes with a position without bookings" {
+        $e = Get-PositionDetail -Transactions $ptx -Ticker "NONE" -PriceNow 10 -PortfolioShares 3
+        $e.HasBookings | Should -BeFalse
+        $e.Value | Should -Be 30
+        [double]::IsNaN($e.Total) | Should -BeTrue
+    }
+    It "builds ten tiles and hides amounts in privacy mode" {
+        @(Get-PositionTiles -Detail $det -Share 40).Count | Should -Be 10
+        $p = @(Get-PositionTiles -Detail $det -Share 40 -Privacy $true)
+        foreach ($id in @("Value", "Cost", "Unreal", "Total", "Real", "Div", "Fees")) {
+            $t = @($p | Where-Object { $_.Id -eq $id })[0]
+            $t.Text | Should -Not -Match "\d"
+        }
+        @($p | Where-Object { $_.Id -eq "Value" })[0].Sub | Should -Not -Match "\d"
+        @($p | Where-Object { $_.Id -eq "Share" })[0].Text | Should -Be "40.0 %"
+    }
+}

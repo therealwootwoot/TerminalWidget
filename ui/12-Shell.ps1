@@ -1411,6 +1411,8 @@ $miRowNews  = $rowMenu.Items.Add("Nachrichten (News-Tab)")
 $miRowCmp   = $rowMenu.Items.Add("Im Chart vergleichen")
 $miRowDes   = $rowMenu.Items.Add("Beschreibung (DES)")
 $miRowTa    = $rowMenu.Items.Add("Ticker-Analyse: Signale + Kennzahlen (TA)")
+$miRowPos   = $rowMenu.Items.Add("Position im Detail (POS)")
+$miRowPos.Add_Click({ Show-PositionDialog $script:RowMenuSym })
 $miRowNote  = $rowMenu.Items.Add("Notiz ...")
 $miRowSep   = New-Object System.Windows.Forms.ToolStripSeparator
 [void]$rowMenu.Items.Add($miRowSep)
@@ -1470,6 +1472,7 @@ $script:RowMenuHandler = {
     $gn = New-Object System.Windows.Forms.ToolStripMenuItem((Tr "Neue Gruppe ..."))
     $gn.Add_Click({ $nm = New-WatchGroup -Symbol $script:RowMenuSym; if ($nm) { Update-WatchGroupCombo; Refresh-WatchlistAndAlerts } })
     [void]$miRowGroup.DropDownItems.Add($gn)
+    $miRowPos.Visible = (Test-HasPosition $script:RowMenuSym)
     $rowMenu.Show($sender, $sender.PointToClient([System.Windows.Forms.Cursor]::Position))
 }
 $dgvWatchlist.Add_CellMouseDown($script:RowMenuHandler)

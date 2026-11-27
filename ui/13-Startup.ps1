@@ -1551,6 +1551,30 @@ function Invoke-SmokeTest {
             } 1500
         } finally { $script:Config.KpiTiles = $keep; Save-Config }
     } 30000
+    Invoke-SmokeStep "V11.4 position detail" {
+        $wasPriv = [bool]$script:Config.PrivacyMode
+        try {
+            $script:Config.PrivacyMode = $false
+            & $probeRun { [void](Invoke-TerminalCommand "NVDA POS") } {
+                $c = $script:PosCtl
+                if ($null -eq $c) { return "window not open" }
+                $c.Dlg.Refresh()
+                if (@($c.Tiles).Count -ne 10) { return "tiles: $(@($c.Tiles).Count)" }
+                if ($c.Bookings.Rows.Count -lt 1 -or $c.Years.Rows.Count -lt 1 -or $c.Brokers.Rows.Count -lt 1) { return "tables: bookings $($c.Bookings.Rows.Count), years $($c.Years.Rows.Count), brokers $($c.Brokers.Rows.Count)" }
+                & $script:SmokeShot "44-position" $c.Dlg
+                $script:Config.PrivacyMode = $true; Update-PositionView; $c.Dlg.Refresh()
+                foreach ($t in @($c.Tiles | Where-Object { $_.Id -in @("Value", "Cost", "Unreal", "Total", "Real", "Div", "Fees") })) {
+                    if ([string]$t.Text -match '\d') { return "privacy: tile $($t.Id) shows $($t.Text)" }
+                }
+                if ([string]$c.Bookings.Rows[0].Cells["Shares"].Value -match '\d') { return "privacy: booking shares visible" }
+                & $script:SmokeShot "45-position-privacy" $c.Dlg
+                $script:Config.PrivacyMode = $false; Update-PositionView
+                return ""
+            } 6000
+            if (-not (Test-HasPosition "NVDA") -or (Test-HasPosition "NOPE.XX")) { throw "position check wrong" }
+            if ((Get-KpiTileTicker ([PSCustomObject]@{ Id = "Best"; Text = "NVDA  +5.0 %" })) -ne "NVDA") { throw "tile ticker" }
+        } finally { $script:Config.PrivacyMode = $wasPriv }
+    } 8000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
