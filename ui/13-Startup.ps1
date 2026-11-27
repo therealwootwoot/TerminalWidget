@@ -1528,6 +1528,18 @@ function Invoke-SmokeTest {
                 return ""
             } 12000
             $script:Config.KpiTiles = @()
+            $wasPriv = [bool]$script:Config.PrivacyMode
+            try {
+                $script:Config.PrivacyMode = $true
+                & $probeRun { Show-AnalysisDialog -Page "Perf" } {
+                    $ac = $script:AnaCtl
+                    if ($null -eq $ac -or $null -eq $ac.Model -or $null -eq $ac.Model.Series) { return "" }
+                    if ([string]$ac.Sum.Text -match '\d[.,]\d\d EUR') { return "privacy: summary shows $($ac.Sum.Text)" }
+                    $ac.Dlg.Refresh()
+                    & $script:SmokeShot "37-analysis-opened-private" $ac.Dlg
+                    return ""
+                } 12000
+            } finally { $script:Config.PrivacyMode = $wasPriv }
             & $probeRun { Show-KpiTilesDialog } {
                 if ($null -eq $script:KpiCtl) { return "tile window not open" }
                 if ($script:KpiCtl.List.CheckedItems.Count -ne 10) { return "checked: $($script:KpiCtl.List.CheckedItems.Count)" }
@@ -1535,7 +1547,7 @@ function Invoke-SmokeTest {
                 return ""
             } 1500
         } finally { $script:Config.KpiTiles = $keep; Save-Config }
-    } 16000
+    } 30000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
