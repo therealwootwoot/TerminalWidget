@@ -660,7 +660,7 @@ if (-not (Get-Command Get-LayoutNames -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$script:AppVersion    = "10.4"
+$script:AppVersion    = "10.6"
 $script:SchemaVersion = 5
 $script:AppTitle      = "Terminal Widget v$($script:AppVersion)"
 
@@ -1067,6 +1067,9 @@ $defaultConfig = [PSCustomObject]@{
     GoalDepotValue        = 0.0
     GoalDividendYear      = 0.0
     OverviewOnStart       = $false             # 10.2
+    DepotGoals            = @()                # 10.6: @{ Id; Value; Dividend } per depot
+    GoalAllValue          = 0.0                # 10.6: goals for all depots together
+    GoalAllDividend       = 0.0
 }
 
 # v5.3: untouched copy of the defaults ("changed" markers, reset page, settings import)
@@ -1195,6 +1198,16 @@ function Set-DepotPaths {
 
 if ([string]$script:Config.ActiveDepot -and -not (@(Get-DepotList | Where-Object { $_.Id -eq [string]$script:Config.ActiveDepot }).Count)) { $script:Config.ActiveDepot = "" }
 Set-DepotPaths ([string]$script:Config.ActiveDepot)
+
+function Convert-LegacyGoals {
+    # before 10.6 there was one pair of goals for whatever depot was open: it becomes the main depot's
+    if (@($script:Config.DepotGoals | Where-Object { $null -ne $_ }).Count -gt 0) { return }
+    $v = [double]$script:Config.GoalDepotValue; $d = [double]$script:Config.GoalDividendYear
+    if ($v -le 0 -and $d -le 0) { return }
+    $script:Config.DepotGoals = Set-DepotGoal -Goals @() -Id "" -Value $v -Dividend $d
+    $script:Config.GoalDepotValue = 0.0; $script:Config.GoalDividendYear = 0.0
+}
+Convert-LegacyGoals
 
 # Portfolio Holdings
 function Read-PortfolioData {

@@ -76,14 +76,15 @@ function Set-GoalsGridMode {
 # goals
 # ==============================================================================
 function Get-DividendForecast {
-    # expected dividends of the next 12 months for the active depot, from the
+    # expected dividends of the next 12 months for one depot (default: the open one), from the
     # same data as the analysis page. Loading = positions without data yet.
-    param([string]$Base)
+    param([string]$Base, $Holdings = $null)
+    if ($null -eq $Holdings) { $Holdings = $script:Portfolio }
     $today = (Get-Date).ToString("yyyy-MM-dd")
     $res = @{ Income = 0.0; Loading = 0; Positions = 0 }
-    foreach ($k in @($script:Portfolio.Keys)) {
+    foreach ($k in @($Holdings.Keys)) {
         $sym = ([string]$k).ToUpper()
-        $sh = [double]$script:Portfolio[$k].Shares
+        $sh = [double]$Holdings[$k].Shares
         if ($sh -le 0) { continue }
         $res.Positions++
         $dh = $script:DivHist[$sym]
@@ -91,7 +92,7 @@ function Get-DividendForecast {
         $st = Get-DividendStats -Dividends $dh.Divs -AsOf $today
         if ($null -eq $st) { continue }
         $cur = if ($dh.Currency) { [string]$dh.Currency } else { Get-InstrumentCurrency $sym }
-        if (-not $cur) { $cur = [string]$script:Portfolio[$k].Currency }
+        if (-not $cur) { $cur = [string]$Holdings[$k].Currency }
         foreach ($pj in @(Get-DividendProjection -Dividends $dh.Divs -AsOf $today -Stats $st)) {
             $res.Income += [double](Convert-CurrencyValue -Amount ([double]$pj.Amount * $sh) -FromCurrency $cur -ToCurrency $Base)
         }
@@ -99,28 +100,137 @@ function Get-DividendForecast {
     return $res
 }
 
+function Get-DepotHoldings {
+    # symbol -> position of one depot; the open one from memory, others from their file (read only)
+    param([string]$Id)
+    if ($Id -eq [string]$script:Config.ActiveDepot) { return $script:Portfolio }
+    $dir = if ($Id) { Join-Path $script:DepotDir $Id } else { $script:DataDir }
+    $res = @{}
+    $raw = Load-JsonState -Path (Join-Path $dir "portfolio.json") -DefaultValue $null
+    if ($null -ne $raw) {
+        foreach ($prop in $raw.PSObject.Properties) {
+            if ($null -eq $prop.Value) { continue }
+            $cur = Get-NormalizedCurrencyCode ([string]$prop.Value.Currency)
+            if (-not $cur) { $cur = "EUR" }
+            $res[$prop.Name.ToUpper()] = [PSCustomObject]@{ Ticker = $prop.Name.ToUpper(); Shares = [double]$prop.Value.Shares; AvgPrice = [double]$prop.Value.AvgPrice; Currency = $cur }
+        }
+    }
+    return $res
+}
+
+function Get-HoldingsValue {
+    # market value in Base. Missing = positions without a quote or exchange rate (then Value is only a part)
+    param($Holdings, [string]$Base)
+    $res = @{ Value = 0.0; Missing = 0; Cached = 0; Count = 0 }
+    foreach ($k in @($Holdings.Keys)) {
+        $sym = ([string]$k).ToUpper()
+        $sh = [double]$Holdings[$k].Shares
+        if ($sh -le 0) { continue }
+        $res.Count++
+        $q = $script:QuoteStore[$sym]
+        if ($null -eq $q -or [double]$q.Price -le 0) { $res.Missing++; continue }
+        $cur = [string]$q.Currency
+        if ($cur -ne "EUR" -and $cur -ne $Base -and -not $script:FxFromEur.ContainsKey($cur)) { $res.Missing++; continue }
+        if ([bool]$q.FromCache) { $res.Cached++ }
+        $res.Value += $sh * (Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency $cur -ToCurrency $Base)
+    }
+    return $res
+}
+
+function Get-GoalRows {
+    # one row per depot and, with several depots, one for all together (Id "*")
+    param([string]$Base)
+    $rows = @()
+    $sum = @{ Value = 0.0; Missing = 0; Cached = 0; Income = 0.0; Loading = 0 }
+    foreach ($d in @(Get-DepotList)) {
+        $h = Get-DepotHoldings -Id ([string]$d.Id)
+        $v = Get-HoldingsValue -Holdings $h -Base $Base
+        $f = Get-DividendForecast -Base $Base -Holdings $h
+        $goal = Get-DepotGoal -Goals $script:Config.DepotGoals -Id ([string]$d.Id)
+        $rows += [PSCustomObject]@{ Id = [string]$d.Id; Name = [string]$d.Name; Value = $v.Value; Missing = $v.Missing; Cached = $v.Cached; ValueGoal = $goal.Value; Income = $f.Income; Loading = $f.Loading; DividendGoal = $goal.Dividend }
+        $sum.Value += $v.Value; $sum.Missing += $v.Missing; $sum.Cached += $v.Cached; $sum.Income += $f.Income; $sum.Loading += $f.Loading
+    }
+    if ($rows.Count -gt 1) {
+        $rows += [PSCustomObject]@{ Id = "*"; Name = (Tr "Alle Depots"); Value = $sum.Value; Missing = $sum.Missing; Cached = $sum.Cached; ValueGoal = [double]$script:Config.GoalAllValue; Income = $sum.Income; Loading = $sum.Loading; DividendGoal = [double]$script:Config.GoalAllDividend }
+    }
+    return $rows
+}
+
+function Start-GoalDataLoad {
+    # quotes for symbols that only other depots hold (the regular refresh does not
+    # ask for them) and dividend histories for all depots, both in the background
+    $all = @{}
+    foreach ($d in @(Get-DepotList)) {
+        $h = Get-DepotHoldings -Id ([string]$d.Id)
+        foreach ($k in @($h.Keys)) { if ([double]$h[$k].Shares -gt 0) { $all[([string]$k).ToUpper()] = $h[$k] } }
+    }
+    $live = @{}
+    foreach ($s in @(@($script:Portfolio.Keys) + @($script:Config.Watchlist))) { if ($s) { $live[([string]$s).ToUpper()] = $true } }
+    $urls = @{}
+    foreach ($s in @($all.Keys)) { if (-not $live.ContainsKey($s)) { $urls[$s] = Get-ChartUrl -Symbol $s -Interval "1h" -Range "5d" -PrePost } }
+    if ($urls.Count -gt 0) {
+        Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
+            param($Box, $Ctx)
+            foreach ($s in @($Ctx.Urls.Keys)) {
+                $j = $Box.Results[$Ctx.Urls[$s]]
+                if ($null -eq $j -or $null -eq $j.chart -or $null -eq $j.chart.result) { continue }
+                try { Update-QuoteFromResult -Sym $s -R @($j.chart.result)[0] -RsiPeriod ([int]$script:Config.RsiPeriod) }
+                catch { Write-WidgetLog "Goal quote ${s}: $($_.Exception.Message)" "WARN" }
+            }
+            if ($null -ne $script:GoalCtl) { Update-GoalsView }
+        }
+    }
+    Start-DividendLoad -Positions $all
+}
+
 function Update-GoalsView {
     $gc = $script:GoalCtl
     if ($null -eq $gc) { return }
     $base = [string]$script:Config.Currency
     $priv = [bool]$script:Config.PrivacyMode
-    $money = { param([double]$v) Protect-Amount -Text ("{0:N0} {1}" -f $v, $base) -On $priv }
-    $show = {
-        param($Bar, $Label, [double]$Current, [double]$Target, [string]$What)
-        $p = Get-GoalProgress -Current $Current -Target $Target
-        if ($null -eq $p) { $Bar.Value = 0; $Label.Text = "{0}: {1}  -  {2}" -f $What, (& $money $Current), (Tr "kein Ziel gesetzt"); return }
-        $Bar.Value = [int][math]::Round($p.BarPct)
-        $tail = if ($p.Reached) { Tr "Ziel erreicht" } else { (Tr "es fehlen") + " " + (& $money $p.Remaining) }
-        $Label.Text = "{0}: {1} / {2}  ({3:N0}%)  -  {4}" -f $What, (& $money $Current), (& $money $Target), $p.Pct, $tail
+    $money = { param([double]$v) Protect-Amount -Text ("{0:N0}" -f $v) -On $priv }
+    $dash = [string][char]0x2013
+    $rows = @(Get-GoalRows -Base $base)
+    $gg = $gc.Goals
+    # goal cells are only filled when the rows are new: a later refresh must not overwrite typing
+    $fresh = ($gg.Rows.Count -ne $rows.Count)
+    if ($fresh) {
+        $gg.Rows.Clear()
+        foreach ($r in $rows) {
+            $i = $gg.Rows.Add()
+            $gg.Rows[$i].Tag = $r.Id
+            $gg.Rows[$i].Cells["Depot"].Value = $r.Name
+            foreach ($pair in @(@("ValueGoal", $r.ValueGoal), @("DivGoal", $r.DividendGoal))) {
+                $gg.Rows[$i].Cells[$pair[0]].Value = if ($priv) { Protect-Amount -Text "0" -On $true } elseif ([double]$pair[1] -gt 0) { ([double]$pair[1]).ToString("0.##") } else { "" }
+            }
+            if ($r.Id -eq "*") { $gg.Rows[$i].DefaultCellStyle.Font = $fontUiBold }
+        }
     }
-    $pt = Get-PortfolioDayTotals -Currency $base
-    if ($pt.Ok) { & $show $gc.Bar1 $gc.Lbl1 ([double]$pt.Value) ([double]$script:Config.GoalDepotValue) (Tr "Depotwert") }
-    else { $gc.Bar1.Value = 0; $gc.Lbl1.Text = (Tr "Depotwert") + ": " + (Tr "noch keine Kurse für alle Positionen") }
-    $fc = Get-DividendForecast -Base $base
-    & $show $gc.Bar2 $gc.Lbl2 ([double]$fc.Income) ([double]$script:Config.GoalDividendYear) (Tr "Dividenden, Prognose 12 Monate")
+    $missing = 0; $cached = 0; $loading = 0
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $r = $rows[$i]; $row = $gg.Rows[$i]
+        if ($r.Id -ne "*") { $missing += $r.Missing; $cached += $r.Cached; $loading += $r.Loading }
+        # incomplete sums are not shown as a number: they would look like a loss
+        $row.Cells["Value"].Value = if ($r.Missing -gt 0) { $dash } else { (& $money $r.Value) + $(if ($r.Cached -gt 0) { " *" } else { "" }) }
+        $row.Cells["Income"].Value = (& $money $r.Income) + $(if ($r.Loading -gt 0) { " +" } else { "" })
+        $saved = if ($r.Id -eq "*") { @([double]$script:Config.GoalAllValue, [double]$script:Config.GoalAllDividend) } else { $g0 = Get-DepotGoal -Goals $script:Config.DepotGoals -Id $r.Id; @($g0.Value, $g0.Dividend) }
+        $pv = if ($r.Missing -gt 0) { $null } else { Get-GoalProgress -Current $r.Value -Target $saved[0] }
+        $pd = Get-GoalProgress -Current $r.Income -Target $saved[1]
+        foreach ($pair in @(@("ValuePct", $pv), @("DivPct", $pd))) {
+            $cell = $row.Cells[$pair[0]]
+            $cell.Tag = $pair[1]
+            $cell.Value = if ($null -eq $pair[1]) { "" } else { "{0:N0} %" -f $pair[1].Pct }
+            $cell.ToolTipText = if ($null -eq $pair[1]) { "" } elseif ($pair[1].Reached) { Tr "Ziel erreicht" } else { (Tr "es fehlen") + " " + (& $money $pair[1].Remaining) + " " + $base }
+        }
+    }
     $got = [double](Get-RealizedTotal -Year (Get-Date).Year -Type "Dividende")
-    $gc.Lbl3.Text = (Tr "Dieses Jahr gebucht: {0}") -f (Protect-Amount -Text ("{0:N2} {1}" -f $got, $base) -On $priv)
-    if ($fc.Loading -gt 0) { $gc.Lbl3.Text += "   |   " + ((Tr "Prognose unvollständig: {0} von {1} Positionen ohne Dividendendaten") -f $fc.Loading, $fc.Positions) }
+    $info = @((Tr "In diesem Depot dieses Jahr gebucht: {0}") -f (Protect-Amount -Text ("{0:N2} {1}" -f $got, $base) -On $priv))
+    if ($missing -gt 0) { $info += (Tr "{0} Position(en) ohne Kurs") -f $missing }
+    if ($cached -gt 0) { $info += Tr "* mit zwischengespeicherten Kursen" }
+    if ($loading -gt 0) { $info += (Tr "+ Dividendendaten fehlen noch für {0} Position(en)") -f $loading }
+    $gc.Lbl3.Text = $info -join "   |   "
+    $gg.ClearSelection()
+    $gg.Invalidate()
 
     $byBroker = ($gc.Group.SelectedIndex -eq 1)
     Set-GoalsGridMode $byBroker
@@ -132,61 +242,96 @@ function Update-GoalsView {
     if ($fr.Approx) { $gc.Note.Text += " " + (Tr "Teilweise mit heutigem Wechselkurs gerechnet (Tageskurse lädt die Analyse).") }
 }
 
-function Show-GoalsCostsDialog {
-    $dlg = New-DialogForm -Title "Ziele und Kosten" -W (S 760) -H (S 520) -Key "GoalsCosts"
-    $base = [string]$script:Config.Currency
-    [void](New-V8Label $dlg ((Tr "Ziele für das Depot '{0}', in {1} (leer = kein Ziel)") -f (Get-DepotName ([string]$script:Config.ActiveDepot)), $base) (S 12) (S 10) (S 736))
-    [void](New-V8Label $dlg (Tr "Depotwert") (S 12) (S 40) (S 90))
-    $fmt = { param([double]$v) if ($v -gt 0) { $v.ToString("0.##") } else { "" } }
-    $t1 = New-V8Text $dlg (& $fmt ([double]$script:Config.GoalDepotValue)) (S 104) (S 36) (S 110)
-    [void](New-V8Label $dlg (Tr "Dividenden pro Jahr") (S 232) (S 40) (S 130))
-    $t2 = New-V8Text $dlg (& $fmt ([double]$script:Config.GoalDividendYear)) (S 366) (S 36) (S 110)
-    $bSave = New-V8Button $dlg (Tr "Ziele speichern") (S 490) (S 34) (S 130)
-    $bCalc = New-V8Button $dlg (Tr "Neu berechnen") (S 628) (S 34) (S 120)
-    $mk = {
-        param([int]$Y)
-        $l = New-V8Label $dlg "" (S 12) (S $Y) (S 736)
-        $b = New-Object System.Windows.Forms.ProgressBar
-        $b.SetBounds((S 12), (S ($Y + 20)), (S 736), (S 12)); $b.Minimum = 0; $b.Maximum = 100
-        $dlg.Controls.Add($b)
-        return @($l, $b)
+function Save-GoalsFromGrid {
+    # -> "" or an error text; nothing is saved when one cell is not a number
+    $gg = $script:GoalCtl.Goals
+    [void]$gg.EndEdit()
+    $new = @()
+    foreach ($row in @($gg.Rows)) {
+        $vals = @()
+        foreach ($col in @("ValueGoal", "DivGoal")) {
+            $t = ([string]$row.Cells[$col].Value).Trim()
+            if ($t -and -not (Test-DecimalInput $t)) { return ((Tr "Bitte eine Zahl eingeben.") + " (" + [string]$row.Cells["Depot"].Value + ": " + $t + ")") }
+            $vals += [math]::Max(0.0, $(if ($t) { Parse-DecimalInput $t } else { 0.0 }))
+        }
+        $new += ,@([string]$row.Tag, $vals[0], $vals[1])
     }
-    $g1 = & $mk 76
-    $g2 = & $mk 118
-    $l3 = New-V8Label $dlg "" (S 12) (S 158) (S 736) -Muted
-    [void](New-V8Label $dlg (Tr "Kosten und Zinsen je Jahr") (S 12) (S 188) (S 400))
-    $cbGroup = New-V8Combo $dlg @((Tr "je Depot"), (Tr "je Broker")) (Tr "je Depot") (S 598) (S 183) (S 150)
+    foreach ($n in $new) {
+        if ($n[0] -eq "*") { $script:Config.GoalAllValue = [double]$n[1]; $script:Config.GoalAllDividend = [double]$n[2] }
+        else { $script:Config.DepotGoals = Set-DepotGoal -Goals $script:Config.DepotGoals -Id $n[0] -Value $n[1] -Dividend $n[2] }
+    }
+    Save-Config
+    return ""
+}
+
+function Write-GoalBarCell {
+    # percent cells of the goal table: number with a bar underneath
+    param($Grid, $E)
+    if ($E.RowIndex -lt 0 -or $E.ColumnIndex -lt 0) { return }
+    $name = $Grid.Columns[$E.ColumnIndex].Name
+    if ($name -ne "ValuePct" -and $name -ne "DivPct") { return }
+    $prog = $Grid.Rows[$E.RowIndex].Cells[$E.ColumnIndex].Tag
+    if ($null -eq $prog) { return }
+    $E.PaintBackground($E.CellBounds, $false)
+    $b = $E.CellBounds
+    $x = $b.X + (S 6); $w = [math]::Max((S 10), $b.Width - (S 12))
+    $col = if ($prog.Reached) { $colGreen } else { $script:Pal.Accent }
+    $track = New-Object System.Drawing.SolidBrush($script:Pal.Input); $fill = New-Object System.Drawing.SolidBrush($col)
+    try {
+        $E.Graphics.FillRectangle($track, $x, ($b.Bottom - (S 7)), $w, (S 4))
+        $E.Graphics.FillRectangle($fill, $x, ($b.Bottom - (S 7)), [int]($w * $prog.BarPct / 100.0), (S 4))
+        $r = New-Object System.Drawing.Rectangle($x, $b.Y, $w, ($b.Height - (S 7)))
+        [System.Windows.Forms.TextRenderer]::DrawText($E.Graphics, [string]$E.FormattedValue, $fontUi, $r, $script:Pal.Text, [System.Windows.Forms.TextFormatFlags]"Right, VerticalCenter")
+    } finally { $track.Dispose(); $fill.Dispose() }
+    $E.Handled = $true
+}
+
+function Show-GoalsCostsDialog {
+    $dlg = New-DialogForm -Title "Ziele und Kosten" -W (S 760) -H (S 540) -Key "GoalsCosts2"
+    $base = [string]$script:Config.Currency
+    $priv = [bool]$script:Config.PrivacyMode
+    [void](New-V8Label $dlg ((Tr "Ziele je Depot in {0} - in die Ziel-Spalten tippen (leer = kein Ziel)") -f $base) (S 12) (S 14) (S 470))
+    $bSave = New-V8Button $dlg (Tr "Ziele speichern") (S 490) (S 8) (S 130)
+    $bCalc = New-V8Button $dlg (Tr "Neu berechnen") (S 628) (S 8) (S 120)
+    $gg = New-V8Grid $dlg (S 12) (S 42) (S 736) (S 150) -Editable
+    $gg.AllowUserToResizeRows = $false
+    $gg.RowTemplate.Height = S 28
+    foreach ($c in @(@("Depot", "Depot", 120), @("Value", "Depotwert", 90), @("ValueGoal", "Ziel Wert", 85), @("ValuePct", "Stand", 90), @("Income", "Dividenden 12 M", 95), @("DivGoal", "Ziel Dividenden", 95), @("DivPct", "Stand ", 90))) {
+        if ($c[0] -in @("ValueGoal", "DivGoal")) { Add-V8Column $gg $c[0] $c[1] $c[2] } else { Add-V8Column $gg $c[0] $c[1] $c[2] -ReadOnly }
+    }
+    foreach ($n in @("Value", "ValueGoal", "Income", "DivGoal")) { $gg.Columns[$n].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
+    foreach ($n in @("ValueGoal", "DivGoal")) { $gg.Columns[$n].DefaultCellStyle.BackColor = $script:Pal.Input; $gg.Columns[$n].ReadOnly = $priv }
+    $bSave.Enabled = (-not $priv)
+    $gg.Add_CellPainting({ param($s, $e) Write-GoalBarCell -Grid $s -E $e })
+    $l3 = New-V8Label $dlg "" (S 12) (S 198) (S 736) (S 32) -Muted
+    [void](New-V8Label $dlg (Tr "Kosten und Zinsen je Jahr") (S 12) (S 238) (S 400))
+    $cbGroup = New-V8Combo $dlg @((Tr "je Depot"), (Tr "je Broker")) (Tr "je Depot") (S 598) (S 233) (S 150)
     $cbGroup.AccessibleName = Tr "Gruppierung"
-    $g = New-V8Grid $dlg (S 12) (S 210) (S 736) (S 254)
+    $g = New-V8Grid $dlg (S 12) (S 262) (S 736) (S 222)
     $cols = @(@("Year", "Jahr", 50), @("Depot", "Depot", 120), @("Orders", "Orders", 50), @("OrderFees", "Ordergebühren", 90), @("AccFees", "Kontogebühren", 90), @("Fees", "Kosten gesamt", 90), @("Interest", "Zinsen", 80))
     foreach ($c in $cols) { Add-V8Column $g $c[0] $c[1] $c[2] -ReadOnly }
     foreach ($n in @("Orders", "OrderFees", "AccFees", "Fees", "Interest")) { $g.Columns[$n].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
-    $note = New-V8Label $dlg "" (S 12) (S 472) (S 620) (S 40) -Muted
-    $no = New-V8Button $dlg (Tr "Schließen") (S 652) (S 482) (S 96)
+    $note = New-V8Label $dlg "" (S 12) (S 492) (S 620) (S 40) -Muted
+    $no = New-V8Button $dlg (Tr "Schließen") (S 652) (S 502) (S 96)
     $no.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $dlg.CancelButton = $no
-    $script:GoalCtl = @{ Dlg = $dlg; T1 = $t1; T2 = $t2; Lbl1 = $g1[0]; Bar1 = $g1[1]; Lbl2 = $g2[0]; Bar2 = $g2[1]; Lbl3 = $l3; Grid = $g; Note = $note; Group = $cbGroup }
+    $script:GoalCtl = @{ Dlg = $dlg; Goals = $gg; Lbl3 = $l3; Grid = $g; Note = $note; Group = $cbGroup }
     $cbGroup.Add_SelectedIndexChanged({ Update-GoalsView })
     $bSave.Add_Click({
-        $vals = @()
-        foreach ($tb in @($script:GoalCtl.T1, $script:GoalCtl.T2)) {
-            if ($tb.Text.Trim() -and -not (Test-DecimalInput $tb.Text)) { Show-InfoBox (Tr "Bitte eine Zahl eingeben.") (Tr "Ziele und Kosten"); return }
-            $vals += [math]::Max(0.0, $(if ($tb.Text.Trim()) { Parse-DecimalInput $tb.Text } else { 0.0 }))
-        }
-        $script:Config.GoalDepotValue = [double]$vals[0]
-        $script:Config.GoalDividendYear = [double]$vals[1]
-        Save-Config
+        $err = Save-GoalsFromGrid
+        if ($err) { Show-InfoBox $err (Tr "Ziele und Kosten"); return }
         Update-GoalsView
+        Set-TransientStatus (Tr "Ziele gespeichert") 3
     })
-    $bCalc.Add_Click({ Update-GoalsView })
+    $bCalc.Add_Click({ if (-not $script:SmokeMode) { Start-GoalDataLoad }; Update-GoalsView })
     $dlg.Add_Shown({
-        if (-not $script:SmokeMode) { Start-DividendLoad }
+        if (-not $script:SmokeMode) { Start-GoalDataLoad }
         Update-GoalsView
     })
     # dividend data arrives in the background: look again for a short while
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 4000
     $script:GoalTicks = 0
-    $timer.Add_Tick({ param($sender, $e) $script:GoalTicks++; Update-GoalsView; if ($script:GoalTicks -ge 3) { $sender.Stop() } })
+    $timer.Add_Tick({ param($sender, $e) $script:GoalTicks++; if ($null -ne $script:GoalCtl -and -not $script:GoalCtl.Goals.IsCurrentCellInEditMode) { Update-GoalsView }; if ($script:GoalTicks -ge 3) { $sender.Stop() } })
     $timer.Start()
     [void]$dlg.ShowDialog($form)
     $timer.Stop(); $timer.Dispose()

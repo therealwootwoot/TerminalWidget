@@ -270,6 +270,7 @@ function Remove-ActiveDepot {
     Switch-Depot ""
     try { Remove-Item -Path (Join-Path $script:DepotDir $id) -Recurse -Force -ErrorAction Stop } catch { Write-WidgetLog "Depot folder not removed: $($_.Exception.Message)" "WARN" }
     $script:Config.Depots = @(@($script:Config.Depots) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $id })
+    $script:Config.DepotGoals = Set-DepotGoal -Goals $script:Config.DepotGoals -Id $id
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
     Update-DepotCombo
     Set-TransientStatus "Depot '$name' gelöscht" 4

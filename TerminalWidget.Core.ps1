@@ -5213,7 +5213,7 @@ function Get-PortableSettingKeys {
         "NewsSources", "NewsSourcesMigrated", "NewsYahoo", "NewsYahooNotify", "NewsViewHidden", "NewsAliases",
         "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers",
         "ColorRules", "CustomThemes", "OwnTargets", "ColumnSets", "ColumnSetMap", "KeyMap", "Favorites", "KpiTiles", "UserProfiles",
-        "AlertTemplates", "EarningsLeadDays", "ExDivLeadDays", "SummaryAuto", "GoalDepotValue", "GoalDividendYear"
+        "AlertTemplates", "EarningsLeadDays", "ExDivLeadDays", "SummaryAuto", "GoalDepotValue", "GoalDividendYear", "DepotGoals", "GoalAllValue", "GoalAllDividend"
     )
 }
 
@@ -5333,7 +5333,7 @@ function Get-DiagnosticConfig {
     foreach ($k in @("PushTokenEnc", "PushTopic", "PushChatId", "PushServer", "TwelveDataKeyEnc", "FinnhubKeyEnc")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = $(if ([string]$c.$k) { "(entfernt)" } else { "" }) }
     }
-    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups", "OwnTargets", "UserProfiles", "GoalDepotValue", "GoalDividendYear", "AlertTemplates")) {
+    foreach ($k in @("Watchlist", "RecentTickers", "CommandHistory", "Depots", "TargetWeights", "WatchGroups", "OwnTargets", "UserProfiles", "GoalDepotValue", "GoalDividendYear", "DepotGoals", "GoalAllValue", "GoalAllDividend", "AlertTemplates")) {
         if ($null -ne $c.PSObject.Properties[$k]) { $c.$k = "(entfernt)" }
     }
     # v7.7: feed addresses may carry personal tokens or tickers
@@ -7042,6 +7042,26 @@ function Get-BrokerFeeOverview {
         if ($r.Volume -gt 0) { $r.Pct = $r.Fees / $r.Volume * 100.0 }
     }
     return @($rows.Values | Sort-Object -Property @{ Expression = { $_.Year }; Descending = $true }, @{ Expression = { $_.Broker }; Descending = $false })
+}
+
+# ---- goals per depot (v10.6) -------------------------------------------------
+function Get-DepotGoal {
+    # -> @{ Value; Dividend } of one depot ("" = main depot); 0 = no goal
+    param($Goals, [string]$Id = "")
+    foreach ($g in @($Goals)) {
+        if ($null -ne $g -and [string]$g.Id -eq $Id) { return [PSCustomObject]@{ Value = [double]$g.Value; Dividend = [double]$g.Dividend } }
+    }
+    return [PSCustomObject]@{ Value = 0.0; Dividend = 0.0 }
+}
+
+function Set-DepotGoal {
+    # new goal list with this depot set; without any goal the entry is dropped
+    param($Goals, [string]$Id = "", [double]$Value = 0.0, [double]$Dividend = 0.0)
+    $out = @(@($Goals) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Id })
+    if ($Value -gt 0 -or $Dividend -gt 0) {
+        $out += [PSCustomObject]@{ Id = $Id; Value = [math]::Max(0.0, $Value); Dividend = [math]::Max(0.0, $Dividend) }
+    }
+    return ,$out
 }
 
 function Get-GoalProgress {

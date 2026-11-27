@@ -55,7 +55,7 @@ function Get-OverviewData {
         Missing = $missing; Cached = $cached; Trend = $trend
         Watch = @($watch | Sort-Object @{ Expression = { [math]::Abs($_.DayPct) }; Descending = $true })
         Dates = @(Get-EventCalendar -Events $script:Events -Symbols @(@($script:Portfolio.Keys) + @($script:Config.Watchlist)) -Days 45)
-        Goal = $(if ($missing -eq 0 -and $cached -eq 0) { Get-GoalProgress -Current $total -Target ([double]$script:Config.GoalDepotValue) } else { $null })
+        Goal = $(if ($missing -eq 0 -and $cached -eq 0) { Get-GoalProgress -Current $total -Target (Get-DepotGoal -Goals $script:Config.DepotGoals -Id ([string]$script:Config.ActiveDepot)).Value } else { $null })
         News = @($script:NewsItems | Where-Object { $null -ne $_ -and $_.Title } | Sort-Object Time -Descending | Select-Object -First 12)
     }
 }

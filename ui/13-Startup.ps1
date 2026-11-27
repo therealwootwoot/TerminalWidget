@@ -1304,8 +1304,8 @@ function Invoke-SmokeTest {
     } 2500 } 4000
     Invoke-SmokeStep "V10.2 overview clicks + privacy" {
         $keepTicker = [string]$script:Config.ActiveTicker
-        $keepGoal = $script:Config.GoalDepotValue
-        $script:Config.GoalDepotValue = 10000.0
+        $keepGoal = $script:Config.DepotGoals
+        $script:Config.DepotGoals = Set-DepotGoal -Goals @() -Id ([string]$script:Config.ActiveDepot) -Value 10000.0
         $script:SmokePicked = ""
         & $probeRun { Show-OverviewDialog } {
             if ($null -eq $script:Ov) { return "window not open" }
@@ -1318,7 +1318,7 @@ function Invoke-SmokeTest {
             if ($kind -ne "Ticker") { return "click hit '$kind'" }
             return ""
         } 2500
-        $script:Config.GoalDepotValue = $keepGoal
+        $script:Config.DepotGoals = $keepGoal
         & $pump
         if ([string]$script:Config.ActiveTicker -ne $script:SmokePicked) { throw "click did not switch to $($script:SmokePicked): $($script:Config.ActiveTicker)" }
         if ([string]$script:Config.ActiveTab -ne "Chart") { throw "chart tab not shown" }
@@ -1364,6 +1364,43 @@ function Invoke-SmokeTest {
             Save-Transactions
         }
     } 14000
+    Invoke-SmokeStep "V10.6 goals for all depots" {
+        $keepDepots = $script:Config.Depots; $keepGoals = $script:Config.DepotGoals
+        $keepAll = @($script:Config.GoalAllValue, $script:Config.GoalAllDividend)
+        $dir = Join-Path $script:DepotDir "smoke-zweit"
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $dir "portfolio.json"), '{"NVDA":{"Shares":4,"AvgPrice":90,"Currency":"USD"}}')
+            $script:Config.Depots = @([PSCustomObject]@{ Id = "smoke-zweit"; Name = "Zweitdepot" })
+            $script:Config.DepotGoals = @()
+            & $probeRun { Show-GoalsCostsDialog } {
+                $gc = $script:GoalCtl
+                if ($null -eq $gc) { return "window not open" }
+                if ($gc.Goals.Rows.Count -ne 3) { return "goal rows $($gc.Goals.Rows.Count)" }
+                $gc.Goals.Rows[0].Cells["ValueGoal"].Value = "8000"
+                $gc.Goals.Rows[1].Cells["ValueGoal"].Value = "500"
+                $gc.Goals.Rows[2].Cells["ValueGoal"].Value = "20000"
+                $gc.Goals.Rows[2].Cells["DivGoal"].Value = "100"
+                $gc.Goals.Rows[1].Cells["DivGoal"].Value = "abc"
+                if (-not (Save-GoalsFromGrid)) { return "bad number accepted" }
+                if ((Get-DepotGoal -Goals $script:Config.DepotGoals -Id "").Value -ne 0) { return "saved despite the error" }
+                $gc.Goals.Rows[1].Cells["DivGoal"].Value = ""
+                $err = Save-GoalsFromGrid
+                if ($err) { return $err }
+                Update-GoalsView; $gc.Goals.Refresh()
+                if ((Get-DepotGoal -Goals $script:Config.DepotGoals -Id "smoke-zweit").Value -ne 500) { return "second depot goal not saved" }
+                if ([double]$script:Config.GoalAllValue -ne 20000) { return "total goal not saved" }
+                if ([string]$gc.Goals.Rows[1].Cells["ValuePct"].Value -notmatch '%') { return "no progress for the second depot: '$($gc.Goals.Rows[1].Cells["Value"].Value)'" }
+                & $script:SmokeShot "28-goals-all-depots" $gc.Dlg
+                return ""
+            } 3000
+        } finally {
+            Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+            $script:Config.Depots = $keepDepots; $script:Config.DepotGoals = $keepGoals
+            $script:Config.GoalAllValue = $keepAll[0]; $script:Config.GoalAllDividend = $keepAll[1]
+            Save-Config
+        }
+    } 8000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

@@ -3215,3 +3215,29 @@ Describe "Broker per booking (v10.4)" {
         @(ConvertFrom-BrokerRows -Rows $csv.Rows -Map $map)[0].Broker | Should -Be "Flatex"
     }
 }
+
+Describe "Goals per depot (v10.6)" {
+    It "keeps one goal per depot and leaves the others alone" {
+        $g = Set-DepotGoal -Goals @() -Id "" -Value 1000 -Dividend 50
+        $g = Set-DepotGoal -Goals $g -Id "zweit" -Value 200
+        $g = Set-DepotGoal -Goals $g -Id "" -Value 3000
+        @($g).Count | Should -Be 2
+        (Get-DepotGoal -Goals $g -Id "").Value | Should -Be 3000
+        (Get-DepotGoal -Goals $g -Id "").Dividend | Should -Be 0
+        (Get-DepotGoal -Goals $g -Id "zweit").Value | Should -Be 200
+        (Get-DepotGoal -Goals $g -Id "fehlt").Value | Should -Be 0
+    }
+    It "drops the entry when both goals are empty" {
+        $g = Set-DepotGoal -Goals (Set-DepotGoal -Goals @() -Id "a" -Value 5) -Id "a"
+        @($g).Count | Should -Be 0
+    }
+    It "survives a round trip through JSON with a single entry" {
+        $json = ConvertTo-Json -InputObject @{ DepotGoals = (Set-DepotGoal -Goals @() -Id "a" -Dividend 7) } -Depth 5
+        $back = $json | ConvertFrom-Json
+        (Get-DepotGoal -Goals $back.DepotGoals -Id "a").Dividend | Should -Be 7
+    }
+    It "exports the new goal settings" {
+        $keys = Get-PortableSettingKeys
+        foreach ($k in @("DepotGoals", "GoalAllValue", "GoalAllDividend")) { $keys | Should -Contain $k }
+    }
+}
