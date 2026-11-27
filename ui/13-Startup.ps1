@@ -163,6 +163,7 @@ $lstAlerts.Add_DoubleClick({
 })
 
 $btnAlertLog.Add_Click({ Show-AlertLogDialog })
+$btnAlertAll.Add_Click({ Show-AlertOverviewDialog })
 
 # v4.9.5: snooze an alert (right-click in the alert list)
 function Set-AlertSnooze {
@@ -177,6 +178,14 @@ function Set-AlertSnooze {
     if ($v) { Set-TransientStatus ("Alarm {0} pausiert bis {1:dd.MM. HH:mm}" -f $al.Ticker, $until) 4 } else { Set-TransientStatus ("Alarm {0} wieder aktiv" -f $al.Ticker) 3 }
 }
 $alertMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$miAlEdit = $alertMenu.Items.Add("Bearbeiten ...")
+$miAlAll = $alertMenu.Items.Add("Alarm-Übersicht ...")
+[void]$alertMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miAlEdit.Add_Click({
+    $i = $lstAlerts.SelectedIndex
+    if ($i -ge 0 -and $i -lt $script:Alerts.Count -and (Show-AlertEditDialog -Alert $script:Alerts[$i])) { Evaluate-GlobalAlerts; Update-AllUiViews }
+})
+$miAlAll.Add_Click({ Show-AlertOverviewDialog })
 $miSnz1 = $alertMenu.Items.Add("1 Stunde pausieren")
 $miSnz4 = $alertMenu.Items.Add("4 Stunden pausieren")
 $miSnzT = $alertMenu.Items.Add("Bis morgen 08:00 pausieren")
@@ -1416,6 +1425,72 @@ function Invoke-SmokeTest {
             Save-Config
         }
     } 20000
+    Invoke-SmokeStep "V10.8 alert overview + edit" {
+        $saved = @($script:Alerts.ToArray())
+        try {
+            $script:Alerts.Clear()
+            $q = $script:QuoteStore["NVDA"]
+            $px = if ($null -ne $q) { Convert-CurrencyValue -Amount ([double]$q.Price) -FromCurrency ([string]$q.Currency) -ToCurrency "USD" } else { 100.0 }
+            [void](Add-WidgetAlert -Ticker "NVDA" -Condition ">=" -Target ([math]::Round($px * 1.5, 2)) -Currency "USD" -Note "far" -NoConfirm)
+            [void](Add-WidgetAlert -Ticker "NVDA" -Condition "<=" -Target ([math]::Round($px * 0.99, 2)) -Currency "USD" -Note "near" -RearmMin 60 -NoConfirm)
+            [void](Add-WidgetAlert -Ticker "MSFT" -Condition "RSI >=" -Target 99 -Currency "RSI" -Condition2 "Tag% >=" -Target2 30 -Currency2 "%" -Note "combined" -NoConfirm)
+            [void](Add-WidgetAlert -Ticker "SAP.DE" -Condition "Tag% <=" -Target -9 -Currency "%" -ExpiresAt "2020-01-01" -Note "old" -NoConfirm)
+            & $probeRun { Show-AlertOverviewDialog } {
+                $ov = $script:AlertOv
+                if ($null -eq $ov) { return "window not open" }
+                if ($ov.Grid.Rows.Count -ne 4) { return "rows $($ov.Grid.Rows.Count)" }
+                $live = ($null -ne $script:QuoteStore["NVDA"] -and -not [bool]$script:QuoteStore["NVDA"].FromCache)
+                if ($live -and [string]$ov.Grid.Rows[0].Cells["Note"].Value -ne "near") { return "closest alert not on top: $($ov.Grid.Rows[0].Cells['Note'].Value)" }
+                if ([string]$ov.Grid.Rows[3].Cells["Note"].Value -ne "old") { return "expired alert not last" }
+                $ov.Dlg.Refresh()
+                & $script:SmokeShot "29-alert-overview" $ov.Dlg
+                $ov.Filter.SelectedIndex = 4
+                if ($ov.Grid.Rows.Count -ne 1) { return "expired filter: $($ov.Grid.Rows.Count)" }
+                Invoke-AlertOverviewAction "Arm"
+                if ($ov.Grid.Rows.Count -ne 0) { return "armed alert still listed as expired" }
+                $ov.Filter.SelectedIndex = 0
+                Invoke-AlertOverviewAction "Delete"
+                if ($script:Alerts.Count -ne 3) { return "delete: $($script:Alerts.Count) alerts" }
+                if (-not (Invoke-Undo) -or $script:Alerts.Count -ne 4) { return "undo did not bring the alert back" }
+                return ""
+            } 2500
+            $combo = @($script:Alerts | Where-Object { $_.Note -eq "combined" })[0]
+            $script:SmokeEditAlert = $combo
+            & $probeRun { [void](Show-AlertEditDialog -Alert $script:SmokeEditAlert) } {
+                $ed = $script:AlertEdit
+                if ($null -eq $ed) { return "edit window not open" }
+                & $script:SmokeShot "30-alert-edit" $ed.Dlg
+                $ed.V1.Text = "150"; Save-AlertEdit
+                if (-not $ed.Err.Text) { return "RSI 150 accepted" }
+                $ed.V1.Text = "75"; $ed.Note.Text = "edited"; $ed.Rearm.SelectedIndex = 1
+                Save-AlertEdit
+                if (-not $ed.Saved) { return "not saved: $($ed.Err.Text)" }
+                return ""
+            } 2000
+            if ([double]$combo.TargetPrice -ne 75 -or [string]$combo.Note -ne "edited" -or [int]$combo.RearmMin -ne 15) { throw "edit not applied: $($combo.TargetPrice) $($combo.Note) $($combo.RearmMin)" }
+            $script:AlertLog.Add([PSCustomObject]@{ At = (Get-Date).ToString("o"); Ticker = "SMOKE"; Condition = ">="; Text = "smoke entry"; Note = "=1+1"; Push = "aus" })
+            & $probeRun { Show-AlertLogDialog } {
+                $al = $script:AlLog
+                $ix = $al.Filter.Items.IndexOf("SMOKE")
+                if ($ix -lt 1) { return "ticker filter missing" }
+                $al.Filter.SelectedIndex = $ix
+                if ($al.Grid.Rows.Count -lt 1) { return "filtered log empty" }
+                $csv = Get-AlertLogCsv
+                if ($csv -notmatch "smoke entry" -or $csv -match "(^|;)=1\+1") { return "csv wrong: $csv" }
+                & $script:SmokeShot "31-alert-log" ([System.Windows.Forms.Form]::ActiveForm)
+                return ""
+            } 2000
+            for ($i = $script:AlertLog.Count - 1; $i -ge 0; $i--) { if ([string]$script:AlertLog[$i].Ticker -eq "SMOKE") { $script:AlertLog.RemoveAt($i) } }
+            Set-ActiveTab -TabName "Watchlist"; & $pump
+            & $script:SmokeShot "32-watchlist-alerts" $form
+            Set-ActiveTab -TabName "Chart"
+        } finally {
+            $script:Alerts.Clear()
+            foreach ($a in $saved) { $script:Alerts.Add($a) }
+            Save-Alerts
+            Update-AllUiViews
+        }
+    } 12000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

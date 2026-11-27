@@ -2710,6 +2710,81 @@ function Get-AlertEvaluation {
     return $res
 }
 
+# ---- alert overview and editing (v10.8) --------------------------------------
+function Get-AlertDistance {
+    # How far an alert is from firing, from the current value of its evaluation.
+    # Gap is signed (the direction the value still has to move). Score is only
+    # for sorting: roughly "percent to go". Unit: "%" price move, "P" points, "x".
+    param([string]$Condition, [double]$Target, [double]$Value, [bool]$Met = $false)
+    $res = [PSCustomObject]@{ Ok = $false; Gap = 0.0; Unit = "%"; Score = [double]::MaxValue }
+    if ($Met) { $res.Ok = $true; $res.Score = 0.0; return $res }
+    if ([double]::IsNaN($Value)) { return $res }
+    switch (Get-AlertKind $Condition) {
+        "TREND"  { return $res }   # the target moves with the line
+        "SMA"    { $res.Gap = -$Value }
+        "TRAIL"  { $res.Gap = -[math]::Abs($Target) - $Value }
+        "HIGH52" { $res.Gap = -[math]::Abs($Target) - $Value }
+        "LOW52"  { $res.Gap = [math]::Abs($Target) - $Value }
+        "PCT"    { $res.Gap = $Target - $Value }
+        "PFPCT"  { $res.Gap = $Target - $Value }
+        "EKPCT"  {
+            if ($Value -le -100) { return $res }
+            $res.Gap = ((1.0 + $Target / 100.0) / (1.0 + $Value / 100.0) - 1.0) * 100.0
+        }
+        "RSI"    { $res.Gap = $Target - $Value; $res.Unit = "P" }
+        "VOL"    { $res.Gap = $Target - $Value; $res.Unit = "x" }
+        default  {
+            if ($Value -le 0) { return $res }
+            $res.Gap = ($Target - $Value) / $Value * 100.0
+        }
+    }
+    $res.Ok = $true
+    $res.Score = switch ($res.Unit) {
+        "P" { [math]::Abs($res.Gap) / 2.0 }
+        "x" { if ($Target -gt 0) { [math]::Abs($res.Gap) / $Target * 100.0 } else { [math]::Abs($res.Gap) } }
+        default { [math]::Abs($res.Gap) }
+    }
+    return $res
+}
+
+function Get-AlertStatusName {
+    # Expired / Paused / Hit / Active
+    param($Alert, [DateTime]$Now = (Get-Date))
+    if (Test-AlertExpired -Alert $Alert -Now $Now) { return "Expired" }
+    if (Test-AlertSnoozed -Alert $Alert -Now $Now) { return "Paused" }
+    if ([bool]$Alert.Triggered) { return "Hit" }
+    return "Active"
+}
+
+function Update-AlertSettings {
+    # changes an existing alert -> "" or an error text (then nothing changes).
+    # A new target arms the alert again; a new note or repeat time does not.
+    param($Alert, [double]$Value, [double]$Value2 = 0, [string]$Note = "", [int]$RearmMin = 0, [string]$ExpiresAt = "", [bool]$Push = $true)
+    $kind = Get-AlertKind ([string]$Alert.Condition)
+    $fixed = @("SMA", "TREND")
+    if ($kind -notin $fixed) {
+        $bad = Test-AlertValue -Condition ([string]$Alert.Condition) -Value $Value
+        if ($bad) { return $bad }
+    }
+    $cond2 = [string]$Alert.Condition2
+    if ($cond2 -and (Get-AlertKind $cond2) -notin $fixed) {
+        $bad = Test-AlertValue -Condition $cond2 -Value $Value2
+        if ($bad) { return $bad }
+    }
+    $changed = $false
+    if ($kind -notin $fixed -and [double]$Alert.TargetPrice -ne $Value) { $Alert.TargetPrice = $Value; $changed = $true }
+    if ($cond2 -and (Get-AlertKind $cond2) -notin $fixed -and [double]$Alert.Target2 -ne $Value2) { $Alert.Target2 = $Value2; $changed = $true }
+    $oldEnd = [string]$Alert.ExpiresAt
+    foreach ($pair in @(@("Note", $Note.Trim()), @("RearmMin", $RearmMin), @("ExpiresAt", $ExpiresAt), @("Push", $Push))) {
+        $Alert | Add-Member -NotePropertyName $pair[0] -NotePropertyValue $pair[1] -Force
+    }
+    # an alert that had run out and gets a new end starts fresh
+    if ($changed -or ($oldEnd -ne $ExpiresAt -and $oldEnd -and [string]::CompareOrdinal((Get-Date).ToString("yyyy-MM-dd"), $oldEnd) -gt 0)) {
+        $Alert.Triggered = $false; $Alert.TriggeredAt = ""
+    }
+    return ""
+}
+
 function Get-RelativeVolume {
     # Today's volume so far / average volume of the previous days up to the
     # same time of day (regular-session bars only). NaN when not computable.

@@ -3241,3 +3241,53 @@ Describe "Goals per depot (v10.6)" {
         foreach ($k in @("DepotGoals", "GoalAllValue", "GoalAllDividend")) { $keys | Should -Contain $k }
     }
 }
+
+Describe "Alert overview and editing (v10.8)" {
+    BeforeAll {
+        function New-TestAlert($cond, $target) {
+            [PSCustomObject]@{ Id = "x"; Ticker = "NVDA"; Condition = $cond; TargetPrice = [double]$target; Currency = "USD"; Triggered = $true; TriggeredAt = "2026-01-01T10:00:00"; Note = ""; RearmMin = 0; ExpiresAt = ""; Peak = 0.0; Push = $true }
+        }
+    }
+    It "gives the price move that is still needed" {
+        $d = Get-AlertDistance -Condition ">=" -Target 110 -Value 100
+        $d.Ok | Should -BeTrue
+        [math]::Round($d.Gap, 4) | Should -Be 10
+        (Get-AlertDistance -Condition "<=" -Target 90 -Value 100).Gap | Should -Be -10
+    }
+    It "turns gain on cost into a price move" {
+        [math]::Round((Get-AlertDistance -Condition "EK% >=" -Target 20 -Value 0).Gap, 4) | Should -Be 20
+        [math]::Round((Get-AlertDistance -Condition "EK% >=" -Target 20 -Value 10).Gap, 4) | Should -Be 9.0909
+    }
+    It "handles trailing stop and the 52 week levels" {
+        (Get-AlertDistance -Condition "Trailing %" -Target 8 -Value -3).Gap | Should -Be -5
+        (Get-AlertDistance -Condition "52W Hoch" -Target 0 -Value -4).Gap | Should -Be 4
+        (Get-AlertDistance -Condition "52W Tief" -Target 2 -Value 12).Gap | Should -Be -10
+    }
+    It "scores a met alert as zero and unknown values as furthest" {
+        (Get-AlertDistance -Condition ">=" -Target 1 -Value 2 -Met $true).Score | Should -Be 0
+        (Get-AlertDistance -Condition ">=" -Target 1 -Value ([double]::NaN)).Ok | Should -BeFalse
+    }
+    It "arms the alert again only when the target changes" {
+        $a = New-TestAlert ">=" 100
+        Update-AlertSettings -Alert $a -Value 100 -Note "n" -RearmMin 60 | Should -Be ""
+        $a.Triggered | Should -BeTrue
+        $a.RearmMin | Should -Be 60
+        Update-AlertSettings -Alert $a -Value 120 | Should -Be ""
+        $a.Triggered | Should -BeFalse
+        $a.TargetPrice | Should -Be 120
+    }
+    It "changes nothing when a value does not fit" {
+        $a = New-TestAlert "RSI >=" 70
+        Update-AlertSettings -Alert $a -Value 150 -Note "neu" | Should -Not -Be ""
+        $a.TargetPrice | Should -Be 70
+        $a.Note | Should -Be ""
+    }
+    It "names the state of an alert" {
+        $a = New-TestAlert ">=" 1
+        Get-AlertStatusName -Alert $a | Should -Be "Hit"
+        $a.Triggered = $false
+        Get-AlertStatusName -Alert $a | Should -Be "Active"
+        $a.ExpiresAt = "2020-01-01"
+        Get-AlertStatusName -Alert $a | Should -Be "Expired"
+    }
+}
