@@ -1505,7 +1505,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         if (Test-Path $log) { Write-Host "---- widget.log (last 60 lines) ----"; Get-Content $log -Tail 60 | ForEach-Object { Write-Host $_ } }
         # v5.2: screenshots also into the log (base64), for reviews without artifact access
         if ($env:TW_SMOKE_SHOTS -and (Test-Path $env:TW_SMOKE_SHOTS)) {
-            foreach ($png in Get-ChildItem -Path $env:TW_SMOKE_SHOTS -Filter *.png) {
+            foreach ($png in Get-ChildItem -Path $env:TW_SMOKE_SHOTS -File | Where-Object { $_.Extension -in @(".png", ".html") }) {
                 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($png.FullName))
                 Write-Host ("SHOT-BEGIN " + $png.Name)
                 for ($i = 0; $i -lt $b64.Length; $i += 3000) { Write-Host ("SHOT|" + $b64.Substring($i, [math]::Min(3000, $b64.Length - $i))) }
@@ -3532,5 +3532,39 @@ Describe "Monthly returns (v11.8)" {
         $s.Positive | Should -Be 2
         $s.Worst.Key | Should -Be "2026-02"
         Get-MonthStats -Returns @() | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Full report (v12.0)" {
+    BeforeAll {
+        $script:lines = @(@{ Name = "Value <a>"; Values = @(100, 150.5, 200); Color = "#000000"; Dashed = $false })
+        $script:dates = [string[]]@("2026-01-01", "2026-01-02", "2026-01-03")
+    }
+    It "draws one line per series with decimal points in any culture" {
+        $old = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo("de-AT")
+            $svg = ConvertTo-SvgLineChart -Dates $script:dates -Lines $script:lines
+        } finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $old }
+        $svg | Should -Match '<polyline'
+        $svg | Should -Match 'points="70,276 480,149\.8 890,26"'
+        $svg | Should -Match 'Value &lt;a&gt;'
+    }
+    It "leaves out the axis amounts on request" {
+        ConvertTo-SvgLineChart -Dates $script:dates -Lines $script:lines | Should -Match 'text-anchor="end" dominant-baseline'
+        ConvertTo-SvgLineChart -Dates $script:dates -Lines $script:lines -HideValues | Should -Not -Match 'text-anchor="end" dominant-baseline'
+    }
+    It "gives nothing without enough data" {
+        ConvertTo-SvgLineChart -Dates @("2026-01-01") -Lines $script:lines | Should -Be ""
+        ConvertTo-SvgLineChart -Dates $script:dates -Lines @() | Should -Be ""
+    }
+    It "puts the chart into the report and colours signed percentages" {
+        $html = ConvertTo-HtmlReport -Title "T" -Sections @(
+            [PSCustomObject]@{ Title = "Chart"; Headers = @(); Rows = @(); Note = ""; Html = "<svg></svg>" },
+            [PSCustomObject]@{ Title = "Table"; Headers = @("A", "B", "C"); Rows = @(, @("+1.5%", "-2.0%", "-3.00 EUR")); Note = ""; Html = "" })
+        $html | Should -Match '<svg></svg>'
+        $html | Should -Match 'class="n pos">\+1\.5%'
+        $html | Should -Match 'class="n neg">-2\.0%'
+        $html | Should -Match 'class="n">-3\.00 EUR'
     }
 }
