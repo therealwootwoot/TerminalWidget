@@ -1426,25 +1426,6 @@ function Show-GlossaryDialog {
     $dlg.Dispose()
 }
 
-function Set-DarkScrollBars {
-    # v7.1.1: scrollbars follow dark themes (Windows 10 1809+; otherwise unchanged)
-    param([System.Windows.Forms.Control]$Control)
-    if (-not [int]$script:Pal.DwmDark) { return }
-    try {
-        if (-not ("TwUxThemeV71" -as [type])) {
-            Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class TwUxThemeV71 {
-    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
-    public static extern int SetWindowTheme(IntPtr hWnd, string subApp, string subId);
-}
-"@ -ErrorAction Stop
-        }
-        [void][TwUxThemeV71]::SetWindowTheme($Control.Handle, "DarkMode_Explorer", [NullString]::Value)
-    } catch { Write-WidgetLog "Dark scrollbars not available: $($_.Exception.Message)" "WARN" }
-}
-
 # v5.0: the help outgrew a message box - scrollable, resizable window
 function Show-HelpTextDialog {
     param([string]$Title, [string]$Text)

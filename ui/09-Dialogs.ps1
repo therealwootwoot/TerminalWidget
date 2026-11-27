@@ -68,6 +68,8 @@ function Show-AnalysisDialog {
     $pageBtns["Bench"]   = & $mkBtn "Vergleich" (S 766) (S 10) (S 86) $dlg
     # v5.5
     $pageBtns["Income"]  = & $mkBtn "Einkommen" (S 856) (S 10) (S 92) $dlg
+    $pageBtns["Months"]  = & $mkBtn "Monate" (S 952) (S 10) (S 70) $dlg
+    Set-DynTip $pageBtns["Months"] "Rendite je Monat und Jahr, zeitgewichtet: Ein- und Auszahlungen sind herausgerechnet"
     Set-DynTip $pageBtns["Income"] "Erhaltene Dividenden je Monat und Jahr (aus den Buchungen), als Kalender"
     Set-DynTip $pageBtns["Contrib"] "Was jede Position zum Ergebnis beigetragen hat, Dividenden-Prognose und Szenario 'Markt -20 %'"
     Set-DynTip $pageBtns["Bench"] "Depot gegen mehrere Indizes, rollierende 12-Monats-Rendite und Sektoren gegen den MSCI World"
@@ -107,7 +109,7 @@ function Show-AnalysisDialog {
     $dlg.Controls.Add($lblStatus)
 
     $pages = [ordered]@{}
-    foreach ($k in @("Perf", "Ret", "Alloc", "Div", "Risk", "Target", "Heat", "Contrib", "Bench", "Income")) {
+    foreach ($k in @("Perf", "Ret", "Alloc", "Div", "Risk", "Target", "Heat", "Contrib", "Bench", "Income", "Months")) {
         $pn = New-Object System.Windows.Forms.Panel
         $pn.SetBounds((S 12), (S 64), (S 976), (S 564))
         $pn.Anchor = $aAll
@@ -365,6 +367,40 @@ function Show-AnalysisDialog {
         $ac.Groups = @(Get-AllocationBreakdown -Items @(Get-AllocationItems))
         $ac.Bars.Invalidate()
     })
+    # ---- v11.8: Monate ----
+    $pm = $pages["Months"]
+    $lblShow = New-Object System.Windows.Forms.Label
+    $lblShow.SetBounds(0, (S 4), (S 66), (S 18)); $lblShow.Text = "Anzeigen:"
+    $pm.Controls.Add($lblShow)
+    $cbMon = New-V8Combo $pm @((Tr "Depot"), (Tr "Benchmark"), (Tr "Abstand zur Benchmark")) (Tr "Depot") (S 70) (S 1) (S 190)
+    $cbMon.AccessibleName = Tr "Anzeigen"
+    $lblMonInfo = New-Object System.Windows.Forms.Label
+    $lblMonInfo.SetBounds((S 274), (S 4), (S 700), (S 18)); $lblMonInfo.ForeColor = $p.Muted; $lblMonInfo.Anchor = $aT -bor $aL -bor $aR; $lblMonInfo.AutoEllipsis = $true
+    $pm.Controls.Add($lblMonInfo)
+    $gMon = New-Object System.Windows.Forms.DataGridView
+    $gMon.SetBounds(0, (S 32), (S 976), (S 464)); $gMon.Anchor = $aAll
+    Style-DataGrid -Grid $gMon
+    [void]$gMon.Columns.Add("Year", "Jahr")
+    for ($mi2 = 1; $mi2 -le 12; $mi2++) {
+        $mn = (New-Object DateTime(2000, $mi2, 1)).ToString("MMM", [System.Globalization.CultureInfo]::GetCultureInfo($(if ([string]$script:Config.Language -eq "EN") { "en-US" } else { "de-DE" })))
+        [void]$gMon.Columns.Add("M$mi2", $mn)
+    }
+    [void]$gMon.Columns.Add("Total", "Gesamt")
+    $gMon.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    foreach ($col in $gMon.Columns) {
+        $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        $col.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding((S 2), 0, (S 2), 0)
+        $col.HeaderCell.Style.Padding = New-Object System.Windows.Forms.Padding((S 2), 0, (S 2), 0)
+        if ($col.Name -ne "Year") { $col.DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
+    }
+    $gMon.Columns["Total"].DefaultCellStyle.Font = $fontUiBold
+    $gMon.Columns["Total"].FillWeight = 125
+    $pm.Controls.Add($gMon)
+    $lblMonNote = New-Object System.Windows.Forms.Label
+    $lblMonNote.SetBounds(0, (S 504), (S 976), (S 52)); $lblMonNote.Anchor = $aB -bor $aL -bor $aR; $lblMonNote.ForeColor = $p.Muted
+    $lblMonNote.Text = "Zeitgewichtete Rendite aus der Wertentwicklung (Seite 1): Käufe und Verkäufe sind herausgerechnet, Dividenden zählen mit. Der erste und der laufende Monat sind nur teilweise enthalten. Gesamt = die vorhandenen Monate des Jahres verkettet."
+    $pm.Controls.Add($lblMonNote)
+    $cbMon.Add_SelectedIndexChanged({ Update-AnalysisMonths })
     # ---- v5.0: Risiko ----
     $pk = $pages["Risk"]
     $lblRf = New-Object System.Windows.Forms.Label
@@ -667,6 +703,7 @@ function Show-AnalysisDialog {
         param($sender, $e)
         if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $sender.Close() }
     })
+    $script:AnaCtl.MonGrid = $gMon; $script:AnaCtl.MonInfo = $lblMonInfo; $script:AnaCtl.MonShow = $cbMon
     $script:AnaCtl.StartPage = $Page
     # v5.0: wider for the seven page buttons (the controls follow their anchors)
     $dlg.MinimumSize = New-Object System.Drawing.Size((S 1000), (S 520))
@@ -1878,6 +1915,7 @@ function Invoke-TerminalCommand {
             "REBAL"  { Show-AnalysisDialog -Page "Target" }
             "RISK"   { Show-AnalysisDialog -Page "Risk" }
             "HEAT"   { Show-AnalysisDialog -Page "Heat" }
+            "MONAT"  { Show-AnalysisDialog -Page "Months" }
             "FULL"   {
                 $fp = switch ($arg0) { "PORT" { "Portfolio" } "PORTFOLIO" { "Portfolio" } "WATCH" { "Watchlist" } "WL" { "Watchlist" } "NEWS" { "News" } default { "" } }
                 if ($arg0 -and -not $fp) { return "FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }

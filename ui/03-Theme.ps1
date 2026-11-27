@@ -1196,8 +1196,8 @@ function Render-ChartAndRsi {
         $periodPct = (($series[$n - 1].Close - $basePrice) / $basePrice) * 100.0
         $pSign = if ($periodPct -ge 0) { "+" } else { "" }
         # Say what the % refers to (with ext hours on, the last bar is Pre/Post)
-        $refTxt = if ($script:Config.Timeframe -eq "1d" -and $script:ActivePrevClose -gt 0) { "vs. Vortag" } elseif ($s0 -gt 0 -or $s1 -lt ($totalN - 1)) { "Ausschnitt" } else { "Zeitraum" }
-        if ($series[$n - 1].Ext) { $refTxt += $(if ($series[$n - 1].Sess -eq "PRE") { ", inkl. Pre" } else { ", inkl. Post" }) }
+        $refTxt = if ($script:Config.Timeframe -eq "1d" -and $script:ActivePrevClose -gt 0) { Tr "vs. Vortag" } elseif ($s0 -gt 0 -or $s1 -lt ($totalN - 1)) { Tr "Ausschnitt" } else { Tr "Zeitraum" }
+        if ($series[$n - 1].Ext) { $refTxt += $(if ($series[$n - 1].Sess -eq "PRE") { Tr ", inkl. Pre" } else { Tr ", inkl. Post" }) }
         $rangeInfo = "{0} | L:{1:N2} H:{2:N2} | {3}{4:N2}% {5}" -f $script:Config.Timeframe.ToUpper(), $rawLow, $rawHigh, $pSign, $periodPct, $refTxt
         $g.DrawString($rangeInfo, $fontAxis, $c["axisTextBrush"], ($priceRect.Left + $leftLegendOffset), ($priceRect.Top + (S 4)))
         & $addLeg $rangeInfo ($priceRect.Left + $leftLegendOffset) ($priceRect.Top + (S 4)) "RANGE"
@@ -1593,14 +1593,14 @@ function Get-ChartLevels {
         $pp = $script:Portfolio[$sym]
         if ($pp.AvgPrice -gt 0) {
             $ek = Convert-CurrencyValue -Amount $pp.AvgPrice -FromCurrency $pp.Currency -ToCurrency $curr
-            $out += [PSCustomObject]@{ Price = $ek; Label = ("EK {0:N2}" -f $ek); Kind = "EK"; Hit = $false }
+            $out += [PSCustomObject]@{ Price = $ek; Label = ("{0} {1:N2}" -f (Tr "EK"), $ek); Kind = "EK"; Hit = $false }
         }
     }
     foreach ($a in $script:Alerts) {
         # v4.3: trailing stop = current stop price as a line
         if ($a.Ticker -eq $sym -and (Get-AlertKind $a.Condition) -eq "TRAIL" -and [double]$a.Peak -gt 0 -and [string]$a.Currency -match '^[A-Z]{3}$') {
             $lv = Convert-CurrencyValue -Amount ([double]$a.Peak * (1.0 - [double]$a.TargetPrice / 100.0)) -FromCurrency $a.Currency -ToCurrency $curr
-            $out += [PSCustomObject]@{ Price = $lv; Label = ("Trailing-Stopp {0:N2}" -f $lv); Kind = "AL"; Hit = [bool]$a.Triggered }
+            $out += [PSCustomObject]@{ Price = $lv; Label = ("{0} {1:N2}" -f (Tr "Trailing-Stopp"), $lv); Kind = "AL"; Hit = [bool]$a.Triggered }
             continue
         }
         if ($a.Ticker -ne $sym -or (Get-AlertKind $a.Condition) -ne "PRICE") { continue }

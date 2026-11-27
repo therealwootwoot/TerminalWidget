@@ -43,7 +43,7 @@ function Render-FullscreenChart {
         [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $part[1], (New-Object System.Drawing.Point($tx, $ty)), $part[2])
         $tx += $sz.Width + (S 12)
     }
-    $hint = "Esc / F11 / Doppelklick = schließen  |  1-6 / Rad = Zeitraum  |  Strg+Rad = Zoom  |  Ziehen = Messen  |  Pfeile = Ticker"
+    $hint = Tr "Esc / F11 / Doppelklick = schließen  |  1-6 / Rad = Zeitraum  |  Strg+Rad = Zoom  |  Ziehen = Messen  |  Pfeile = Ticker"
     $hs = [System.Windows.Forms.TextRenderer]::MeasureText($g, $hint, $fontUi)
     $hx = $Bounds.Width - $hs.Width - (S 12)
     if ($hx -gt ($tx + (S 20))) {
@@ -1404,7 +1404,9 @@ $cmbAlertExp.ForeColor = $script:Pal.Text
 $cmbAlertExp.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $cmbAlertExp.Font = $fontMono
 $cmbAlertExp.DropDownWidth = S 100
-$script:AlertExpiryChoices = Get-AlertExpiryChoices
+$script:AlertExpiryChoices = [ordered]@{}
+$expiryDe = Get-AlertExpiryChoices
+foreach ($ek in $expiryDe.Keys) { $script:AlertExpiryChoices[(Tr $ek)] = $expiryDe[$ek] }
 foreach ($ek in $script:AlertExpiryChoices.Keys) { [void]$cmbAlertExp.Items.Add($ek) }
 $cmbAlertExp.SelectedIndex = 0
 $viewWatch.Controls.Add($cmbAlertExp)
@@ -1418,7 +1420,8 @@ $cmbAlertRearm.BackColor = $script:Pal.Input
 $cmbAlertRearm.ForeColor = $script:Pal.Text
 $cmbAlertRearm.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $cmbAlertRearm.Font = $fontMono
-$script:RearmChoices = [ordered]@{ "einmalig" = 0; "R 15m" = 15; "R 1h" = 60; "R 4h" = 240; "R 1T" = 1440 }
+$script:RearmChoices = [ordered]@{}
+$script:RearmChoices[(Tr "einmalig")] = 0; $script:RearmChoices["R 15m"] = 15; $script:RearmChoices["R 1h"] = 60; $script:RearmChoices["R 4h"] = 240; $script:RearmChoices[(Tr "R 1T")] = 1440
 foreach ($rk in $script:RearmChoices.Keys) { [void]$cmbAlertRearm.Items.Add($rk) }
 $cmbAlertRearm.SelectedIndex = 0
 $viewWatch.Controls.Add($cmbAlertRearm)
