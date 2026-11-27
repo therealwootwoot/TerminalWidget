@@ -551,11 +551,12 @@ function Draw-AllocationBars {
 $script:DivHist = @{}     # symbol -> @{ Divs; Currency; At; Failed }
 
 function Start-DividendLoad {
-    param([bool]$Force = $false)
+    param([bool]$Force = $false, $Positions = $null)
+    if ($null -eq $Positions) { $Positions = $script:Portfolio }
     $urls = @{}
-    foreach ($k in @($script:Portfolio.Keys)) {
+    foreach ($k in @($Positions.Keys)) {
         $u = ([string]$k).ToUpper()
-        if ([double]$script:Portfolio[$k].Shares -le 0) { continue }
+        if ([double]$Positions[$k].Shares -le 0) { continue }
         $h = $script:DivHist[$u]
         $fresh = ($null -ne $h -and ((Get-Date) - $h.At).TotalHours -lt $(if ($h.Failed) { 0.5 } else { 6 }))
         if ($Force -or -not $fresh) {

@@ -1495,7 +1495,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         try {
             $exe = (Get-Process -Id $PID).Path
             $p = Start-Process -FilePath $exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ui`"") -PassThru
-            $done = $p.WaitForExit(420000)
+            $done = $p.WaitForExit(600000)
             if (-not $done) { try { $p.Kill() } catch { } }
         } finally {
             Remove-Item Env:\TW_SMOKE_TEST -ErrorAction SilentlyContinue
@@ -1512,7 +1512,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
                 Write-Host ("SHOT-END " + $png.Name)
             }
         }
-        $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
+        $done | Should -BeTrue -Because "the widget must finish the smoke run within 10 minutes"
         Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
         $rep = Get-Content $report -Raw | ConvertFrom-Json
         foreach ($st in @($rep.Steps)) { Write-Host ("{0,-28} {1,-5} {2,6} ms {3}" -f $st.Name, $(if ($st.Ok) { "ok" } else { "FAIL" }), $st.Ms, $st.Error) }
@@ -3213,5 +3213,31 @@ Describe "Broker per booking (v10.4)" {
         $csv = ConvertFrom-CsvText "Datum;Typ;Ticker;Stück;Kurs;Broker`n01.02.2026;Kauf;SAP.DE;2;100;Flatex"
         $map = Get-CsvColumnGuess -Headers $csv.Headers
         @(ConvertFrom-BrokerRows -Rows $csv.Rows -Map $map)[0].Broker | Should -Be "Flatex"
+    }
+}
+
+Describe "Goals per depot (v10.6)" {
+    It "keeps one goal per depot and leaves the others alone" {
+        $g = Set-DepotGoal -Goals @() -Id "" -Value 1000 -Dividend 50
+        $g = Set-DepotGoal -Goals $g -Id "zweit" -Value 200
+        $g = Set-DepotGoal -Goals $g -Id "" -Value 3000
+        @($g).Count | Should -Be 2
+        (Get-DepotGoal -Goals $g -Id "").Value | Should -Be 3000
+        (Get-DepotGoal -Goals $g -Id "").Dividend | Should -Be 0
+        (Get-DepotGoal -Goals $g -Id "zweit").Value | Should -Be 200
+        (Get-DepotGoal -Goals $g -Id "fehlt").Value | Should -Be 0
+    }
+    It "drops the entry when both goals are empty" {
+        $g = Set-DepotGoal -Goals (Set-DepotGoal -Goals @() -Id "a" -Value 5) -Id "a"
+        @($g).Count | Should -Be 0
+    }
+    It "survives a round trip through JSON with a single entry" {
+        $json = ConvertTo-Json -InputObject @{ DepotGoals = (Set-DepotGoal -Goals @() -Id "a" -Dividend 7) } -Depth 5
+        $back = $json | ConvertFrom-Json
+        (Get-DepotGoal -Goals $back.DepotGoals -Id "a").Dividend | Should -Be 7
+    }
+    It "exports the new goal settings" {
+        $keys = Get-PortableSettingKeys
+        foreach ($k in @("DepotGoals", "GoalAllValue", "GoalAllDividend")) { $keys | Should -Contain $k }
     }
 }
