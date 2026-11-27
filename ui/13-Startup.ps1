@@ -930,7 +930,10 @@ function Invoke-SmokeTest {
     # v5.0 Stage B
     Invoke-SmokeStep "Chart types + trades" {
         Set-ActiveTab -TabName "Chart"; Set-Timeframe -Tf "1d"; & $pump
-        [void](Invoke-Transaction -Type "Kauf" -Ticker "NVDA" -Shares 1 -Price 100 -Fee 0 -Currency "USD" -Date (Get-Date).ToString("yyyy-MM-dd") -Note "smoke")
+        # date of the newest price bar: "today" has no bar on weekends, holidays or before the market opens
+        $buyDay = (Get-Date).ToString("yyyy-MM-dd")
+        if (@($script:ActiveSeries).Count -gt 0) { $buyDay = [DateTimeOffset]::FromUnixTimeMilliseconds([long]@($script:ActiveSeries)[-1].Ts).LocalDateTime.ToString("yyyy-MM-dd") }
+        [void](Invoke-Transaction -Type "Kauf" -Ticker "NVDA" -Shares 1 -Price 100 -Fee 0 -Currency "USD" -Date $buyDay -Note "smoke")
         foreach ($ct in @("HA", "Candle", "Line")) {
             $script:Config.ChartType = $ct; $script:LastChartLayout = $null
             Update-AllUiViews; $script:ChartSignature = ""; Update-ChartCacheSignature; $pnlChartCanvas.Refresh(); & $pump
