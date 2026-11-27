@@ -5053,6 +5053,39 @@ function Protect-KpiTiles {
     })
 }
 
+function Get-TradeBarIndex {
+    # the chart bar a booking belongs to (-1 = outside the shown range).
+    # Daily / intraday bars: the same day, else the next trading day (weekend, holiday);
+    # a booking just after the last bar sits on the last bar.
+    # Weekly / monthly bars: the period that contains the day.
+    param([string[]]$BarDates, [string]$Date)
+    $n = @($BarDates).Count
+    if ($n -lt 2 -or -not $Date) { return -1 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $d = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Date, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return -1 }
+    if ([string]::CompareOrdinal($Date, $BarDates[0]) -lt 0) { return -1 }
+    $at = -1
+    for ($i = 0; $i -lt $n; $i++) {
+        $c = [string]::CompareOrdinal($BarDates[$i], $Date)
+        if ($c -eq 0) { return $i }
+        if ($c -gt 0) { break }
+        $at = $i
+    }
+    $day = { param([string]$s) [DateTime]::ParseExact($s, "yyyy-MM-dd", $inv) }
+    $spacing = ((& $day $BarDates[$n - 1]) - (& $day $BarDates[0])).TotalDays / ($n - 1)
+    if ($spacing -ge 5) {
+        if (($d - (& $day $BarDates[$at])).TotalDays -le $spacing + 3) { return $at }
+        return -1
+    }
+    if ($at + 1 -lt $n) {
+        if (((& $day $BarDates[$at + 1]) - $d).TotalDays -le 7) { return $at + 1 }
+        return -1
+    }
+    if (($d - (& $day $BarDates[$at])).TotalDays -le 4) { return $at }
+    return -1
+}
+
 function Get-TileGrid {
     # places Count tiles in as few rows as possible (at most PerRowMax each)
     # -> @{ Rows; Height; Rects = @{ X; Y; W; H } }

@@ -3346,3 +3346,23 @@ Describe "Privacy in the analysis (v11.0)" {
         foreach ($h in @("Gesamt %", "XIRR p.a.", "Seit")) { Test-AmountColumn $h | Should -BeFalse }
     }
 }
+
+Describe "Chart bar of a booking (v11.2)" {
+    BeforeAll { $script:days = @("2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10") }
+    It "uses the same day, or the next trading day after a weekend" {
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-03" | Should -Be 1
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-07" | Should -Be 5
+    }
+    It "keeps a booking just after the last bar and drops ones outside the range" {
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-11" | Should -Be 6
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-20" | Should -Be -1
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-01" | Should -Be -1
+        Get-TradeBarIndex -BarDates $days -Date "kein Datum" | Should -Be -1
+    }
+    It "takes the containing week on weekly bars" {
+        $w = @("2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26")
+        Get-TradeBarIndex -BarDates $w -Date "2026-10-15" | Should -Be 1
+        Get-TradeBarIndex -BarDates $w -Date "2026-10-28" | Should -Be 3
+        Get-TradeBarIndex -BarDates $w -Date "2026-11-30" | Should -Be -1
+    }
+}

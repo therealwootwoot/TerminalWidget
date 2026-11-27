@@ -186,6 +186,7 @@ function Show-AnalysisDialog {
         if ($cd[3]) { $col.ToolTipText = Get-GlossaryShort -Key $cd[3] }
     }
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    foreach ($cn in @("Ticker", "Since")) { $grid.Columns[$cn].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }   # 11.2: dates were cut off
     $pr.Controls.Add($grid)
     $lblRetNote = New-Object System.Windows.Forms.Label
     $lblRetNote.SetBounds(0, (S 526), (S 976), (S 36)); $lblRetNote.Anchor = $aB -bor $aL -bor $aR

@@ -1501,6 +1501,7 @@ function Invoke-SmokeTest {
                 if ($null -eq $ac) { return "window not open" }
                 if ($null -eq $ac.Model -or $null -eq $ac.Model.Series) { $script:SmokeNotes.Add("tiles: no price history, skipped"); return "" }
                 if (@($ac.Kpi).Count -ne 10) { return "standard tiles: $(@($ac.Kpi).Count)" }
+                $script:SmokeNotes.Add("MEASURE client=$($ac.Dlg.ClientSize) bounds=$($ac.Dlg.Bounds) min=$($ac.Dlg.MinimumSize) page=$($ac.Pages['Perf'].Bounds) chart=$($ac.Chart.Bounds) kpi=$($ac.KpiPanel.Bounds) reload=$($ac.Reload.Bounds) export=$($ac.ExportBtn.Bounds) saved=$($script:Config.DialogPlacement.Analyse)")
                 $ac.Dlg.Refresh()
                 & $script:SmokeShot "33-analysis-tiles" $ac.Dlg
                 $twoRows = $ac.KpiPanel.Height; $chartH = $ac.Chart.Height

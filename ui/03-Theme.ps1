@@ -1260,18 +1260,15 @@ function Render-ChartAndRsi {
     if ([bool]$script:Config.ShowTrades -and $n -ge 2) {
         $txA = @($script:Transactions | Where-Object { ([string]$_.Ticker).ToUpper() -eq $actU -and [string]$_.Type -in @("Kauf", "Verkauf") })
         if ($txA.Count -gt 0) {
-            $dayIdx = @{}
-            for ($i = 0; $i -lt $n; $i++) {
-                $dk = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$series[$i].Ts).LocalDateTime.ToString("yyyy-MM-dd")
-                if (-not $dayIdx.ContainsKey($dk)) { $dayIdx[$dk] = $i }
-            }
+            $barDays = New-Object 'string[]' $n
+            for ($i = 0; $i -lt $n; $i++) { $barDays[$i] = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$series[$i].Ts).LocalDateTime.ToString("yyyy-MM-dd") }
             $buyBr = New-Object System.Drawing.SolidBrush($colGreen)
             $sellBr = New-Object System.Drawing.SolidBrush($colRed)
             $outPen = New-Object System.Drawing.Pen($script:Pal.PanelBg, [float]1)
             try {
                 foreach ($tx in $txA) {
-                    $ti = $dayIdx[[string]$tx.Date]
-                    if ($null -eq $ti) { continue }
+                    $ti = Get-TradeBarIndex -BarDates $barDays -Date ([string]$tx.Date)   # 11.2: also weekends and holidays
+                    if ($ti -lt 0) { continue }
                     $tpx = Convert-CurrencyValue -Amount ([double]$tx.Price) -FromCurrency ([string]$tx.Currency) -ToCurrency ([string]$script:ChartCur)
                     if ($tpx -le 0) { continue }
                     $tx0 = $priceRect.Left + (([int]$ti / [double]($n - 1)) * $priceRect.Width)
