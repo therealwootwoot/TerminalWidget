@@ -769,6 +769,9 @@ function Invoke-SmokeStep {
 
 $script:SmokeCloser = New-Object System.Windows.Forms.Timer
 $script:SmokeCloser.Add_Tick({
+    # a check that is still waiting goes first: after a stall both timers are due and
+    # closing first would end the step with "probe did not run" (next tick closes)
+    if ($null -ne $script:SmokeProbeTimer -and $script:SmokeProbeTimer.Enabled) { return }
     # closes every window except the main window (and the fullscreen chart)
     foreach ($f in @([System.Windows.Forms.Application]::OpenForms)) {
         if ([object]::ReferenceEquals($f, $form) -or ($null -ne $script:FsForm -and [object]::ReferenceEquals($f, $script:FsForm))) { continue }
