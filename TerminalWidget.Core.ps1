@@ -5806,11 +5806,12 @@ function Test-AmountColumn {
     $h = ConvertTo-SearchKey $Header
     if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
     foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
-                     "realisiert", "realized", "realised",
+                     "realisiert", "realized", "realised", "erwartet 12", "expected 12",
                      "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
         if ($h.Contains($w)) { return $true }
     }
-    return ($h -eq "gesamt")   # the money column next to "Gesamt %"
+    # money columns of the contribution and scenario tables, and "Gesamt" next to "Gesamt %" (whole header only)
+    return ($h -in @("gesamt", "anfang", "kaufe", "verkaufe", "ende", "veranderung", "start", "end", "buys", "sales", "change"))
 }
 
 function Hide-AmountsInText {

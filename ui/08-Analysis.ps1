@@ -760,7 +760,7 @@ function Draw-DividendBars {
             $bh = if ($max -gt 0) { ($bot - $top) * $v / $max } else { 0 }
             if ($v -gt 0) {
                 $g.FillRectangle($brA, [float]($x + $slot * 0.18), [float]($bot - $bh), [float]($slot * 0.64), [float][math]::Max(1, $bh))
-                $g.DrawString(("{0:N0}" -f $v), $fontUi, $brT, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot - $bh - (S 18)), [float]$slot, [float](S 18))), $sfC)
+                $g.DrawString((Protect-Amount ("{0:N0}" -f $v) ([bool]$script:Config.PrivacyMode)), $fontUi, $brT, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot - $bh - (S 18)), [float]$slot, [float](S 18))), $sfC)
             }
             $g.DrawString([string]$bk[$i].Label, $fontUi, $brM, (New-Object System.Drawing.RectangleF([float]$x, [float]($bot + (S 4)), [float]$slot, [float](S 18))), $sfC)
         }

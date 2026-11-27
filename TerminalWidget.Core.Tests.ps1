@@ -3535,6 +3535,14 @@ Describe "Monthly returns (v11.8)" {
     }
 }
 
+Describe "Privacy columns (v12.0)" {
+    It "masks the money columns of the contribution, scenario and dividend tables" {
+        foreach ($h in @("Anfang", "Käufe", "Verkäufe", "Ende", "Veränderung", "Erwartet 12M", "Start", "Buys", "Sales", "End", "Change", "Expected 12M")) { Test-AmountColumn $h | Should -BeTrue -Because $h }
+    }
+    It "keeps public market data and dates visible" {
+        foreach ($h in @("Letzte", "Pro Jahr", "Nächster Ex-Tag", "Quartalszahlen", "Zahltag", "Seit")) { Test-AmountColumn $h | Should -BeFalse -Because $h }
+    }
+}
 Describe "Full report (v12.0)" {
     BeforeAll {
         $script:lines = @(@{ Name = "Value <a>"; Values = @(100, 150.5, 200); Color = "#000000"; Dashed = $false })

@@ -1651,6 +1651,25 @@ function Invoke-SmokeTest {
                         $left = [regex]::Match($html, '<td[^>]*>[^<]*\d[^<]*\s(EUR|USD)</td>')
                         if ($left.Success) { return "amount in private report: $($left.Value)" }
                         if ($html -match 'text-anchor="end" dominant-baseline') { return "axis amounts in private report" }
+                        # strict: apart from the key figures (masked by id) a number may only stand in these columns
+                        $free = @("Ticker", "Seit", "XIRR p.a.", "Gruppe", "Anteil", "Jahr", "Jan", "Feb", "Mär", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez", "Gesamt %", "Kennzahl", "Depot", "Benchmark",
+                            "Rendite", "zum Vorjahr", "Rhythmus", "Letzte", "Pro Jahr", "auf EK", "Nächster Ex-Tag", "Zahltag", "Quartalszahlen")
+                        $sectionNo = 0
+                        foreach ($part in [regex]::Split($html, '(?=<h2>)')) {
+                            if ($part -notmatch '<h2>') { continue }
+                            $sectionNo++
+                            if ($sectionNo -eq 1) { continue }
+                            $isMonths = $part -match 'zeitgewichtet\)</h2>'
+                            $cols = @([regex]::Matches($part, '<th>(.*?)</th>') | ForEach-Object { [System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value) })
+                            foreach ($tr in [regex]::Matches($part, '(?s)<tr><td.*?</tr>')) {
+                                $cells = @([regex]::Matches($tr.Value, '<td[^>]*>(.*?)</td>') | ForEach-Object { [System.Net.WebUtility]::HtmlDecode($_.Groups[1].Value) })
+                                for ($ci = 0; $ci -lt $cells.Count; $ci++) {
+                                    if ($cells[$ci] -notmatch '\d' -or $cells[$ci].Contains("%") -or $free -contains $cols[$ci]) { continue }
+                                    if ($isMonths) { continue }
+                                    return "number in private report, section $sectionNo, column '$($cols[$ci])': $($cells[$ci])"
+                                }
+                            }
+                        }
                     }
                     if ($env:TW_SMOKE_SHOTS -and (Test-Path $env:TW_SMOKE_SHOTS)) { Copy-Item $file (Join-Path $env:TW_SMOKE_SHOTS $name) -Force }   # goes into the CI log for review
                     Remove-Item $file -ErrorAction SilentlyContinue

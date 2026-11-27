@@ -378,6 +378,7 @@ function Show-AnalysisDialog {
     $lblMonInfo.SetBounds((S 274), (S 4), (S 700), (S 18)); $lblMonInfo.ForeColor = $p.Muted; $lblMonInfo.Anchor = $aT -bor $aL -bor $aR; $lblMonInfo.AutoEllipsis = $true
     $pm.Controls.Add($lblMonInfo)
     $gMon = New-Object System.Windows.Forms.DataGridView
+    $gMon.Tag = "percent-only"
     $gMon.SetBounds(0, (S 32), (S 976), (S 464)); $gMon.Anchor = $aAll
     Style-DataGrid -Grid $gMon
     [void]$gMon.Columns.Add("Year", "Jahr")
