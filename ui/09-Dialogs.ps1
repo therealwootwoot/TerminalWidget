@@ -129,24 +129,39 @@ function Show-AnalysisDialog {
         $ac = $script:AnaCtl
         if ($null -eq $ac -or $null -eq $ac.Kpi -or @($ac.Kpi).Count -eq 0) { return }
         $tiles = @($ac.Kpi)
-        $gap = S 8
-        $w = [int](($sender.Width - ($tiles.Count - 1) * $gap) / $tiles.Count)
+        $grid = Get-TileGrid -Count $tiles.Count -Width $sender.Width -RowHeight (S 56) -Gap (S 8)
         $rad = if ($script:UiSpec.Fresh) { [float](S 10) } else { [float](S 3) }
         $tf = [System.Windows.Forms.TextFormatFlags]
         $fl = $tf::Left -bor $tf::Top -bor $tf::NoPadding -bor $tf::SingleLine -bor $tf::EndEllipsis
         for ($i = 0; $i -lt $tiles.Count; $i++) {
             $t = $tiles[$i]
-            $x = $i * ($w + $gap)
+            $cell = @($grid.Rects)[$i]
+            $x = $cell.X; $y = $cell.Y; $w = $cell.W
             $br = New-Object System.Drawing.SolidBrush($p.Card)
             $pn = New-Object System.Drawing.Pen($p.Border, 1)
-            Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$x, 0.5, [float]($w - 1), [float]($sender.Height - 1.5))) -Radius $rad -Pen $pn
+            Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$x, [float]($y + 0.5), [float]($w - 1), [float]($cell.H - 1.5))) -Radius $rad -Pen $pn
             $br.Dispose(); $pn.Dispose()
             $vc = switch ([string]$t.Kind) { "up" { $script:colGreen } "down" { $script:colRed } default { $p.Text } }
-            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Label, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 6), ($w - (S 20)), (S 14))), $p.Muted, $fl)
-            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Text, $fontUiBold, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 21), ($w - (S 20)), (S 16))), $vc, $fl)
-            if ($t.Sub) { [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Sub, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), (S 38), ($w - (S 20)), (S 14))), $p.Muted, $fl) }
+            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Label, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 6)), ($w - (S 20)), (S 14))), $p.Muted, $fl)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Text, $fontUiBold, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 21)), ($w - (S 20)), (S 16))), $vc, $fl)
+            if ($t.Sub) { [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Sub, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 38)), ($w - (S 20)), (S 14))), $p.Muted, $fl) }
         }
     })
+    # 11.0: a click on a tile opens the page with the details
+    $kpiPanel.Add_MouseMove({
+        param($sender, $e)
+        $t = Get-KpiTileAt $e.Location
+        $want = if ($null -ne $t -and (Get-KpiTilePage ([string]$t.Id))) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
+        if ($sender.Cursor -ne $want) { $sender.Cursor = $want }
+    })
+    $kpiPanel.Add_MouseClick({
+        param($sender, $e)
+        $t = Get-KpiTileAt $e.Location
+        if ($null -eq $t) { return }
+        $page = Get-KpiTilePage ([string]$t.Id)
+        if ($page) { Show-AnalysisPage $page }
+    })
+    $kpiPanel.Add_Resize({ param($sender, $e) $sender.Invalidate() })
     $pp.Controls.Add($kpiPanel)
     $lblSum = New-Object System.Windows.Forms.Label
     $lblSum.SetBounds(0, (S 494), (S 976), (S 68))

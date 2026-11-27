@@ -1492,6 +1492,42 @@ function Invoke-SmokeTest {
             Update-AllUiViews
         }
     } 12000
+    Invoke-SmokeStep "V11.0 analysis tiles" {
+        $keep = $script:Config.KpiTiles
+        try {
+            $script:Config.KpiTiles = @()
+            & $probeRun { Show-AnalysisDialog -Page "Perf" } {
+                $ac = $script:AnaCtl
+                if ($null -eq $ac) { return "window not open" }
+                if ($null -eq $ac.Model -or $null -eq $ac.Model.Series) { $script:SmokeNotes.Add("tiles: no price history, skipped"); return "" }
+                if (@($ac.Kpi).Count -ne 10) { return "standard tiles: $(@($ac.Kpi).Count)" }
+                $ac.Dlg.Refresh()
+                & $script:SmokeShot "33-analysis-tiles" $ac.Dlg
+                $twoRows = $ac.KpiPanel.Height; $chartH = $ac.Chart.Height
+                if ($twoRows -le (S 56)) { return "tiles not in two rows" }
+                $script:Config.KpiTiles = @("Value", "Result", "Xirr"); Update-AnalysisPerf
+                if ($ac.KpiPanel.Height -ne (S 56) -or $ac.Chart.Height -le $chartH) { return "one row did not give the chart its height back ($($ac.KpiPanel.Height), $($ac.Chart.Height))" }
+                $script:Config.KpiTiles = @((Get-KpiTileChoices).Keys); Update-AnalysisPerf; $ac.Dlg.Refresh()
+                if (@($ac.Kpi).Count -lt 14) { return "all tiles: $(@($ac.Kpi).Count)" }
+                & $script:SmokeShot "34-analysis-all-tiles" $ac.Dlg
+                $g = Get-TileGrid -Count @($ac.Kpi).Count -Width $ac.KpiPanel.Width -RowHeight (S 56) -Gap (S 8)
+                $vi = -1; for ($i = 0; $i -lt @($ac.Kpi).Count; $i++) { if ([string]@($ac.Kpi)[$i].Id -eq "Drawdown") { $vi = $i } }
+                $r = @($g.Rects)[$vi]
+                $hit = Get-KpiTileAt (New-Object System.Drawing.Point(($r.X + 5), ($r.Y + 5)))
+                if ($null -eq $hit -or [string]$hit.Id -ne "Drawdown") { return "tile hit test: $($hit.Id)" }
+                Show-AnalysisPage (Get-KpiTilePage "Drawdown")
+                if ([string]$ac.Page -ne "Risk") { return "tile did not lead to the risk page" }
+                return ""
+            } 12000
+            $script:Config.KpiTiles = @()
+            & $probeRun { Show-KpiTilesDialog } {
+                if ($null -eq $script:KpiCtl) { return "tile window not open" }
+                if ($script:KpiCtl.List.CheckedItems.Count -ne 10) { return "checked: $($script:KpiCtl.List.CheckedItems.Count)" }
+                & $script:SmokeShot "35-tile-choice" ($script:KpiCtl.List.FindForm())
+                return ""
+            } 1500
+        } finally { $script:Config.KpiTiles = $keep; Save-Config }
+    } 16000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

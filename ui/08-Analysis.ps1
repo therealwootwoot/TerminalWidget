@@ -253,6 +253,7 @@ function Update-AnalysisPerf {
         $dateNote = "Stand der Werte: Tagesschlusskurse und Wechselkurs-Verlauf bis {0}. Das Hauptfenster rechnet mit aktuellen Kursen und kann abweichen." -f $ld
         try {
             $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
+            $ac.Kpi = @($ac.Kpi) + @(Get-AnalysisMoreTiles -Model $m -Base ([string]$b))
             $ac.Kpi = @(Select-KpiTiles $ac.Kpi)
         } catch { $ac.Kpi = @(); Write-WidgetLog "Analysis tiles failed: $($_.Exception.Message)" "WARN" }
         $ac.Sum.Text = ((@($bl) + $dateNote) -join "`r`n")
@@ -263,7 +264,70 @@ function Update-AnalysisPerf {
     $ac.Status.ForeColor = if ($notes.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
     Set-DynTip $ac.Status ($ac.Status.Text)
     $ac.Chart.Invalidate()
-    if ($null -ne $ac.KpiPanel) { $ac.KpiPanel.Invalidate() }
+    if ($null -ne $ac.KpiPanel) { Set-KpiLayout; $ac.KpiPanel.Invalidate() }
+}
+
+function Get-AnalysisMoreTiles {
+    # v11.0: figures that need the value history, the bookings or the single positions
+    param($Model, [string]$Base)
+    $sr = $Model.Series
+    $range = [string]$script:Config.AnalysisRange
+    $dates = [string[]]$sr.Dates
+    $st = Get-SeriesWindowStart -Dates $dates -Range $range
+    $cut = { param($a) $arr = @($a); return [double[]]@($arr[$st..($arr.Count - 1)]) }
+    $stats = $null
+    if ($dates.Count - $st -ge 10) {
+        $ret = [double[]]@(Get-FlowAdjustedReturns -Value (& $cut $sr.Value) -Invested (& $cut $sr.Invested) -Dividends (& $cut $sr.Dividends))
+        $stats = Get-ReturnStats -Returns $ret -PeriodsPerYear (Get-PeriodsPerYear -Dates ([string[]]@($dates[$st..($dates.Count - 1)]))) -RiskFreePct ([double]$script:Config.RiskFreePct)
+    }
+    $nan = [double]::NaN
+    $year = (Get-Date).Year
+    $fb = @{}
+    foreach ($k in $script:FxFromEur.Keys) { $fb[$k] = [double]$script:FxFromEur[$k] }
+    $fees = 0.0
+    foreach ($y in @(Get-FeeOverview -Transactions $script:Transactions.ToArray() -CashEntries @($script:Cash.Entries.ToArray()) -Base $Base -History (Get-FxHistoryMap) -FallbackFromEur $fb)) { $fees += $y.OrderFees + $y.AccountFees }
+    $diff = if ([double]::IsNaN([double]$Model.TotalXirr) -or [double]::IsNaN([double]$Model.BenchXirr)) { $nan } else { ($Model.TotalXirr - $Model.BenchXirr) * 100.0 }
+    return @(Get-AnalysisExtraTiles -Base $Base -Unreal ([double]$Model.Total.Unreal) -Realized ([double]$Model.Total.Real) `
+        -DividendsYear (Get-DividendsSince -Dates $dates -Cumulative ([double[]]@($sr.Dividends)) -From "$year-01-01") -Year $year -Fees $fees `
+        -Vol $(if ($stats) { [double]$stats.Vol } else { $nan }) -MaxDrawdown $(if ($stats) { [double]$stats.MaxDd } else { $nan }) -Sharpe $(if ($stats) { [double]$stats.Sharpe } else { $nan }) `
+        -BenchDiff $diff -Positions @($Model.Rows | Where-Object { $_.Shares -gt 0 -and -not $_.NoPrice }) -RangeLabel (Get-RangeLabel $range))
+}
+
+function Get-KpiTilePage {
+    # the analysis page that shows the details behind a tile ("" = stay here)
+    param([string]$Id)
+    switch ($Id) {
+        { $_ -in @("Result", "Unreal", "Real", "Xirr", "Best", "Worst", "Value") } { return "Ret" }
+        { $_ -in @("Div", "DivYear") } { return "Div" }
+        { $_ -in @("Vola", "Drawdown", "Sharpe") } { return "Risk" }
+        "Bench" { return "Bench" }
+    }
+    return ""
+}
+
+function Set-KpiLayout {
+    # the tile area grows by rows; the chart above gives up the same height
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.KpiPanel) { return }
+    $kp = $ac.KpiPanel
+    $grid = Get-TileGrid -Count @($ac.Kpi).Count -Width $kp.Width -RowHeight (S 56) -Gap (S 8)
+    $delta = $grid.Height - $kp.Height
+    if ($delta -eq 0 -or $ac.Chart.Height - $delta -lt (S 120)) { return }
+    $ac.Chart.Height = $ac.Chart.Height - $delta
+    $kp.SetBounds($kp.Left, ($kp.Top - $delta), $kp.Width, $grid.Height)
+}
+
+function Get-KpiTileAt {
+    param([System.Drawing.Point]$At)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.KpiPanel) { return $null }
+    $tiles = @($ac.Kpi)
+    $grid = Get-TileGrid -Count $tiles.Count -Width $ac.KpiPanel.Width -RowHeight (S 56) -Gap (S 8)
+    for ($i = 0; $i -lt @($grid.Rects).Count; $i++) {
+        $r = @($grid.Rects)[$i]
+        if ($At.X -ge $r.X -and $At.X -lt $r.X + $r.W -and $At.Y -ge $r.Y -and $At.Y -lt $r.Y + $r.H) { return $tiles[$i] }
+    }
+    return $null
 }
 
 function Get-RangeLabel {
