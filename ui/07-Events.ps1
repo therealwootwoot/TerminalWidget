@@ -1215,7 +1215,7 @@ function Show-TransactionHistory {
     $grid.Columns["Id"].Visible = $false
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     # 10.4: date, type and currency are never cut off; the rest shares what is left
-    foreach ($n in @("Date", "Type", "Cur")) { $grid.Columns[$n].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }
+    foreach ($n in @("Date", "Type", "Ticker", "Shares", "Price", "Fee", "Cur")) { $grid.Columns[$n].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }
     $dlg.Controls.Add($grid)
 
     $btnDel = New-Object System.Windows.Forms.Button
@@ -1366,6 +1366,9 @@ function Show-TransactionHistory {
     $dlg.Controls.Add($btnImp)
     Set-DynTip $btnImp "Buchungen aus einer Broker-CSV importieren (Trade Republic, Scalable, Flatex, comdirect, IBKR ... - Spalten werden erkannt). Befehl: IMP"
     $script:TxHist.Import = $false
+    # 10.4: wider by default, so broker and note have room (the anchors move the rest along)
+    $wide = [math]::Min((S 900), [System.Windows.Forms.Screen]::FromControl($form).WorkingArea.Width - (S 40))
+    if ($dlg.ClientSize.Width -lt $wide) { $dlg.ClientSize = New-Object System.Drawing.Size($wide, $dlg.ClientSize.Height) }
     [void]$dlg.ShowDialog($form)
     $doImport = [bool]$script:TxHist.Import
     $script:TxHist = $null
