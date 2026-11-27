@@ -439,6 +439,13 @@ function Tr {
     return $Text
 }
 
+function Tr-Status {
+    # 11.2: run-time texts (status lines, tiles)
+    param([string]$Text)
+    if ([string]$script:Config.Language -ne "EN") { return $Text }
+    return (ConvertTo-EnglishStatus $Text)
+}
+
 function Apply-Language {
     # Translates the static texts of a window and its menus (English mode only)
     param($Root)
@@ -1311,7 +1318,7 @@ $script:PnlStatusBar.Add_Paint({
         $note = Get-PollNote -AllClosed $allClosed -ClosedMinutes $closedMin -RefreshSec ([int]$script:Config.RefreshSeconds) -BackoffUntil $script:BackoffUntil
     } catch { }
     $parts = @(Get-StatusBarParts -AgeSec $age -Stand $stand -Privacy ([bool]$script:Config.PrivacyMode) -ReqPerMin (Get-RequestsPerMinute) -PollNote $note)
-    $txt = $parts -join "   |   "
+    $txt = @($parts | ForEach-Object { Tr-Status $_ }) -join "   |   "
     $tr = New-Object System.Drawing.Rectangle((S 12), 0, ($sender.Width - (S 24)), $sender.Height)
     [System.Windows.Forms.TextRenderer]::DrawText($g, $txt, $fontMono, $tr, $p.Muted, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
 })

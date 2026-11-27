@@ -652,9 +652,9 @@ function Update-NachkaufSimulation {
         $pnlAbs = ($mktPrice - $avgPrice) * $shares
         $pnlPct = (($mktPrice - $avgPrice) / $avgPrice) * 100.0
         $sign   = if ($pnlAbs -ge 0) { "+" } else { "" }
-        $lines.Add(("{0,-8} | Akt. Wert: {1:N2} {2} | G/V: {3}{4:N2} {2} ({3}{5:N2}%)" -f $sym, $curVal, $dispCurr, $sign, $pnlAbs, $pnlPct))
+        $lines.Add((Tr-Status ("{0,-8} | Akt. Wert: {1:N2} {2} | G/V: {3}{4:N2} {2} ({3}{5:N2}%)" -f $sym, $curVal, $dispCurr, $sign, $pnlAbs, $pnlPct)))
     } else {
-        $lines.Add(("{0,-8} | Aktueller Marktkurs: {1:N2} {2}" -f $sym, $mktPrice, $dispCurr))
+        $lines.Add((Tr-Status ("{0,-8} | Aktueller Marktkurs: {1:N2} {2}" -f $sym, $mktPrice, $dispCurr)))
     }
 
     # v7.5: closed calculator -> only the position line
@@ -990,7 +990,7 @@ function Refresh-WatchlistAndAlerts {
             $distStr = if ($q.High52 -gt 0) { "{0:N1}%" -f ((($q.Price - $q.High52) / $q.High52) * 100.0) } else { "-" }
             $extStr = if ($q.ExtPrice -gt 0) { "{0}{1:N2}%" -f $(if ($q.ExtPct -ge 0) { "+" } else { "" }), $q.ExtPct } else { "-" }
             $ms = Get-MarketState -Tp $q.Tp -NowSec $nowSec
-            $mStr = if ($null -ne $ms) { $ms.Short } else { "-" }
+            $mStr = if ($null -ne $ms) { Tr-Status ([string]$ms.Short) } else { "-" }
             # v4.9.5: analyst mean target vs. price + consensus
             $ev = $script:Events[$uSym]
             $tgtStr = "-"; $tgtTip = ""; $up = [double]::NaN
@@ -1340,6 +1340,7 @@ function Update-MarketStatusUi {
             else { "$zu - öffnet " + (Format-LocalTime $ms.NextSec) }
         }
     }
+    $txt = Tr-Status $txt
     # v7.3: short form when the full text does not fit (narrow window); the tooltip has the details
     if ($lblMarketStatus.Width -gt 0 -and [System.Windows.Forms.TextRenderer]::MeasureText($txt, $lblMarketStatus.Font).Width -gt $lblMarketStatus.Width) { $txt = Get-ShortMarketText $txt }
     if ($lblMarketStatus.Text -ne $txt) { $lblMarketStatus.Text = $txt }
