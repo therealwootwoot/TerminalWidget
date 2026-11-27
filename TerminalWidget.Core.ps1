@@ -2910,6 +2910,7 @@ function Get-TerminalFunctions {
     return [ordered]@{
         "GP"     = @{ Scope = "T";  Desc = "Chart (optional Zeitraum: GP 1Y)" }
         "DES"    = @{ Scope = "T";  Desc = "Beschreibung: Profil, Kennzahlen, Termine, Position" }
+        "POS"    = @{ Scope = "T";  Desc = "Position im Detail: Ergebnis, Dividenden, Gebühren, Broker, Buchungen" }
         "TA"     = @{ Scope = "T";  Desc = "Ticker-Analyse: technische Signale, Unterstützung / Widerstand, Kennzahlen" }
         "FA"     = @{ Scope = "T";  Desc = "Ticker-Analyse: Kennzahlen (KGV, Margen, Wachstum ...) im Vergleich" }
         "N"      = @{ Scope = "GT"; Desc = "Nachrichten (ohne Ticker: News-Tab)" }
@@ -5102,6 +5103,8 @@ function ConvertTo-EnglishStatus {
         @('Yahoo-Pause bis', 'Yahoo pause until'), @('Noch keine Daten', 'No data yet'), @('Privat-Modus', 'Privacy mode'),
         @('Handel 24/7', 'Trading 24/7'), @('Offen - zu in', 'Open - closes in'), @('Handel in', 'trading in'), @('Ende in', 'ends in'),
         @('öffnet in', 'opens in'), @('öffnet', 'opens'), @('Feiertag', 'Holiday'), @('^Offen$', 'Open'), @('(^|\u25CF )Zu(?=$| )', '$1Closed'),
+        @('^je Stück ', 'per share '), @(' Stück$', ' shares'), @(' auf Einstand$', ' on cost'), @(' auf alle Käufe$', ' on all buys'),
+        @('^ab 30 Tagen$', 'from 30 days'), @('^12 Monate ', '12 months '), @('^letzte 12 Monate$', 'last 12 months'), @('^nach Wert$', 'by value'),
         @('^Investiert ', 'Invested '), @('% auf Einsatz', '% on invested'), @('^Dividenden (\d{4})$', 'Dividends $1'),
         @('^Im Zeitraum', 'In period'), @('\(gesamt\)', '(all)'), @('\((\d) Jahre\)', '($1 years)'), @('\(1 Jahr\)', '(1 year)'), @('\((\d+) Monate\)', '($1 months)'),
         @('^Zeitraum: gesamt', 'Period: all'), @('^Zeitraum: 1 Jahr', 'Period: 1 year'), @('^Zeitraum: (\d) Jahre', 'Period: $1 years'), @('^Zeitraum: (\d+) Monate', 'Period: $1 months'),
@@ -5115,6 +5118,118 @@ function ConvertTo-EnglishStatus {
         @('Akt\. Wert:', 'Value now:'), @('Aktueller Marktkurs:', 'Market price:'), @('G/V:', 'P/L:')
     )) { $t = $t -creplace $r[0], $r[1] }
     return $t
+}
+
+# ---- one position in detail (v11.4) ------------------------------------------
+function Get-PositionDetail {
+    # Everything about one ticker, in Base: result, income, fees, per year, per broker.
+    # PriceNow in Base (NaN = unknown). PortfolioShares (< 0 = use the booked shares)
+    # is the share count of the portfolio editor, used for the value like in the analysis.
+    param([array]$Transactions, [string]$Ticker, [string]$Base = "EUR", [hashtable]$History = @{}, [hashtable]$FallbackFromEur = @{},
+          [hashtable]$Splits = @{}, [double]$PriceNow = [double]::NaN, [double]$PortfolioShares = -1.0, [string]$Today = "")
+    $sym = ([string]$Ticker).Trim().ToUpper()
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not $Today) { $Today = (Get-Date).ToString("yyyy-MM-dd") }
+    $own = @(@($Transactions) | Where-Object { $null -ne $_ -and ([string]$_.Ticker).ToUpper() -eq $sym })
+    $ledger = Get-PortfolioLedger -Transactions $own -Base $Base -History $History -FallbackFromEur $FallbackFromEur -Splits $Splits -AsOf $Today
+    $L = $ledger[$sym]
+    $nan = [double]::NaN
+    $d = [PSCustomObject]@{ Ticker = $sym; HasBookings = ($null -ne $L); Shares = 0.0; BookedShares = 0.0; Cost = 0.0; AvgCost = $nan; Value = $nan; Unreal = $nan; UnrealPct = $nan
+        Real = 0.0; Div = 0.0; Div12 = 0.0; YieldOnCost = $nan; Total = $nan; Pct = $nan; Xirr = $nan; FirstDate = ""; HoldDays = 0; Fees = 0.0; Orders = 0; Approx = $false
+        Years = @(); Brokers = @(); Bookings = @($own | Sort-Object -Property @{ Expression = { [string]$_.Date }; Descending = $true }) }
+    if ($null -ne $L) { $d.BookedShares = $L.Shares }
+    $d.Shares = if ($PortfolioShares -ge 0) { $PortfolioShares } else { $d.BookedShares }
+    $hasPx = -not [double]::IsNaN($PriceNow)
+    if ($hasPx) { $d.Value = $d.Shares * $PriceNow }
+    if ($null -eq $L) { return $d }
+    $d.Cost = $L.Cost; $d.Real = $L.Realized; $d.Div = $L.Dividends; $d.Approx = $L.Approx; $d.FirstDate = $L.FirstDate
+    if ($L.Shares -gt 0) { $d.AvgCost = $L.Cost / $L.Shares }
+    if ($hasPx -or $L.Shares -le 0) {
+        $booked = if ($L.Shares -gt 0) { $L.Shares * $PriceNow } else { 0.0 }
+        $d.Unreal = if ($L.Shares -gt 0) { $booked - $L.Cost } else { 0.0 }
+        if ($L.Cost -gt 0) { $d.UnrealPct = $d.Unreal / $L.Cost * 100.0 }
+        $d.Total = $d.Unreal + $d.Real + $d.Div
+        if ($L.Bought -gt 0) { $d.Pct = $d.Total / $L.Bought * 100.0 }
+    }
+    if ($L.FirstDate) {
+        $d.HoldDays = [int]([DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv) - [DateTime]::ParseExact($L.FirstDate, "yyyy-MM-dd", $inv)).TotalDays
+        if ($d.HoldDays -ge 30 -and ($hasPx -or $L.Shares -le 0)) {
+            $cd = @($L.CfDates); $ca = @($L.CfAmounts)
+            if ($L.Shares -gt 0) { $cd += $Today; $ca += ($L.Shares * $PriceNow) }
+            $d.Xirr = Get-Xirr -Dates ([string[]]$cd) -Amounts ([double[]]$ca)
+        }
+    }
+    # per year from the ledger's cash flows (already in Base)
+    $years = @{}
+    $yr = {
+        param([string]$y)
+        if (-not $years.ContainsKey($y)) { $years[$y] = [PSCustomObject]@{ Year = $y; Bought = 0.0; Sold = 0.0; Dividends = 0.0; Fees = 0.0 } }
+        return $years[$y]
+    }
+    $from12 = [DateTime]::ParseExact($Today, "yyyy-MM-dd", $inv).AddYears(-1).ToString("yyyy-MM-dd")
+    for ($i = 0; $i -lt $L.CfDates.Count; $i++) {
+        $row = & $yr $L.CfDates[$i].Substring(0, 4)
+        switch ($L.CfKinds[$i]) {
+            "B" { $row.Bought -= $L.CfAmounts[$i] }
+            "S" { $row.Sold += $L.CfAmounts[$i] }
+            "D" { $row.Dividends += $L.CfAmounts[$i]; if ([string]::CompareOrdinal($L.CfDates[$i], $from12) -gt 0) { $d.Div12 += $L.CfAmounts[$i] } }
+        }
+    }
+    if ($d.Cost -gt 0) { $d.YieldOnCost = $d.Div12 / $d.Cost * 100.0 }
+    foreach ($f in @(Get-FeeOverview -Transactions @($own | Where-Object { [string]$_.Type -in @("Kauf", "Verkauf") }) -CashEntries @() -Base $Base -History $History -FallbackFromEur $FallbackFromEur)) {
+        (& $yr $f.Year).Fees += $f.OrderFees
+        $d.Fees += $f.OrderFees; $d.Orders += $f.Orders
+    }
+    $d.Years = @($years.Values | Sort-Object -Property @{ Expression = { $_.Year }; Descending = $true })
+    # per broker: shares in today's units, orders, volume and fees over all years
+    $brokers = @{}
+    $br = {
+        param([string]$name)
+        $k = $name.ToLowerInvariant()
+        if (-not $brokers.ContainsKey($k)) { $brokers[$k] = [PSCustomObject]@{ Broker = $name; Shares = 0.0; Orders = 0; Volume = 0.0; Fees = 0.0 } }
+        return $brokers[$k]
+    }
+    foreach ($t in $own) {
+        if ([string]$t.Type -notin @("Kauf", "Verkauf") -or [string]::CompareOrdinal([string]$t.Date, $Today) -gt 0) { continue }
+        $units = [double]$t.Shares * (Get-SplitFactorAfter -Splits $Splits -Ticker $sym -Date ([string]$t.Date))
+        $row = & $br (([string]$t.Broker).Trim())
+        if ([string]$t.Type -eq "Kauf") { $row.Shares += $units } else { $row.Shares -= $units }
+    }
+    foreach ($o in @(Get-BrokerFeeOverview -Transactions $own -Base $Base -History $History -FallbackFromEur $FallbackFromEur)) {
+        $row = & $br $o.Broker
+        $row.Orders += $o.Orders; $row.Volume += $o.Volume; $row.Fees += $o.Fees
+    }
+    foreach ($row in $brokers.Values) { if ([math]::Abs($row.Shares) -lt 0.000001) { $row.Shares = 0.0 } }
+    $d.Brokers = @($brokers.Values | Sort-Object -Property @{ Expression = { $_.Shares }; Descending = $true }, Broker)
+    return $d
+}
+
+function Get-PositionTiles {
+    # the key figures of one position as tiles; Share = % of the depot value (NaN = unknown)
+    param($Detail, [string]$Base = "EUR", [double]$Share = [double]::NaN, [bool]$Privacy = $false)
+    $nan = { param($x) [double]::IsNaN([double]$x) }
+    $dots = [string]([char]0x2022) * 4
+    $money = { param($x, [string]$f = "{0:N0}") if (& $nan $x) { "-" } elseif ($Privacy) { $dots } else { ($f -f [double]$x) + " " + $Base } }
+    $signed = { param($x) & $money $x "{0:+#,##0.00;-#,##0.00;0.00}" }
+    $pct = { param($x, [string]$tail = "") if (& $nan $x) { "" } else { ("{0:+0.0;-0.0;0.0} %" -f [double]$x) + $tail } }
+    $kind = { param($x) if ((& $nan $x) -or [math]::Abs([double]$x) -lt 0.005) { "flat" } elseif ([double]$x -gt 0) { "up" } else { "down" } }
+    $tile = { param($id, $label, $text, $sub, $k) [PSCustomObject]@{ Id = $id; Label = $label; Text = $text; Sub = $sub; Kind = $k } }
+    $x = $Detail
+    $sh = if ($Privacy) { $dots } else { "{0:0.####}" -f [double]$x.Shares }
+    $avg = if (& $nan $x.AvgCost) { "" } elseif ($Privacy) { "je Stück " + $dots } else { "je Stück {0:N2}" -f [double]$x.AvgCost }
+    $xt = if (& $nan $x.Xirr) { "-" } else { & $pct ($x.Xirr * 100.0) }
+    return @(
+        (& $tile "Value" "Wert" (& $money $x.Value "{0:N2}") "$sh Stück" "flat")
+        (& $tile "Cost" "Einstand" (& $money $x.Cost "{0:N2}") $avg "flat")
+        (& $tile "Unreal" "Buchgewinn" (& $signed $x.Unreal) (& $pct $x.UnrealPct " auf Einstand") (& $kind $x.Unreal))
+        (& $tile "Total" "Gesamtergebnis" (& $signed $x.Total) (& $pct $x.Pct " auf alle Käufe") (& $kind $x.Total))
+        (& $tile "Xirr" "Rendite p.a." $xt $(if ($x.HoldDays -lt 30) { "ab 30 Tagen" } else { "XIRR" }) (& $kind $(if (& $nan $x.Xirr) { [double]::NaN } else { $x.Xirr * 100.0 })))
+        (& $tile "Real" "Realisiert" (& $signed $x.Real) "aus Verkäufen" (& $kind $x.Real))
+        (& $tile "Div" "Dividenden" (& $money $x.Div "{0:N2}") $(if ($Privacy) { "12 Monate $dots" } else { "12 Monate {0:N2}" -f [double]$x.Div12 }) "flat")
+        (& $tile "Yoc" "Dividende auf Einstand" $(if (& $nan $x.YieldOnCost) { "-" } else { "{0:0.00} %" -f [double]$x.YieldOnCost }) "letzte 12 Monate" "flat")
+        (& $tile "Fees" "Gebühren" (& $money $x.Fees "{0:N2}") ("{0} Orders" -f $x.Orders) "flat")
+        (& $tile "Share" "Anteil im Depot" $(if (& $nan $Share) { "-" } else { "{0:0.0} %" -f $Share }) "nach Wert" "flat")
+    )
 }
 
 function Get-TileGrid {

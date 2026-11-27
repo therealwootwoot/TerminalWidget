@@ -294,6 +294,15 @@ function Get-AnalysisMoreTiles {
         -BenchDiff $diff -Positions @($Model.Rows | Where-Object { $_.Shares -gt 0 -and -not $_.NoPrice }) -RangeLabel (Get-RangeLabel $range))
 }
 
+function Get-KpiTileTicker {
+    # the position a tile is about ("" = none)
+    param($Tile)
+    if ($null -eq $Tile -or [string]$Tile.Id -notin @("Best", "Worst")) { return "" }
+    $first = @(([string]$Tile.Text) -split '\s+')[0]
+    if ($first -eq "-") { return "" }
+    return $first
+}
+
 function Get-KpiTilePage {
     # the analysis page that shows the details behind a tile ("" = stay here)
     param([string]$Id)

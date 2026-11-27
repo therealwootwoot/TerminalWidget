@@ -1,6 +1,32 @@
 ﻿# TerminalWidget UI part 09 (Dialogs) - dot-sourced by TerminalWidget.ps1 in order, same scope as the main script.
 # Keep UTF-8 with BOM. Part of the former single-file script (split in V7.0).
 
+function Write-KpiTiles {
+    # paints key figure tiles (rows from Get-TileGrid) onto a panel
+    param($G, $Panel, $Tiles)
+    $p = $script:Pal
+    $G.Clear($Panel.Parent.BackColor)
+    $list = @($Tiles)
+    if ($list.Count -eq 0) { return }
+    $grid = Get-TileGrid -Count $list.Count -Width $Panel.Width -RowHeight (S 56) -Gap (S 8)
+    $rad = if ($script:UiSpec.Fresh) { [float](S 10) } else { [float](S 3) }
+    $tf = [System.Windows.Forms.TextFormatFlags]
+    $fl = $tf::Left -bor $tf::Top -bor $tf::NoPadding -bor $tf::SingleLine -bor $tf::EndEllipsis
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $t = $list[$i]
+        $cell = @($grid.Rects)[$i]
+        $x = $cell.X; $y = $cell.Y; $w = $cell.W
+        $br = New-Object System.Drawing.SolidBrush($p.Card)
+        $pn = New-Object System.Drawing.Pen($p.Border, 1)
+        Fill-RoundedRect -g $G -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$x, [float]($y + 0.5), [float]($w - 1), [float]($cell.H - 1.5))) -Radius $rad -Pen $pn
+        $br.Dispose(); $pn.Dispose()
+        $vc = switch ([string]$t.Kind) { "up" { $script:colGreen } "down" { $script:colRed } default { $p.Text } }
+        [System.Windows.Forms.TextRenderer]::DrawText($G, [string]$t.Label, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 6)), ($w - (S 20)), (S 14))), $p.Muted, $fl)
+        [System.Windows.Forms.TextRenderer]::DrawText($G, [string]$t.Text, $fontUiBold, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 21)), ($w - (S 20)), (S 16))), $vc, $fl)
+        if ($t.Sub) { [System.Windows.Forms.TextRenderer]::DrawText($G, [string]$t.Sub, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 38)), ($w - (S 20)), (S 14))), $p.Muted, $fl) }
+    }
+}
+
 function Show-AnalysisDialog {
     param([string]$Page = "")
     if ($null -ne $script:AnaCtl) { return }
@@ -123,29 +149,8 @@ function Show-AnalysisDialog {
     Enable-DoubleBuffering -Control $kpiPanel
     $kpiPanel.Add_Paint({
         param($sender, $e)
-        $g = $e.Graphics
-        $p = $script:Pal
-        $g.Clear($sender.Parent.BackColor)
         $ac = $script:AnaCtl
-        if ($null -eq $ac -or $null -eq $ac.Kpi -or @($ac.Kpi).Count -eq 0) { return }
-        $tiles = @($ac.Kpi)
-        $grid = Get-TileGrid -Count $tiles.Count -Width $sender.Width -RowHeight (S 56) -Gap (S 8)
-        $rad = if ($script:UiSpec.Fresh) { [float](S 10) } else { [float](S 3) }
-        $tf = [System.Windows.Forms.TextFormatFlags]
-        $fl = $tf::Left -bor $tf::Top -bor $tf::NoPadding -bor $tf::SingleLine -bor $tf::EndEllipsis
-        for ($i = 0; $i -lt $tiles.Count; $i++) {
-            $t = $tiles[$i]
-            $cell = @($grid.Rects)[$i]
-            $x = $cell.X; $y = $cell.Y; $w = $cell.W
-            $br = New-Object System.Drawing.SolidBrush($p.Card)
-            $pn = New-Object System.Drawing.Pen($p.Border, 1)
-            Fill-RoundedRect -g $g -Brush $br -Rect (New-Object System.Drawing.RectangleF([float]$x, [float]($y + 0.5), [float]($w - 1), [float]($cell.H - 1.5))) -Radius $rad -Pen $pn
-            $br.Dispose(); $pn.Dispose()
-            $vc = switch ([string]$t.Kind) { "up" { $script:colGreen } "down" { $script:colRed } default { $p.Text } }
-            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Label, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 6)), ($w - (S 20)), (S 14))), $p.Muted, $fl)
-            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Text, $fontUiBold, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 21)), ($w - (S 20)), (S 16))), $vc, $fl)
-            if ($t.Sub) { [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$t.Sub, $fontUi, (New-Object System.Drawing.Rectangle(($x + (S 10)), ($y + (S 38)), ($w - (S 20)), (S 14))), $p.Muted, $fl) }
-        }
+        Write-KpiTiles -G $e.Graphics -Panel $sender -Tiles $(if ($null -eq $ac) { @() } else { @($ac.Kpi | Where-Object { $null -ne $_ }) })
     })
     # 11.0: a click on a tile opens the page with the details
     $kpiPanel.Add_MouseMove({
@@ -158,6 +163,8 @@ function Show-AnalysisDialog {
         param($sender, $e)
         $t = Get-KpiTileAt $e.Location
         if ($null -eq $t) { return }
+        $sym = Get-KpiTileTicker $t   # 11.4: best / weakest open the position itself
+        if ($sym) { Show-PositionDialog -Ticker $sym -Owner $script:AnaCtl.Dlg; return }
         $page = Get-KpiTilePage ([string]$t.Id)
         if ($page) { Show-AnalysisPage $page }
     })
@@ -186,6 +193,11 @@ function Show-AnalysisDialog {
         if ($cd[3]) { $col.ToolTipText = Get-GlossaryShort -Key $cd[3] }
     }
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $grid.Add_CellDoubleClick({
+        param($sender, $e)
+        if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $sender.Rows.Count - 1) { return }   # the last row is the sum
+        Show-PositionDialog -Ticker ([string]$sender.Rows[$e.RowIndex].Cells["Ticker"].Value) -Owner $script:AnaCtl.Dlg
+    })
     foreach ($cn in @("Ticker", "Since")) { $grid.Columns[$cn].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }   # 11.2: dates were cut off
     $grid.Columns["Ticker"].MinimumWidth = S 64   # the header was cut off
     $pr.Controls.Add($grid)
@@ -1925,7 +1937,7 @@ function Invoke-TerminalCommand {
         return ""
     }
     $sym = $c.Ticker
-    if ($c.Func -in @("", "GP", "DES", "N", "DVD", "EE", "TX", "TA", "FA")) {
+    if ($c.Func -in @("", "GP", "DES", "POS", "N", "DVD", "EE", "TX", "TA", "FA")) {
         $res = Resolve-BestSymbol -RawInput $sym
         if ([string]::IsNullOrWhiteSpace($res)) { return "Ticker '$sym' nicht gefunden." }
         $sym = $res
@@ -1941,6 +1953,7 @@ function Invoke-TerminalCommand {
             }
         }
         "DES"  { Show-DescriptionDialog $sym }
+        "POS"  { Show-PositionDialog $sym }
         "TA"   { Show-TickerAnalysis $sym }
         "FA"   { Show-TickerAnalysis $sym }
         "N"    { Show-NewsDialog $sym }
