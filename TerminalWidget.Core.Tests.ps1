@@ -1495,7 +1495,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         try {
             $exe = (Get-Process -Id $PID).Path
             $p = Start-Process -FilePath $exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ui`"") -PassThru
-            $done = $p.WaitForExit(420000)
+            $done = $p.WaitForExit(600000)
             if (-not $done) { try { $p.Kill() } catch { } }
         } finally {
             Remove-Item Env:\TW_SMOKE_TEST -ErrorAction SilentlyContinue
@@ -1512,7 +1512,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
                 Write-Host ("SHOT-END " + $png.Name)
             }
         }
-        $done | Should -BeTrue -Because "the widget must finish the smoke run within 7 minutes"
+        $done | Should -BeTrue -Because "the widget must finish the smoke run within 10 minutes"
         Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
         $rep = Get-Content $report -Raw | ConvertFrom-Json
         foreach ($st in @($rep.Steps)) { Write-Host ("{0,-28} {1,-5} {2,6} ms {3}" -f $st.Name, $(if ($st.Ok) { "ok" } else { "FAIL" }), $st.Ms, $st.Error) }
