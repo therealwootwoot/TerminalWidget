@@ -55,6 +55,8 @@ foreach ($pair in @(
     @('Gewinn- und Verlustfarben stellst du in den Einstellungen ein.', 'Gain and loss colours are set in the settings.'),
     @('Speichern und anwenden', 'Save and apply'),
     @('Exportieren ...', 'Export ...'),
+    @('Vor der Benchmark: {0} von {1} Monaten   |   Schnitt {2:+0.0;-0.0} Punkte   |   Bester {3}   |   Schwächster {4}', 'Ahead of the benchmark: {0} of {1} months   |   Average {2:+0.0;-0.0} points   |   Best {3}   |   Weakest {4}'),
+    @('{0:00}.{1} {2:+0.0;-0.0} Punkte', '{0:00}.{1} {2:+0.0;-0.0} points'),
     @('Monate', 'Months'),
     @('Rendite je Monat und Jahr, zeitgewichtet: Ein- und Auszahlungen sind herausgerechnet', 'Return per month and year, time-weighted: deposits and withdrawals are taken out'),
     @('Anzeigen:', 'Show:'),

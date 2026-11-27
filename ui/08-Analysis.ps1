@@ -821,7 +821,13 @@ function Update-AnalysisMonths {
     $st = Get-MonthStats -Returns $shown
     if ($null -eq $st) { $ac.MonInfo.Text = Tr "Zu wenig Verlauf - erst ein paar Wochen Buchungen / Kurse"; return }
     $lbl = { param($r) "{0:00}.{1} {2:+0.0;-0.0}%" -f $r.Month, $r.Year, $r.Pct }
-    $ac.MonInfo.Text = (Tr "Positive Monate: {0} von {1}   |   Schnitt {2:+0.0;-0.0}%   |   Bester {3}   |   Schwächster {4}") -f $st.Positive, $st.Count, $st.Average, (& $lbl $st.Best), (& $lbl $st.Worst)
+    $sumText = "Positive Monate: {0} von {1}   |   Schnitt {2:+0.0;-0.0}%   |   Bester {3}   |   Schwächster {4}"
+    if ($mode -eq 2) {
+        # the gap is a difference of two returns: percentage points, not percent
+        $sumText = "Vor der Benchmark: {0} von {1} Monaten   |   Schnitt {2:+0.0;-0.0} Punkte   |   Bester {3}   |   Schwächster {4}"
+        $lbl = { param($r) (Tr "{0:00}.{1} {2:+0.0;-0.0} Punkte") -f $r.Month, $r.Year, $r.Pct }
+    }
+    $ac.MonInfo.Text = (Tr $sumText) -f $st.Positive, $st.Count, $st.Average, (& $lbl $st.Best), (& $lbl $st.Worst)
 
     # a yearly difference is the difference of the two yearly returns, not a chain of monthly differences
     $table = @(Get-MonthTable -Returns $shown)

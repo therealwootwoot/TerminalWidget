@@ -5,7 +5,7 @@ Neue Seite **Monate** in der Portfolio-Analyse (auch über den Befehl `MONAT`).
 
 - Tabelle mit einer Zeile je Jahr, den zwölf Monaten und dem Jahreswert
 - Grün und Rot, je stärker die Bewegung, desto kräftiger die Farbe
-- Umschaltbar: Depot, Benchmark oder Abstand zur Benchmark
+- Umschaltbar: Depot, Benchmark oder Abstand zur Benchmark (in Prozentpunkten)
 - Darüber: Anzahl positiver Monate, Schnitt, bester und schwächster Monat
 - Zeitgewichtet: Käufe und Verkäufe verfälschen die Zahlen nicht, Dividenden zählen mit
 - Export als HTML oder CSV wie auf den anderen Seiten
