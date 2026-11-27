@@ -2955,6 +2955,7 @@ function Get-TerminalFunctions {
         "SPAR"   = @{ Scope = "G";  Desc = "Sparpläne (monatliche Käufe automatisch buchen)" }
         "REBAL"  = @{ Scope = "G";  Desc = "Zielgewichte und Rebalancing-Vorschlag" }
         "RISK"   = @{ Scope = "G";  Desc = "Risiko: Drawdown, Volatilität, Sharpe, Beta, Korrelation" }
+        "MONAT"  = @{ Scope = "G";  Desc = "Rendite je Monat und Jahr (zeitgewichtet), Depot, Benchmark oder Abstand" }
         "HEAT"   = @{ Scope = "G";  Desc = "Heatmap des Depots (Größe = Anteil, Farbe = Tag %)" }
         "FULL"   = @{ Scope = "G";  Desc = "Liste als ganze Seite (Terminal): FULL PORT / FULL WATCH / FULL NEWS, FULL = zurück" }
         "TOUR"   = @{ Scope = "G";  Desc = "Kurze Einführung" }
@@ -3996,6 +3997,68 @@ function Get-FlowAdjustedReturns {
         $out.Add((([double]$Value[$i] + $dD - $dI) / $v0) - 1.0)
     }
     return $out.ToArray()
+}
+
+function Get-MonthlyReturns {
+    # v11.8: time-weighted return per calendar month, deposits and withdrawals taken out (same rule as
+    # Get-FlowAdjustedReturns). A day's change belongs to the month of that day. Months without data are left out.
+    # -> one entry per month, oldest first: Key "yyyy-MM", Year, Month, Pct, Days
+    param([string[]]$Dates, [double[]]$Value, [double[]]$Invested, [double[]]$Dividends = $null)
+    $out = New-Object System.Collections.Generic.List[PSObject]
+    if ($null -eq $Dates -or $null -eq $Value -or $Value.Count -lt 2) { return }
+    $n = [math]::Min($Dates.Count, $Value.Count)
+    $cur = $null; $factor = 1.0; $days = 0
+    $flush = {
+        param($key, $f, $d)
+        if ($null -ne $key -and $d -gt 0) { $out.Add([PSCustomObject]@{ Key = $key; Year = [int]$key.Substring(0, 4); Month = [int]$key.Substring(5, 2); Pct = ($f - 1.0) * 100.0; Days = $d }) }
+    }
+    for ($i = 1; $i -lt $n; $i++) {
+        $v0 = [double]$Value[$i - 1]
+        if ($v0 -le 0 -or [double]::IsNaN($v0) -or [double]::IsNaN([double]$Value[$i])) { continue }
+        $key = ([string]$Dates[$i]).Substring(0, 7)
+        if ($key -ne $cur) { & $flush $cur $factor $days; $cur = $key; $factor = 1.0; $days = 0 }
+        $dI = if ($null -ne $Invested -and $Invested.Count -gt $i) { [double]$Invested[$i] - [double]$Invested[$i - 1] } else { 0.0 }
+        $dD = if ($null -ne $Dividends -and $Dividends.Count -gt $i) { [double]$Dividends[$i] - [double]$Dividends[$i - 1] } else { 0.0 }
+        $factor *= ([double]$Value[$i] + $dD - $dI) / $v0
+        $days++
+    }
+    & $flush $cur $factor $days
+    return $out.ToArray()
+}
+
+function Get-MonthTable {
+    # one row per year (newest first): Months = 12 values (NaN = no data), Total = compounded over the months present
+    param($Returns)
+    $byYear = @{}
+    foreach ($r in @($Returns)) {
+        if ($null -eq $r) { continue }
+        if (-not $byYear.ContainsKey($r.Year)) {
+            $m = New-Object double[] 12
+            for ($i = 0; $i -lt 12; $i++) { $m[$i] = [double]::NaN }
+            $byYear[$r.Year] = $m
+        }
+        $byYear[$r.Year][$r.Month - 1] = [double]$r.Pct
+    }
+    foreach ($y in @($byYear.Keys | Sort-Object -Descending)) {
+        $f = 1.0
+        foreach ($v in $byYear[$y]) { if (-not [double]::IsNaN($v)) { $f *= 1.0 + $v / 100.0 } }
+        [PSCustomObject]@{ Year = [int]$y; Months = $byYear[$y]; Total = ($f - 1.0) * 100.0 }
+    }
+}
+
+function Get-MonthStats {
+    # Count, Positive, Average, Best / Worst (entries of Get-MonthlyReturns)
+    param($Returns)
+    $list = @($Returns | Where-Object { $null -ne $_ })
+    if ($list.Count -eq 0) { return $null }
+    $best = $list[0]; $worst = $list[0]; $sum = 0.0; $pos = 0
+    foreach ($r in $list) {
+        if ($r.Pct -gt $best.Pct) { $best = $r }
+        if ($r.Pct -lt $worst.Pct) { $worst = $r }
+        $sum += $r.Pct
+        if ($r.Pct -gt 0) { $pos++ }
+    }
+    return [PSCustomObject]@{ Count = $list.Count; Positive = $pos; Average = $sum / $list.Count; Best = $best; Worst = $worst }
 }
 
 function Get-PeriodsPerYear {

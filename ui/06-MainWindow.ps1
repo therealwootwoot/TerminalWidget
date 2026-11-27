@@ -104,6 +104,7 @@ function Apply-ThemeToAllControls {
     Rebuild-GdiCache
     Update-MenuRenderer
     Apply-DwmTitlebarTheme
+    Set-ViewPolish $form
     $p = $script:Pal
 
     $form.BackColor = $p.BodyBg

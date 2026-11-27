@@ -1615,6 +1615,21 @@ function Invoke-SmokeTest {
             } finally { $script:Config.PrivacyMode = $keepP }
         } finally { $script:Config.SavingsCalc = $keepC; $script:Config.DepotGoals = $keepG; Save-Config }
     } 5000
+    Invoke-SmokeStep "V11.8 months page" {
+        & $probeRun { Show-AnalysisDialog -Page "Months" } {
+            $ac = $script:AnaCtl
+            if ($null -eq $ac -or $null -eq $ac.MonGrid) { return "window not open" }
+            if ($ac.MonGrid.Rows.Count -lt 1) { return "no rows yet: $($ac.MonInfo.Text)" }
+            $ac.Dlg.Refresh()
+            & $script:SmokeShot "48-analysis-months" $ac.Dlg
+            $ac.MonShow.SelectedIndex = 2
+            $ac.Dlg.Refresh()
+            $script:SmokeNotes.Add("months gap: $($ac.MonInfo.Text)")
+            & $script:SmokeShot "49-analysis-months-gap" $ac.Dlg
+            $ac.MonShow.SelectedIndex = 0
+            return ""
+        } 6000
+    } 9000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

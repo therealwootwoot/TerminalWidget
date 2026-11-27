@@ -3492,3 +3492,45 @@ Describe "Savings calculator (v11.6)" {
         $a.ContainsKey("USD") | Should -BeFalse
     }
 }
+
+Describe "Monthly returns (v11.8)" {
+    BeforeAll {
+        $script:d = [string[]]@("2025-12-30", "2025-12-31", "2026-01-02", "2026-01-30", "2026-02-02")
+        $script:v = [double[]]@(100, 110, 121, 221, 198.9)
+        $script:i = [double[]]@(100, 100, 100, 200, 200)
+        $script:m = @(Get-MonthlyReturns -Dates $script:d -Value $script:v -Invested $script:i)
+    }
+    It "chains the days of a month and takes deposits out" {
+        $script:m.Count | Should -Be 3
+        $script:m[0].Key | Should -Be "2025-12"
+        [math]::Round($script:m[0].Pct, 6) | Should -Be 10
+        [math]::Round($script:m[1].Pct, 6) | Should -Be 10
+        [math]::Round($script:m[2].Pct, 6) | Should -Be -10
+        $script:m[1].Days | Should -Be 2
+    }
+    It "counts dividends as return" {
+        $r = @(Get-MonthlyReturns -Dates @("2026-01-01", "2026-01-02") -Value @(100, 100) -Invested @(100, 100) -Dividends @(0, 3))
+        [math]::Round($r[0].Pct, 6) | Should -Be 3
+    }
+    It "skips days without a value before them" {
+        $r = @(Get-MonthlyReturns -Dates @("2026-01-01", "2026-02-02", "2026-02-03") -Value @(0, 100, 105) -Invested @(0, 100, 100))
+        $r.Count | Should -Be 1
+        $r[0].Key | Should -Be "2026-02"
+        [math]::Round($r[0].Pct, 6) | Should -Be 5
+    }
+    It "builds one row per year with a chained total, newest first" {
+        $t = @(Get-MonthTable -Returns $script:m)
+        $t.Count | Should -Be 2
+        $t[0].Year | Should -Be 2026
+        [math]::Round($t[0].Total, 6) | Should -Be -1
+        [double]::IsNaN($t[0].Months[2]) | Should -BeTrue
+        [math]::Round($t[1].Months[11], 6) | Should -Be 10
+    }
+    It "summarises the months" {
+        $s = Get-MonthStats -Returns $script:m
+        $s.Count | Should -Be 3
+        $s.Positive | Should -Be 2
+        $s.Worst.Key | Should -Be "2026-02"
+        Get-MonthStats -Returns @() | Should -BeNullOrEmpty
+    }
+}

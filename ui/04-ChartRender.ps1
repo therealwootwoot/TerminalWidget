@@ -752,6 +752,55 @@ $miPrivacy.Add_Click({ Set-PrivacyMode (-not [bool]$script:Config.PrivacyMode) }
 $miExit    = $trayMenu.Items.Add("Beenden")
 $trayIcon.ContextMenuStrip = $trayMenu
 
+function Set-DarkScrollBars {
+    # v7.1.1, 11.8: scrollbars follow the theme (Windows 10 1809+; otherwise unchanged)
+    param([System.Windows.Forms.Control]$Control)
+    if ($null -eq $Control -or $Control.IsDisposed) { return }
+    try {
+        if (-not ("TwUxThemeV71" -as [type])) {
+            if (-not [int]$script:Pal.DwmDark) { return }   # nothing was ever darkened
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class TwUxThemeV71 {
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    public static extern int SetWindowTheme(IntPtr hWnd, string subApp, string subId);
+}
+"@ -ErrorAction Stop
+        }
+        $name = if ([int]$script:Pal.DwmDark) { "DarkMode_Explorer" } else { "Explorer" }
+        [void][TwUxThemeV71]::SetWindowTheme($Control.Handle, $name, [NullString]::Value)
+    } catch { Write-WidgetLog "Dark scrollbars not available: $($_.Exception.Message)" "WARN" }
+}
+
+function Set-ViewPolish {
+    # 11.8: for every control below Root - themed scrollbars, and number columns get their header on the same side
+    param($Root)
+    if ($null -eq $Root) { return }
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $c = $stack.Pop()
+        if ($c -is [System.Windows.Forms.DataGridView]) {
+            foreach ($col in $c.Columns) {
+                if ($col.DefaultCellStyle.Alignment -eq [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight) {
+                    $col.HeaderCell.Style.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
+                }
+            }
+        }
+        $wants = ($c -is [System.Windows.Forms.ScrollBar]) -or ($c -is [System.Windows.Forms.ListBox]) -or ($c -is [System.Windows.Forms.ListView]) -or ($c -is [System.Windows.Forms.TreeView]) -or
+            ($c -is [System.Windows.Forms.TextBox] -and $c.Multiline) -or ($c -is [System.Windows.Forms.ScrollableControl] -and $c.AutoScroll)
+        if ($wants) {
+            if ($c.IsHandleCreated) { Set-DarkScrollBars $c }
+            elseif ([string]$c.AccessibleDescription -ne "tw-scroll") {
+                $c.AccessibleDescription = "tw-scroll"
+                $c.Add_HandleCreated({ param($sender, $e) Set-DarkScrollBars $sender })
+            }
+        }
+        foreach ($ch in $c.Controls) { $stack.Push($ch) }
+    }
+}
+
 function Style-DataGrid {
     param([System.Windows.Forms.DataGridView]$Grid)
     $spec = $script:UiSpec

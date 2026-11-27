@@ -206,6 +206,7 @@ function Update-AnalysisModel {
     Update-AnalysisAllocation
     Update-AnalysisDividends
     Update-AnalysisRisk
+    Update-AnalysisMonths
     Update-AnalysisTarget
     Update-AnalysisHeat
     Update-AnalysisContrib
@@ -791,6 +792,69 @@ function Set-TargetWeights {
     foreach ($k in @($Weights.Keys | Sort-Object)) { $o[$k] = [double]$Weights[$k] }
     $script:Config.TargetWeights | Add-Member -NotePropertyName (Get-DepotKey) -NotePropertyValue ([PSCustomObject]$o) -Force
     Save-JsonState -Path $script:ConfigPath -Data $script:Config
+}
+
+function Update-AnalysisMonths {
+    # v11.8: returns per month and year (always the whole history, independent of the range buttons)
+    $ac = $script:AnaCtl
+    if ($null -eq $ac -or $null -eq $ac.MonGrid) { return }
+    $g = $ac.MonGrid
+    $g.Rows.Clear()
+    $sr = if ($null -ne $ac.Model) { $ac.Model.Series } else { $null }
+    if ($null -eq $sr -or @($sr.Dates).Count -lt 2) {
+        $ac.MonInfo.Text = Tr "Zu wenig Verlauf - erst ein paar Wochen Buchungen / Kurse"
+        return
+    }
+    $dates = [string[]]$sr.Dates
+    $mine = @(Get-MonthlyReturns -Dates $dates -Value $sr.Value -Invested $sr.Invested -Dividends $sr.Dividends)
+    $hasB = ($null -ne $sr.Bench -and @($sr.Bench | Where-Object { $_ -gt 0 }).Count -gt 10)
+    $bench = if ($hasB) { @(Get-MonthlyReturns -Dates $dates -Value $sr.Bench -Invested $sr.Invested) } else { @() }
+    $mode = [int]$ac.MonShow.SelectedIndex
+    $shown = $mine
+    if ($mode -eq 1) { $shown = $bench }
+    elseif ($mode -eq 2) {
+        $bk = @{}
+        foreach ($b in $bench) { $bk[$b.Key] = [double]$b.Pct }
+        $shown = @($mine | Where-Object { $bk.ContainsKey($_.Key) } | ForEach-Object { [PSCustomObject]@{ Key = $_.Key; Year = $_.Year; Month = $_.Month; Pct = $_.Pct - $bk[$_.Key]; Days = $_.Days } })
+    }
+    if ($mode -ne 0 -and -not $hasB) { $ac.MonInfo.Text = Tr "Keine Benchmark-Daten - oben ein Symbol eintragen."; return }
+    $st = Get-MonthStats -Returns $shown
+    if ($null -eq $st) { $ac.MonInfo.Text = Tr "Zu wenig Verlauf - erst ein paar Wochen Buchungen / Kurse"; return }
+    $lbl = { param($r) "{0:00}.{1} {2:+0.0;-0.0}%" -f $r.Month, $r.Year, $r.Pct }
+    $ac.MonInfo.Text = (Tr "Positive Monate: {0} von {1}   |   Schnitt {2:+0.0;-0.0}%   |   Bester {3}   |   Schwächster {4}") -f $st.Positive, $st.Count, $st.Average, (& $lbl $st.Best), (& $lbl $st.Worst)
+
+    # a yearly difference is the difference of the two yearly returns, not a chain of monthly differences
+    $table = @(Get-MonthTable -Returns $shown)
+    if ($mode -eq 2) {
+        $common = @{}
+        foreach ($r in $shown) { $common[$r.Key] = $true }
+        $a = @{}; foreach ($t in @(Get-MonthTable -Returns @($mine | Where-Object { $common.ContainsKey($_.Key) }))) { $a[$t.Year] = $t.Total }
+        $b = @{}; foreach ($t in @(Get-MonthTable -Returns @($bench | Where-Object { $common.ContainsKey($_.Key) }))) { $b[$t.Year] = $t.Total }
+        foreach ($t in $table) { $t.Total = $a[$t.Year] - $b[$t.Year] }
+    }
+    $fmt = if ($mode -eq 2) { "{0:+0.0;-0.0;0.0}" } else { "{0:+0.0;-0.0;0.0}%" }
+    $paint = {
+        param($cell, [double]$v, [double]$full)
+        $col = if ($v -ge 0) { $script:colGreen } else { $script:colRed }
+        $t = [math]::Min(1.0, [math]::Abs($v) / $full) * 0.38
+        $back = Get-MixColor -A $col -B $script:Pal.Card -T $t
+        $cell.Style.BackColor = $back
+        $cell.Style.SelectionBackColor = $back
+    }
+    foreach ($t in $table) {
+        $i = $g.Rows.Add()
+        $g.Rows[$i].Cells["Year"].Value = [string]$t.Year
+        for ($m = 0; $m -lt 12; $m++) {
+            $v = [double]$t.Months[$m]
+            if ([double]::IsNaN($v)) { continue }
+            $cell = $g.Rows[$i].Cells["M$($m + 1)"]
+            $cell.Value = $fmt -f $v
+            & $paint $cell $v 8.0
+        }
+        $g.Rows[$i].Cells["Total"].Value = $fmt -f $t.Total
+        & $paint $g.Rows[$i].Cells["Total"] ([double]$t.Total) 25.0
+    }
+    $g.ClearSelection()
 }
 
 function Update-AnalysisRisk {
