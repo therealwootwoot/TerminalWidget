@@ -415,6 +415,7 @@ function Get-AlertOverviewRows {
         $what = Format-AlertBody -Alert $a
         if ([string]$a.Condition2) { $what += " & " + (Format-AlertBody -Alert ([PSCustomObject]@{ Condition = [string]$a.Condition2; TargetPrice = [double]$a.Target2; Currency = [string]$a.Currency2; Peak = 0.0 })) }
         if ([bool]$script:Config.PrivacyMode -and (Get-AlertKind ([string]$a.Condition)) -eq "PFVAL") { $what = Hide-AmountsInText $what; $tip = Hide-AmountsInText $tip }
+        if ($status -in @("Hit", "Expired")) { $dist = $null }
         $score = if ($null -ne $dist -and $dist.Ok) { [double]$dist.Score } else { [double]::MaxValue }
         $rows += [PSCustomObject]@{ Alert = $a; Id = [string]$a.Id; Status = $status; Rank = $rank[$status]; Score = $score; What = $what; Now = $now; Gap = (Format-AlertGap $dist); Tip = $tip }
     }
@@ -572,9 +573,11 @@ function Show-AlertOverviewDialog {
     $g = New-V8Grid $dlg (S 12) (S 42) (S 876) (S 350)
     $g.Anchor = [System.Windows.Forms.AnchorStyles]"Top, Bottom, Left, Right"
     $g.MultiSelect = $false
-    foreach ($c in @(@("Status", "Status", 70), @("Ticker", "Ticker", 60), @("What", "Bedingung", 150), @("Now", "Jetzt", 100), @("Gap", "Noch bis Auslösung", 100), @("Rearm", "Wiederholen", 65), @("End", "Gültig bis", 70), @("Note", "Notiz", 120))) {
+    foreach ($c in @(@("Status", "Status", 70), @("Ticker", "Ticker", 60), @("What", "Bedingung", 150), @("Now", "Jetzt", 100), @("Gap", "Abstand", 80), @("Rearm", "Wiederholen", 65), @("End", "Gültig bis", 70), @("Note", "Notiz", 120))) {
         Add-V8Column $g $c[0] $c[1] $c[2] -ReadOnly
     }
+    foreach ($n in @("Status", "Ticker", "Gap", "Rearm", "End")) { $g.Columns[$n].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }
+    $g.Columns["Gap"].ToolTipText = Tr "So weit muss sich der Wert noch bewegen, bis der Alarm auslöst"
     foreach ($n in @("Now", "Gap")) { $g.Columns[$n].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }
     $buttons = @(); $x = 12
     foreach ($bd in @(@("Edit", "Bearbeiten ...", 116), @("Arm", "Wieder scharf", 116), @("Pause", "Bis morgen pausieren", 160), @("Delete", "Löschen", 90))) {

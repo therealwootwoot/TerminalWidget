@@ -1442,6 +1442,7 @@ function Invoke-SmokeTest {
                 $live = ($null -ne $script:QuoteStore["NVDA"] -and -not [bool]$script:QuoteStore["NVDA"].FromCache)
                 if ($live -and [string]$ov.Grid.Rows[0].Cells["Note"].Value -ne "near") { return "closest alert not on top: $($ov.Grid.Rows[0].Cells['Note'].Value)" }
                 if ([string]$ov.Grid.Rows[3].Cells["Note"].Value -ne "old") { return "expired alert not last" }
+                if ([string]$ov.Grid.Rows[3].Cells["Gap"].Value -ne [string][char]0x2013) { return "expired alert shows a distance" }
                 $ov.Dlg.Refresh()
                 & $script:SmokeShot "29-alert-overview" $ov.Dlg
                 $ov.Filter.SelectedIndex = 4

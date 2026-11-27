@@ -1472,7 +1472,7 @@ function Get-AlertLogCsv {
     $g = $script:AlLog.Grid
     $heads = @($g.Columns | ForEach-Object { [string]$_.HeaderText })
     # a text that Excel would run as a formula gets a leading apostrophe
-    $rows = @(foreach ($r in @($g.Rows)) { ,@($r.Cells | ForEach-Object { $v = [string]$_.Value; if ($v -match '^[=+\-@	]') { "'" + $v } else { $v } }) })
+    $rows = @(foreach ($r in @($g.Rows)) { ,@($r.Cells | ForEach-Object { $v = [string]$_.Value; if ($v -match '^[=+\-@\t\r]') { "'" + $v } else { $v } }) })
     return (ConvertTo-CsvText -Headers $heads -Rows $rows)
 }
 
@@ -1492,6 +1492,7 @@ function Show-AlertLogDialog {
     }
     $g.Columns["Push"].ToolTipText = "ja = aufs Handy geschickt, Ruhezeit / aus = nicht geschickt, Fehler = siehe Log"
     $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $g.Columns["At"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
     $dlg.Controls.Add($g)
     # 10.8: one ticker at a time, and the shown rows as a CSV file
     $cbT = New-V8Combo $dlg (@((Tr "Alle Ticker")) + @($script:AlertLog | ForEach-Object { [string]$_.Ticker } | Sort-Object -Unique)) (Tr "Alle Ticker") (S 12) (S 396) (S 130)
