@@ -255,12 +255,13 @@ function Update-AnalysisPerf {
             $ac.Kpi = @(Get-AnalysisKpiTiles -Value ([double]$v) -Invested ([double]$i) -Dividends ([double]$d) -Xirr ([double]$m.TotalXirr) -Base ([string]$b) -WindowResult ([double]$win) -RangeLabel (Get-RangeLabel ([string]$script:Config.AnalysisRange)) -XirrNote ([string]$m.XirrNote))
             $ac.Kpi = @($ac.Kpi) + @(Get-AnalysisMoreTiles -Model $m -Base ([string]$b))
             $ac.Kpi = @(Select-KpiTiles (Protect-KpiTiles $ac.Kpi ([bool]$script:Config.PrivacyMode)))
+            foreach ($tl in $ac.Kpi) { $tl.Label = Tr-Status (Tr ([string]$tl.Label)); $tl.Sub = Tr-Status ([string]$tl.Sub) }
         } catch { $ac.Kpi = @(); Write-WidgetLog "Analysis tiles failed: $($_.Exception.Message)" "WARN" }
-        $ac.Sum.Text = ((@($bl) + $dateNote) -join "`r`n")
+        $ac.Sum.Text = (@(@($bl) + $dateNote | ForEach-Object { Tr-Status $_ }) -join "`r`n")
         $ac.Sum.ForeColor = $script:Pal.Muted
         if ($sr.Approx) { $notes.Add("Teilweise mit aktuellem statt historischem Wechselkurs gerechnet (Verlauf fehlte).") }
     }
-    $ac.Status.Text = if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b }
+    $ac.Status.Text = Tr-Status $(if ($notes.Count -gt 0) { $notes -join "  |  " } else { "Stand {0}. Gebuchte Positionen, Basiswährung {1}." -f (Get-Date).ToString("HH:mm"), $b })
     $ac.Status.ForeColor = if ($notes.Count -gt 0) { $script:Pal.Warn } else { $script:Pal.Muted }
     Set-DynTip $ac.Status ($ac.Status.Text)
     $ac.Chart.Invalidate()
@@ -451,8 +452,8 @@ function Draw-AnalysisChart {
         $i1 = $sr.Dates.Count - 1
         $i0 = Get-SeriesWindowStart -Dates $sr.Dates -Range ([string]$script:Config.AnalysisRange)
         if (($i1 - $i0) -lt 1) { $i0 = [math]::Max(0, $i1 - 1) }
-        $lines = @(@{ V = $sr.Value; C = $p.Accent; W = 2.0; Dash = $false; N = "Depotwert" })
-        if ([bool]$script:Config.AnalysisShowInvested) { $lines += @{ V = $sr.Invested; C = $p.Muted; W = 1.3; Dash = $true; N = "Netto investiert" } }
+        $lines = @(@{ V = $sr.Value; C = $p.Accent; W = 2.0; Dash = $false; N = (Tr "Depotwert") })
+        if ([bool]$script:Config.AnalysisShowInvested) { $lines += @{ V = $sr.Invested; C = $p.Muted; W = 1.3; Dash = $true; N = (Tr "Netto investiert") } }
         if ([bool]$script:Config.AnalysisShowBench -and $null -ne $sr.Bench) { $lines += @{ V = $sr.Bench; C = $amber; W = 1.4; Dash = $false; N = ("Benchmark " + $script:Config.AnalysisBenchmark) } }
         $min = [double]::MaxValue; $max = [double]::MinValue
         foreach ($ln in $lines) { for ($i = $i0; $i -le $i1; $i++) { $v = $ln.V[$i]; if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v } } }
@@ -512,7 +513,7 @@ function Draw-AnalysisChart {
             $txt = @([DateTime]::ParseExact($sr.Dates[$hi], "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture).ToString("ddd dd.MM.yyyy"))
             $pv = [bool]$script:Config.PrivacyMode
             foreach ($ln in $lines) { $txt += $(if ($pv) { "{0}: {1}" -f $ln.N, ([string][char]0x2022 * 3) } else { "{0}: {1:N2}" -f $ln.N, $ln.V[$hi] }) }
-            $txt += ("Ergebnis: {0}" -f $(if ($pv) { [string][char]0x2022 * 3 } else { Format-Signed ($sr.Value[$hi] + $sr.Dividends[$hi] - $sr.Invested[$hi]) }))
+            $txt += ((Tr "Ergebnis") + (": {0}" -f $(if ($pv) { [string][char]0x2022 * 3 } else { Format-Signed ($sr.Value[$hi] + $sr.Dividends[$hi] - $sr.Invested[$hi]) })))
             $body = $txt -join "`n"
             $sz = $g.MeasureString($body, $fontAxis)
             $bx = if (($x + (S 10) + $sz.Width) -lt $R) { $x + (S 10) } else { $x - (S 10) - $sz.Width }

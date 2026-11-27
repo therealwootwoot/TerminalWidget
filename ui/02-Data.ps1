@@ -1283,7 +1283,7 @@ function Apply-RefreshResults {
         $script:BackoffLevel = 0
     }
     $script:LastFetchOffline = ($failedCount -eq $Plan.Urls.Count -and -not $script:LastRateLimited)
-    $script:LastFetchWarning = if ($script:LastRateLimited) {
+    $script:LastFetchWarning = Tr-Status $(if ($script:LastRateLimited) {
         "Rate-Limit: Pause bis {0:HH:mm:ss}" -f $script:BackoffUntil
     } elseif ($failedCount -eq $Plan.Urls.Count) {
         "Offline / API nicht erreichbar"
@@ -1291,7 +1291,7 @@ function Apply-RefreshResults {
         "Teilweise veraltete Daten ($failedCount Fehler)"
     } else {
         ""
-    }
+    })
 
     # The user switched ticker/timeframe/currency while we were fetching:
     # don't paint stale chart data, refresh again for the new selection.

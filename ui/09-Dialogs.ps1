@@ -186,6 +186,8 @@ function Show-AnalysisDialog {
         if ($cd[3]) { $col.ToolTipText = Get-GlossaryShort -Key $cd[3] }
     }
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    foreach ($cn in @("Ticker", "Since")) { $grid.Columns[$cn].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }   # 11.2: dates were cut off
+    $grid.Columns["Ticker"].MinimumWidth = S 64   # the header was cut off
     $pr.Controls.Add($grid)
     $lblRetNote = New-Object System.Windows.Forms.Label
     $lblRetNote.SetBounds(0, (S 526), (S 976), (S 36)); $lblRetNote.Anchor = $aB -bor $aL -bor $aR
@@ -273,7 +275,7 @@ function Show-AnalysisDialog {
 
     $script:AnaCtl = @{
         DivGrid = $dg; DivSum = $lblDivSum; DivBars = $divBars; DivBuckets = @(); DivBase = ""
-        Dlg = $dlg; Status = $lblStatus; Reload = $btnReload; Base = $cbBase; Bench = $tbBench
+        Dlg = $dlg; Status = $lblStatus; Reload = $btnReload; Base = $cbBase; Bench = $tbBench; BaseLabel = $lblBase; BenchLabel = $lblBench
         Pages = $pages; PageButtons = $pageBtns; Page = "Perf"
         Chart = $chart; Sum = $lblSum; KpiPanel = $kpiPanel; Kpi = @(); RangeButtons = $rangeBtns; HoverIdx = -1; Geom = $null
         RetGrid = $grid; RetNote = $lblRetNote
@@ -693,6 +695,18 @@ function Show-AnalysisDialog {
     $fitTabs = {
         $ac = $script:AnaCtl
         if ($null -eq $ac -or $ac.Dlg.IsDisposed) { return }
+        # 11.2: pages and the right-hand header controls are placed from the real width
+        # (the anchors left an empty strip after the window was widened)
+        $cw = $ac.Dlg.ClientSize.Width; $ch = $ac.Dlg.ClientSize.Height
+        if ($cw -le 0 -or $ch -le 0) { return }
+        $ac.ExportBtn.Left = $cw - (S 112)
+        $ac.Reload.Left = $cw - (S 152)
+        $ac.Bench.Left = $ac.Reload.Left - (S 98)
+        $ac.BenchLabel.Left = $ac.Bench.Left - (S 72)
+        $ac.Base.Left = $ac.BenchLabel.Left - (S 72)
+        $ac.BaseLabel.Left = $ac.Base.Left - (S 44)
+        $ac.Status.Width = [math]::Max((S 100), $ac.BaseLabel.Left - (S 12) - $ac.Status.Left)
+        foreach ($pn in @($ac.Pages.Values)) { $pn.SetBounds((S 12), (S 64), ($cw - (S 24)), ($ch - (S 76))) }
         $btns = @($ac.PageButtons.Values)
         $need = @($btns | ForEach-Object { [double]([System.Windows.Forms.TextRenderer]::MeasureText([string]$_.Text, $_.Font).Width) })
         $w = Get-FittedWidths -Natural ([double[]]$need) -Available ($ac.ExportBtn.Left - (S 12) - (S 8)) -Gap (S 4) -Pad (S 16)

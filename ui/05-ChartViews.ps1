@@ -1391,8 +1391,8 @@ Set-Tip $txtAlertNote "Notiz zum Alarm (optional, erscheint im Hinweis)"
 
 # v7.3: grey hint text inside the empty alarm inputs
 Set-CueText $txtAlertTicker "Ticker"
-Set-CueText $txtAlertPrice "Wert"
-Set-CueText $txtAlertNote "Notiz"
+Set-CueText $txtAlertPrice (Tr "Wert")
+Set-CueText $txtAlertNote (Tr "Notiz")
 
 # v4.3: expiry
 $cmbAlertExp = New-Object System.Windows.Forms.ComboBox

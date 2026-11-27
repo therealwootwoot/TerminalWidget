@@ -414,7 +414,7 @@ $lblNewsTitle.Text = "Nachrichten"
 $btnNewsSources = New-Object System.Windows.Forms.Button
 $btnNewsSources.SetBounds((S 168), (S 6), (S 84), (S 24))
 Style-FlatButton -Btn $btnNewsSources -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
-$btnNewsSources.Text = "Quellen " + [string][char]0x25BE
+$btnNewsSources.Text = (Tr "Quellen") + " " + [string][char]0x25BE
 $btnNewsSources.Anchor = $aNT -bor $aNL
 $viewNews.Controls.Add($btnNewsSources)
 Set-Tip $btnNewsSources "Quellen ein- und ausblenden, nur eine Quelle oder Gruppe zeigen, Feeds verwalten"
@@ -422,7 +422,7 @@ Set-Tip $btnNewsSources "Quellen ein- und ausblenden, nur eine Quelle oder Grupp
 $btnNewsSaved = New-Object System.Windows.Forms.Button
 $btnNewsSaved.SetBounds((S 258), (S 6), (S 76), (S 24))
 Style-FlatButton -Btn $btnNewsSaved -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
-$btnNewsSaved.Text = "Gemerkt"
+$btnNewsSaved.Text = Tr "Gemerkt"
 $btnNewsSaved.Anchor = $aNT -bor $aNL
 $viewNews.Controls.Add($btnNewsSaved)
 Set-Tip $btnNewsSaved "Nur gemerkte Meldungen zeigen (S merkt die markierte Meldung)"
@@ -444,7 +444,7 @@ $txtNewsSearch.Add_KeyDown({
 })
 $btnNewsSaved.Add_Click({
     $script:NewsSavedMode = -not $script:NewsSavedMode
-    $btnNewsSaved.Text = if ($script:NewsSavedMode) { [string][char]0x2605 + " Gemerkt" } else { "Gemerkt" }
+    $btnNewsSaved.Text = if ($script:NewsSavedMode) { [string][char]0x2605 + " " + (Tr "Gemerkt") } else { Tr "Gemerkt" }
     Refresh-NewsGrid
 })
 

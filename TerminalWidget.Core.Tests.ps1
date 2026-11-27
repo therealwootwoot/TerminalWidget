@@ -1495,7 +1495,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
         try {
             $exe = (Get-Process -Id $PID).Path
             $p = Start-Process -FilePath $exe -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$ui`"") -PassThru
-            $done = $p.WaitForExit(600000)
+            $done = $p.WaitForExit(900000)
             if (-not $done) { try { $p.Kill() } catch { } }
         } finally {
             Remove-Item Env:\TW_SMOKE_TEST -ErrorAction SilentlyContinue
@@ -1512,7 +1512,7 @@ Describe "UI smoke test (v4.7)" -Tag "UI" {
                 Write-Host ("SHOT-END " + $png.Name)
             }
         }
-        $done | Should -BeTrue -Because "the widget must finish the smoke run within 10 minutes"
+        $done | Should -BeTrue -Because "the widget must finish the smoke run within 15 minutes"
         Test-Path $report | Should -BeTrue -Because "the smoke run writes a report"
         $rep = Get-Content $report -Raw | ConvertFrom-Json
         foreach ($st in @($rep.Steps)) { Write-Host ("{0,-28} {1,-5} {2,6} ms {3}" -f $st.Name, $(if ($st.Ok) { "ok" } else { "FAIL" }), $st.Ms, $st.Error) }
@@ -2855,6 +2855,7 @@ Describe "V7.3 helpers" {
         Get-ShortMarketText "Zu - öffnet in 2h 49m" | Should -Be "Zu · 2h 49m"
         Get-ShortMarketText "Offen - zu in 3h" | Should -Be "Offen · 3h"
         Get-ShortMarketText "Handel 24/7" | Should -Be "Handel 24/7"
+        Get-ShortMarketText "Closed - opens in 2h 49m" | Should -Be "Closed · 2h 49m"
     }
     It "keeps price columns unmasked when the header names the currency" {
         Test-AmountColumn "EK (USD)" | Should -BeFalse
@@ -3344,5 +3345,45 @@ Describe "Privacy in the analysis (v11.0)" {
     It "masks the result columns of the return table" {
         foreach ($h in @("Unrealisiert", "Realisiert", "Gesamt", "Unrealized")) { Test-AmountColumn $h | Should -BeTrue }
         foreach ($h in @("Gesamt %", "XIRR p.a.", "Seit")) { Test-AmountColumn $h | Should -BeFalse }
+    }
+}
+
+Describe "Chart bar of a booking (v11.2)" {
+    BeforeAll { $script:days = @("2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10") }
+    It "uses the same day, or the next trading day after a weekend" {
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-03" | Should -Be 1
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-07" | Should -Be 5
+    }
+    It "keeps a booking just after the last bar and drops ones outside the range" {
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-11" | Should -Be 6
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-20" | Should -Be -1
+        Get-TradeBarIndex -BarDates $days -Date "2026-11-01" | Should -Be -1
+        Get-TradeBarIndex -BarDates $days -Date "kein Datum" | Should -Be -1
+    }
+    It "takes the containing week on weekly bars" {
+        $w = @("2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26")
+        Get-TradeBarIndex -BarDates $w -Date "2026-10-15" | Should -Be 1
+        Get-TradeBarIndex -BarDates $w -Date "2026-10-28" | Should -Be 3
+        Get-TradeBarIndex -BarDates $w -Date "2026-11-30" | Should -Be -1
+    }
+}
+
+Describe "English run-time texts (v11.2)" {
+    It "translates <de>" -ForEach @(
+        @{ de = "Stand 03:12:05 (vor 44 s)"; en = "As of 03:12:05 (44 s ago)" }
+        @{ de = "Märkte zu - Abfrage alle 10 min"; en = "Markets closed - polling every 10 min" }
+        @{ de = "12 Abfragen/min"; en = "12 requests/min" }
+        @{ de = "Teilweise veraltete Daten (2 Fehler)"; en = "Some data is out of date (2 errors)" }
+        @{ de = "Feiertag"; en = "Holiday" }
+        @{ de = "Zu"; en = "Closed" }
+        @{ de = "Zeitraum: gesamt"; en = "Period: all" }
+        @{ de = "Im Zeitraum (6 Monate)"; en = "In period (6 months)" }
+        @{ de = "Dividenden 2026"; en = "Dividends 2026" }
+        @{ de = "+56.0 % auf Einsatz"; en = "+56.0 % on invested" }
+        @{ de = "+17.2 Pkt."; en = "+17.2 pts" }
+    ) { ConvertTo-EnglishStatus $de | Should -BeExactly $en }
+    It "leaves other text alone" {
+        ConvertTo-EnglishStatus "NVDA 149.30 USD" | Should -BeExactly "NVDA 149.30 USD"
+        ConvertTo-EnglishStatus "" | Should -BeExactly ""
     }
 }

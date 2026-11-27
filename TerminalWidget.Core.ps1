@@ -4879,7 +4879,7 @@ function Get-PollNote {
 function Get-ShortMarketText {
     # v7.3: shorter market status for narrow windows
     param([string]$Text)
-    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in) ', ' · ' -replace ' - öffnet ', ' · ')
+    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in|opens in|closes in|trading in|ends in) ', ' · ' -replace ' - (öffnet|opens) ', ' · ')
 }
 
 function Get-WatchPanelWidths {
@@ -5051,6 +5051,70 @@ function Protect-KpiTiles {
         if ([string]$t.Id -eq "Value") { $sub = "Investiert " + (Protect-Amount "0" $true) }
         [PSCustomObject]@{ Id = $t.Id; Label = $t.Label; Text = (Protect-Amount ([string]$t.Text) $true); Sub = $sub; Kind = $t.Kind }
     })
+}
+
+function Get-TradeBarIndex {
+    # the chart bar a booking belongs to (-1 = outside the shown range).
+    # Daily / intraday bars: the same day, else the next trading day (weekend, holiday);
+    # a booking just after the last bar sits on the last bar.
+    # Weekly / monthly bars: the period that contains the day.
+    param([string[]]$BarDates, [string]$Date)
+    $n = @($BarDates).Count
+    if ($n -lt 2 -or -not $Date) { return -1 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $d = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Date, "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$d)) { return -1 }
+    if ([string]::CompareOrdinal($Date, $BarDates[0]) -lt 0) { return -1 }
+    $at = -1
+    for ($i = 0; $i -lt $n; $i++) {
+        $c = [string]::CompareOrdinal($BarDates[$i], $Date)
+        if ($c -eq 0) { return $i }
+        if ($c -gt 0) { break }
+        $at = $i
+    }
+    $day = { param([string]$s) [DateTime]::ParseExact($s, "yyyy-MM-dd", $inv) }
+    $spacing = ((& $day $BarDates[$n - 1]) - (& $day $BarDates[0])).TotalDays / ($n - 1)
+    if ($spacing -ge 5) {
+        if (($d - (& $day $BarDates[$at])).TotalDays -le $spacing + 3) { return $at }
+        return -1
+    }
+    if ($at + 1 -lt $n) {
+        if (((& $day $BarDates[$at + 1]) - $d).TotalDays -le 7) { return $at + 1 }
+        return -1
+    }
+    if (($d - (& $day $BarDates[$at])).TotalDays -le 4) { return $at }
+    return -1
+}
+
+function ConvertTo-EnglishStatus {
+    # texts that are put together at run time (status lines, tiles) -> English
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    $t = $Text
+    foreach ($r in @(
+        @('Teilweise veraltete Daten \((\d+) Fehler\)', 'Some data is out of date ($1 errors)'),
+        @('Offline / API nicht erreichbar', 'Offline / API not reachable'), @('Rate-Limit: Pause bis', 'Rate limit: paused until'),
+        @('Gebuchte Positionen, Basiswährung', 'Booked positions, base currency'),
+        @('^Stand (?=\d)', 'As of '),
+        @('\(vor (\S+) (s|min)\)', '($1 $2 ago)'),
+        @('Märkte zu - Abfrage alle (\d+) min', 'Markets closed - polling every $1 min'),
+        @('(\d+) Abfragen/min', '$1 requests/min'),
+        @('Yahoo-Pause bis', 'Yahoo pause until'), @('Noch keine Daten', 'No data yet'), @('Privat-Modus', 'Privacy mode'),
+        @('Handel 24/7', 'Trading 24/7'), @('Offen - zu in', 'Open - closes in'), @('Handel in', 'trading in'), @('Ende in', 'ends in'),
+        @('öffnet in', 'opens in'), @('öffnet', 'opens'), @('Feiertag', 'Holiday'), @('^Offen$', 'Open'), @('(^|\u25CF )Zu(?=$| )', '$1Closed'),
+        @('^Investiert ', 'Invested '), @('% auf Einsatz', '% on invested'), @('^Dividenden (\d{4})$', 'Dividends $1'),
+        @('^Im Zeitraum', 'In period'), @('\(gesamt\)', '(all)'), @('\((\d) Jahre\)', '($1 years)'), @('\(1 Jahr\)', '(1 year)'), @('\((\d+) Monate\)', '($1 months)'),
+        @('^Zeitraum: gesamt', 'Period: all'), @('^Zeitraum: 1 Jahr', 'Period: 1 year'), @('^Zeitraum: (\d) Jahre', 'Period: $1 years'), @('^Zeitraum: (\d+) Monate', 'Period: $1 months'),
+        @('^bisher erhalten$', 'received so far'), @('^seit 1\. Januar$', 'since 1 January'), @('^offene Positionen$', 'open positions'),
+        @('^aus Verkäufen$', 'from sales'), @('^Orders und Konto, gesamt$', 'orders and account, all'), @('^Gesamtergebnis$', 'total result'),
+        @('^Rendite p\.a\.$', 'Return p.a.'), @(' Pkt\.$', ' pts'),
+        @('gleiche Käufe/Verkäufe wären (.+?) wert', 'the same buys / sales would be worth $1'),
+        @('-> Depot (\S+) Prozentpunkte p\.a\. besser', '-> portfolio $1 points p.a. better'),
+        @('-> Depot (\S+) Prozentpunkte p\.a\. schlechter', '-> portfolio $1 points p.a. worse'),
+        @('Stand der Werte: Tagesschlusskurse und Wechselkurs-Verlauf bis (\S+?)\. Das Hauptfenster rechnet mit aktuellen Kursen und kann abweichen\.', 'Values as of $1: daily closes and exchange rate history. The main window uses current prices and may differ.'),
+        @('Akt\. Wert:', 'Value now:'), @('Aktueller Marktkurs:', 'Market price:'), @('G/V:', 'P/L:')
+    )) { $t = $t -creplace $r[0], $r[1] }
+    return $t
 }
 
 function Get-TileGrid {
