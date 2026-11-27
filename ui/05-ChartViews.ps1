@@ -1287,11 +1287,20 @@ $dgvNews.Add_KeyDown({
 })
 $lblAlTitle = New-Object System.Windows.Forms.Label
 $lblAlTitle.Location = New-Object System.Drawing.Point((S 496), (S 8))
-$lblAlTitle.Size = New-Object System.Drawing.Size((S 168), (S 20))
+$lblAlTitle.Size = New-Object System.Drawing.Size((S 82), (S 20))
 $lblAlTitle.Font = $fontUiBold
 $lblAlTitle.ForeColor = $script:Pal.Accent
-$lblAlTitle.Text = "Alarme (Doppelklick = Reset)"
+$lblAlTitle.Text = "Alarme"
 $viewWatch.Controls.Add($lblAlTitle)
+
+# 10.8: all alerts with distance to firing
+$btnAlertAll = New-Object System.Windows.Forms.Button
+$btnAlertAll.Location = New-Object System.Drawing.Point((S 582), (S 5))
+$btnAlertAll.Size = New-Object System.Drawing.Size((S 82), (S 24))
+Style-FlatButton -Btn $btnAlertAll -BgColor $script:Pal.Input -FgColor $script:Pal.Accent -BorderColor $script:Pal.Border
+$btnAlertAll.Text = "Übersicht"
+$viewWatch.Controls.Add($btnAlertAll)
+Set-Tip $btnAlertAll "Alle Alarme mit Abstand zur Auslösung, zum Bearbeiten. In der Liste: Doppelklick setzt zurück, Rechtsklick öffnet das Menü."
 
 # v4.3: history of fired alerts
 $btnAlertLog = New-Object System.Windows.Forms.Button
@@ -1476,7 +1485,7 @@ $viewWatch.Controls.Add($lblWlDetail)
 # v7.5: alarm column controls with their design position; per row one control stretches
 $script:AlarmCol = @()
 foreach ($def in @(
-    @($lblAlTitle, "stretch"), @($btnAlertLog, "move"),
+    @($lblAlTitle, "stretch"), @($btnAlertAll, "move"), @($btnAlertLog, "move"),
     @($txtAlertTicker, "keep"), @($cmbAlertCond, "stretch"), @($txtAlertPrice, "move"), @($btnAddAlert, "move"), @($btnDelAlert, "move"),
     @($txtAlertNote, "stretch"), @($cmbAlertExp, "move"), @($cmbAlertRearm, "move"), @($lstAlerts, "stretch"))) {
     $script:AlarmCol += [PSCustomObject]@{ C = $def[0]; Mode = $def[1]; Off = ($def[0].Left - (S 496)); W = $def[0].Width }
@@ -1515,7 +1524,7 @@ $dgvWatchlist.Add_SelectionChanged({ if (-not $script:SuppressGridSelection -and
 
 # Watchlist view: list grows, alarm column on the right (width: Update-WatchLayout)
 $dgvWatchlist.Anchor = $anchorAll
-foreach ($ctl in @($lblAlTitle, $btnAlertLog, $txtAlertTicker, $cmbAlertCond, $txtAlertPrice, $btnAddAlert, $btnDelAlert, $txtAlertNote, $cmbAlertExp, $cmbAlertRearm)) { $ctl.Anchor = $aT -bor $aR }
+foreach ($ctl in @($lblAlTitle, $btnAlertAll, $btnAlertLog, $txtAlertTicker, $cmbAlertCond, $txtAlertPrice, $btnAddAlert, $btnDelAlert, $txtAlertNote, $cmbAlertExp, $cmbAlertRearm)) { $ctl.Anchor = $aT -bor $aR }
 $lstAlerts.Anchor = $aT -bor $aB -bor $aR
 
 # Columns stretch with the grid; design widths are the minimum (no more "55.772,28...")

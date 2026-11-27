@@ -1453,6 +1453,29 @@ function Send-WidgetNotification {
     return "Fehler"
 }
 
+function Update-AlertLogGrid {
+    $al = $script:AlLog
+    if ($null -eq $al) { return }
+    $only = if ($al.Filter.SelectedIndex -gt 0) { [string]$al.Filter.SelectedItem } else { "" }
+    $al.Grid.Rows.Clear()
+    for ($i = $script:AlertLog.Count - 1; $i -ge 0; $i--) {
+        $e = $script:AlertLog[$i]
+        if ($only -and [string]$e.Ticker -ne $only) { continue }
+        $at = [DateTime]::MinValue
+        $atTxt = if ([DateTime]::TryParse([string]$e.At, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$at)) { $at.ToString("dd.MM.yy HH:mm") } else { [string]$e.At }
+        [void]$al.Grid.Rows.Add($atTxt, $e.Ticker, $e.Condition, $e.Text, $e.Note, $e.Push)
+    }
+}
+
+function Get-AlertLogCsv {
+    # the rows as shown (same filter)
+    $g = $script:AlLog.Grid
+    $heads = @($g.Columns | ForEach-Object { [string]$_.HeaderText })
+    # a text that Excel would run as a formula gets a leading apostrophe
+    $rows = @(foreach ($r in @($g.Rows)) { ,@($r.Cells | ForEach-Object { $v = [string]$_.Value; if ($v -match '^[=+\-@\t\r]') { "'" + $v } else { $v } }) })
+    return (ConvertTo-CsvText -Headers $heads -Rows $rows)
+}
+
 function Show-AlertLogDialog {
     $p = $script:Pal
     $dlg = New-DialogForm -Title "Alarm-Verlauf - $($script:AppTitle)" -W (S 760) -H (S 440) -Key "AlertLog"
@@ -1469,18 +1492,31 @@ function Show-AlertLogDialog {
     }
     $g.Columns["Push"].ToolTipText = "ja = aufs Handy geschickt, Ruhezeit / aus = nicht geschickt, Fehler = siehe Log"
     $g.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
-    for ($i = $script:AlertLog.Count - 1; $i -ge 0; $i--) {
-        $e = $script:AlertLog[$i]
-        $at = [DateTime]::MinValue
-        $atTxt = if ([DateTime]::TryParse([string]$e.At, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$at)) { $at.ToString("dd.MM.yy HH:mm") } else { [string]$e.At }
-        [void]$g.Rows.Add($atTxt, $e.Ticker, $e.Condition, $e.Text, $e.Note, $e.Push)
-    }
+    $g.Columns["At"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
     $dlg.Controls.Add($g)
+    # 10.8: one ticker at a time, and the shown rows as a CSV file
+    $cbT = New-V8Combo $dlg (@((Tr "Alle Ticker")) + @($script:AlertLog | ForEach-Object { [string]$_.Ticker } | Sort-Object -Unique)) (Tr "Alle Ticker") (S 12) (S 396) (S 130)
+    $cbT.Anchor = [System.Windows.Forms.AnchorStyles]"Bottom, Left"; $cbT.AccessibleName = Tr "Ticker"
+    $script:AlLog = @{ Grid = $g; Filter = $cbT }
+    $cbT.Add_SelectedIndexChanged({ Update-AlertLogGrid })
+    Update-AlertLogGrid
+    $bCsv = New-V8Button $dlg (Tr "CSV export ...") (S 438) (S 394) (S 108)
+    $bCsv.Anchor = $aBR
+    $bCsv.Add_Click({
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "CSV (*.csv)|*.csv"; $sfd.FileName = "alarm-verlauf_{0}.csv" -f (Get-Date -Format "yyyyMMdd")
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            try { [System.IO.File]::WriteAllText($sfd.FileName, (Get-AlertLogCsv), (New-Object System.Text.UTF8Encoding($true))) }
+            catch { Show-InfoBox ((Tr "Export fehlgeschlagen:") + " " + $_.Exception.Message) "CSV" }
+        }
+        $sfd.Dispose()
+    })
     $lbl = New-Object System.Windows.Forms.Label
-    $lbl.SetBounds((S 12), (S 398), (S 400), (S 20))
+    $lbl.SetBounds((S 154), (S 399), (S 276), (S 20))
+    $lbl.AutoEllipsis = $true
     $lbl.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $lbl.ForeColor = $p.Muted
-    $lbl.Text = "{0} Einträge (die letzten 500 werden behalten)" -f $script:AlertLog.Count
+    $lbl.Text = (Tr "{0} Einträge (höchstens 500)") -f $script:AlertLog.Count
     $dlg.Controls.Add($lbl)
     Set-DynTip $lbl "" "ALERTLOG"
     $btnClr = New-Object System.Windows.Forms.Button
