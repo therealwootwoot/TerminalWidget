@@ -1575,6 +1575,32 @@ function Invoke-SmokeTest {
             if ((Get-KpiTileTicker ([PSCustomObject]@{ Id = "Best"; Text = "NVDA  +5.0 %" })) -ne "NVDA") { throw "tile ticker" }
         } finally { $script:Config.PrivacyMode = $wasPriv }
     } 8000
+    Invoke-SmokeStep "V11.6 savings calculator" {
+        $keepC = $script:Config.SavingsCalc; $keepG = $script:Config.DepotGoals
+        try {
+            $script:Config.SavingsCalc = $null
+            $script:Config.DepotGoals = Set-DepotGoal -Goals @() -Id ([string]$script:Config.ActiveDepot) -Value 100000.0
+            & $probeRun { Show-SavingsCalcDialog } {
+                $c = $script:CalcCtl
+                if ($null -eq $c) { return "window not open" }
+                $c.Inputs["Monthly"].Text = "250"
+                if ($c.Grid.Rows.Count -ne 15) { return "yearly rows: $($c.Grid.Rows.Count)" }
+                if (@($c.Result.Text -split "`r`n").Count -lt 4) { return "result: $($c.Result.Text)" }
+                $c.Dlg.Refresh()
+                & $script:SmokeShot "46-savings-calculator" $c.Dlg
+                $c.Inputs["Years"].Text = "x"
+                if ($c.Grid.Rows.Count -ne 0) { return "bad input still shows rows" }
+                $c.Inputs["Years"].Text = "30"
+                if ($c.Grid.Rows.Count -ne 30) { return "30 years: $($c.Grid.Rows.Count)" }
+                $csv = Join-Path $env:TEMP "tw-calc.csv"
+                Export-SavingsCalcCsv -Path $csv
+                if (@(Get-Content $csv).Count -ne 31) { return "csv lines: $(@(Get-Content $csv).Count)" }
+                Remove-Item $csv -ErrorAction SilentlyContinue
+                return ""
+            } 2500
+            if ([double]$script:Config.SavingsCalc.Years -ne 30) { throw "assumptions not remembered" }
+        } finally { $script:Config.SavingsCalc = $keepC; $script:Config.DepotGoals = $keepG; Save-Config }
+    } 5000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump

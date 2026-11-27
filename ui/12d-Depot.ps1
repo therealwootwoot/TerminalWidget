@@ -290,9 +290,12 @@ function Show-GoalsCostsDialog {
     $dlg = New-DialogForm -Title "Ziele und Kosten" -W (S 760) -H (S 540) -Key "GoalsCosts2"
     $base = [string]$script:Config.Currency
     $priv = [bool]$script:Config.PrivacyMode
-    [void](New-V8Label $dlg ((Tr "Ziele je Depot in {0} - in die Ziel-Spalten tippen (leer = kein Ziel)") -f $base) (S 12) (S 14) (S 470))
+    [void](New-V8Label $dlg ((Tr "Ziele je Depot in {0} - in die Ziel-Spalten tippen (leer = kein Ziel)") -f $base) (S 12) (S 14) (S 342))
     $bSave = New-V8Button $dlg (Tr "Ziele speichern") (S 490) (S 8) (S 130)
     $bCalc = New-V8Button $dlg (Tr "Neu berechnen") (S 628) (S 8) (S 120)
+    $bPlan = New-V8Button $dlg (Tr "Sparrechner ...") (S 360) (S 8) (S 122)
+    $bPlan.Tag = $dlg
+    $bPlan.Add_Click({ param($sender, $e) Show-SavingsCalcDialog -Owner $sender.Tag })
     $gg = New-V8Grid $dlg (S 12) (S 42) (S 736) (S 150) -Editable
     $gg.AllowUserToResizeRows = $false
     $gg.RowTemplate.Height = S 28
@@ -603,3 +606,247 @@ function Show-PositionDialog {
     }
 }
 $script:PosCtl = $null
+
+# ==============================================================================
+# v11.6: savings calculator (own assumptions -> how the depot could grow)
+# ==============================================================================
+function Get-CalcAssumptions {
+    $d = [ordered]@{ Return = 5.0; Spread = 2.0; Years = 15.0; Increase = 0.0; Inflation = 2.0 }
+    $have = $script:Config.SavingsCalc
+    if ($null -ne $have) {
+        foreach ($k in @($d.Keys)) { if ($null -ne $have.PSObject.Properties[$k]) { $d[$k] = [double]$have.$k } }
+    }
+    return $d
+}
+
+function Get-CalcInput {
+    param([string]$Key, [double]$Min, [double]$Max)
+    $t = [string]$script:CalcCtl.Inputs[$Key].Text
+    if (-not $t.Trim()) { return 0.0 }
+    if (-not (Test-DecimalInput $t)) { return [double]::NaN }
+    return [math]::Max($Min, [math]::Min($Max, (Parse-DecimalInput $t)))
+}
+
+function Get-CalcDateText {
+    param([int]$Months)
+    return (Get-Date).AddMonths($Months).ToString("MM.yyyy")
+}
+
+function Update-SavingsCalc {
+    $c = $script:CalcCtl
+    if ($null -eq $c -or -not $c.Ready) { return }
+    $v = @{
+        Start = Get-CalcInput "Start" 0 1000000000; Monthly = Get-CalcInput "Monthly" 0 10000000; Return = Get-CalcInput "Return" -50 50
+        Spread = Get-CalcInput "Spread" 0 30; Years = Get-CalcInput "Years" 1 60; Increase = Get-CalcInput "Increase" -20 50
+        Inflation = Get-CalcInput "Inflation" -10 50; Goal = Get-CalcInput "Goal" 0 10000000000
+    }
+    $bad = @($v.Keys | Where-Object { [double]::IsNaN($v[$_]) })
+    if ($bad.Count -gt 0) {
+        $c.Result.Text = Tr "Bitte nur Zahlen eingeben."
+        $c.Series = $null; $c.Chart.Invalidate(); $c.Grid.Rows.Clear()
+        return
+    }
+    $months = [int][math]::Max(1, [math]::Round($v.Years)) * 12
+    $run = { param([double]$r) @(Get-Projection -Start $v.Start -Monthly $v.Monthly -ReturnPct $r -Months $months -IncreasePct $v.Increase -InflationPct $v.Inflation) }
+    $low = & $run ($v.Return - $v.Spread); $mid = & $run $v.Return; $high = & $run ($v.Return + $v.Spread)
+    $c.Series = @{ Low = $low; Mid = $mid; High = $high; Goal = $v.Goal; Months = $months; Values = $v }
+    $priv = [bool]$script:Config.PrivacyMode
+    $base = $c.Base
+    $money = { param([double]$x) if ($priv) { Protect-Amount "0" $true } else { "{0:N0} {1}" -f $x, $base } }
+
+    $lines = @()
+    $lines += (Tr "Nach {0} Jahren bei {1:0.##} % p.a.: {2}, davon eingezahlt {3}.") -f ($months / 12), $v.Return, (& $money $mid[-1].Value), (& $money $mid[-1].PaidIn)
+    if ($v.Spread -gt 0) { $lines += (Tr "Spanne von {0:0.##} % bis {1:0.##} %: {2} bis {3}. In heutiger Kaufkraft (Mitte): {4}.") -f ($v.Return - $v.Spread), ($v.Return + $v.Spread), (& $money $low[-1].Value), (& $money $high[-1].Value), (& $money $mid[-1].Real) }
+    else { $lines += (Tr "In heutiger Kaufkraft: {0}.") -f (& $money $mid[-1].Real) }
+    if ($v.Goal -gt 0) {
+        $long = @(Get-Projection -Start $v.Start -Monthly $v.Monthly -ReturnPct $v.Return -Months 720 -IncreasePct $v.Increase)
+        $hit = Get-MonthsToGoal -Series $long -Goal $v.Goal
+        $need = Get-RequiredMonthly -Start $v.Start -Goal $v.Goal -ReturnPct $v.Return -Months $months -IncreasePct $v.Increase
+        $when = if ($hit -eq 0) { Tr "ist schon erreicht." } elseif ($hit -lt 0) { Tr "wird so innerhalb von 60 Jahren nicht erreicht." } else { (Tr "wäre etwa {0} erreicht (in {1:0.#} Jahren).") -f (Get-CalcDateText $hit), ($hit / 12.0) }
+        $lines += (Tr "Ziel {0}") -f (& $money $v.Goal) + " " + $when
+        if ($need -le 0) { $lines += Tr "Für das Ziel am Ende der Laufzeit ist keine Sparrate nötig." }
+        else { $lines += (Tr "Für das Ziel nach {0} Jahren wäre eine Sparrate von {1} je Monat nötig.") -f ($months / 12), (& $money $need) }
+    }
+    $c.Result.Text = $lines -join "`r`n"
+
+    $c.Grid.Rows.Clear()
+    foreach ($r in @(Get-ProjectionRows -Low $low -Mid $mid -High $high -StartYear (Get-Date).Year)) {
+        [void]$c.Grid.Rows.Add($r.Years, $r.Year, (& $money $r.PaidIn), (& $money $r.Low), (& $money $r.Mid), (& $money $r.High), (& $money $r.Real))
+    }
+    $c.Grid.ClearSelection()
+    $c.Chart.Invalidate()
+}
+
+function Write-SavingsCalcChart {
+    param($G, [int]$W, [int]$H)
+    $p = $script:Pal
+    $G.Clear($p.Card)
+    $c = $script:CalcCtl
+    if ($null -eq $c -or $null -eq $c.Series) { return }
+    $s = $c.Series
+    $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $n = $s.Mid.Count
+    if ($n -lt 2) { return }
+    $top = [math]::Max([double]$s.High[-1].Value, [double]$s.Mid[-1].PaidIn)
+    foreach ($pt in $s.High) { if ($pt.Value -gt $top) { $top = $pt.Value } }
+    if ($s.Goal -gt 0 -and $s.Goal -le $top * 2.0) { $top = [math]::Max($top, $s.Goal) }
+    if ($top -le 0) { return }
+    $top *= 1.08
+    $L = S 70; $R = $W - (S 14); $T = S 26; $B = $H - (S 22)
+    $toX = { param([int]$i) [float]($L + ($R - $L) * ($i / [double]($n - 1))) }
+    $toY = { param([double]$val) [float]($B - ($B - $T) * ([math]::Max(0.0, $val) / $top)) }
+    $priv = [bool]$script:Config.PrivacyMode
+    $gridPen = New-Object System.Drawing.Pen($p.Grid, [float]1)
+    $muted = New-Object System.Drawing.SolidBrush($p.Muted)
+    try {
+        for ($k = 0; $k -le 4; $k++) {
+            $val = $top * $k / 4.0
+            $y = & $toY $val
+            $G.DrawLine($gridPen, [float]$L, $y, [float]$R, $y)
+            $lbl = if ($priv) { [string]([char]0x2022) * 3 } else { "{0:N0}" -f $val }
+            $sz = $G.MeasureString($lbl, $fontAxis)
+            $G.DrawString($lbl, $fontAxis, $muted, [float]($L - $sz.Width - (S 4)), [float]($y - $sz.Height / 2))
+        }
+        $years = ($n - 1) / 12
+        $step = [int][math]::Max(1, [math]::Ceiling($years / 8.0))
+        for ($yr = 0; $yr -le $years; $yr += $step) {
+            $lbl = [string]((Get-Date).Year + $yr)
+            $sz = $G.MeasureString($lbl, $fontAxis)
+            $x = [math]::Min([float]($R - $sz.Width), [math]::Max([float]$L, [float]((& $toX ($yr * 12)) - $sz.Width / 2)))
+            $G.DrawString($lbl, $fontAxis, $muted, [float]$x, [float]($B + (S 4)))
+        }
+        $lines = @(
+            @{ S = $s.High; F = "Value"; C = $colGreen; W = 1.4; Dash = $false; N = (Tr "oben") }
+            @{ S = $s.Mid; F = "Value"; C = $p.Accent; W = 2.2; Dash = $false; N = (Tr "Mitte") }
+            @{ S = $s.Low; F = "Value"; C = $p.Warn; W = 1.4; Dash = $false; N = (Tr "unten") }
+            @{ S = $s.Mid; F = "PaidIn"; C = $p.Muted; W = 1.3; Dash = $true; N = (Tr "Eingezahlt") }
+        )
+        $lx = $L
+        foreach ($ln in $lines) {
+            $pen = New-Object System.Drawing.Pen($ln.C, [float]$ln.W)
+            if ($ln.Dash) { $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash }
+            $pts = New-Object System.Drawing.PointF[] $n
+            for ($i = 0; $i -lt $n; $i++) { $pts[$i] = New-Object System.Drawing.PointF((& $toX $i), (& $toY ([double]$ln.S[$i].($ln.F)))) }
+            $G.DrawLines($pen, $pts)
+            $G.DrawLine($pen, [float]$lx, [float](S 12), [float]($lx + (S 16)), [float](S 12))
+            $G.DrawString($ln.N, $fontAxis, $muted, [float]($lx + (S 20)), [float](S 5))
+            $lx += (S 34) + [int]$G.MeasureString($ln.N, $fontAxis).Width
+            $pen.Dispose()
+        }
+        if ($s.Goal -gt 0 -and $s.Goal -le $top) {
+            $gp = New-Object System.Drawing.Pen($p.Text, [float]1)
+            $gp.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dot
+            $y = & $toY $s.Goal
+            $G.DrawLine($gp, [float]$L, $y, [float]$R, $y)
+            $G.DrawString((Tr "Ziel"), $fontAxis, $muted, [float]($L + (S 4)), [float]($y - (S 15)))
+            $gp.Dispose()
+        }
+    } finally { $gridPen.Dispose(); $muted.Dispose() }
+}
+
+function Export-SavingsCalcCsv {
+    param([string]$Path = "")
+    $c = $script:CalcCtl
+    if ($null -eq $c -or $null -eq $c.Series) { return }
+    if (-not $Path) {
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "CSV (*.csv)|*.csv"; $sfd.FileName = "TerminalWidget-Sparrechner.csv"
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $Path = $sfd.FileName }
+        $sfd.Dispose()
+        if (-not $Path) { return }
+    }
+    try {
+        $heads = @($c.Grid.Columns | ForEach-Object { [string]$_.HeaderText })
+        $rows = foreach ($r in $c.Grid.Rows) { ,@($r.Cells | ForEach-Object { [string]$_.Value }) }
+        [System.IO.File]::WriteAllText($Path, (ConvertTo-CsvText -Headers $heads -Rows @($rows)), (New-Object System.Text.UTF8Encoding($true)))
+        Set-TransientStatus ((Tr "Exportiert:") + " " + [System.IO.Path]::GetFileName($Path)) 4
+    } catch { Show-InfoBox ((Tr "Export fehlgeschlagen:") + " " + $_.Exception.Message) (Tr "Sparrechner") }
+}
+
+function Show-SavingsCalcDialog {
+    param($Owner = $null)
+    if ($null -ne $script:CalcCtl) { return }
+    $p = $script:Pal
+    $aT = [System.Windows.Forms.AnchorStyles]::Top; $aB = [System.Windows.Forms.AnchorStyles]::Bottom
+    $aL = [System.Windows.Forms.AnchorStyles]::Left; $aR = [System.Windows.Forms.AnchorStyles]::Right
+    $dlg = New-DialogForm -Title "Sparrechner" -W (S 960) -H (S 600) -Key "SavingsCalc"
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+    $dlg.MaximizeBox = $true
+    $dlg.MinimumSize = New-Object System.Drawing.Size((S 860), (S 540))
+    $dlg.KeyPreview = $true
+    $dlg.Add_KeyDown({ param($sender, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $sender.Close() } })
+
+    # prefill: depot value, active savings plans, goal of this depot
+    $base = Get-AnalysisBase
+    $holdings = Get-HoldingsValue -Holdings $script:Portfolio -Base $base
+    $monthly = 0.0
+    $amounts = Get-ActivePlanAmounts -Plans $script:SavingsPlans.ToArray()
+    foreach ($cur in @($amounts.Keys)) { $monthly += Convert-CurrencyValue -Amount ([double]$amounts[$cur]) -FromCurrency ([string]$cur) -ToCurrency $base }
+    $goal = [double](Get-DepotGoal -Goals $script:Config.DepotGoals -Id ([string]$script:Config.ActiveDepot)).Value
+    if ($goal -gt 0 -and [string]$script:Config.Currency -ne $base) { $goal = Convert-CurrencyValue -Amount $goal -FromCurrency ([string]$script:Config.Currency) -ToCurrency $base }
+    $a = Get-CalcAssumptions
+    $values = [ordered]@{
+        Start = "{0:0}" -f [double]$holdings.Value; Monthly = "{0:0}" -f $monthly; Goal = $(if ($goal -gt 0) { "{0:0}" -f $goal } else { "" })
+        Return = "{0:0.##}" -f $a.Return; Spread = "{0:0.##}" -f $a.Spread; Years = "{0:0}" -f $a.Years; Increase = "{0:0.##}" -f $a.Increase; Inflation = "{0:0.##}" -f $a.Inflation
+    }
+    $inputs = @{}
+    $labels = @{ Start = ((Tr "Startwert ({0})") -f $base); Monthly = ((Tr "Sparrate je Monat ({0})") -f $base); Goal = ((Tr "Ziel ({0}, optional)") -f $base)
+        Return = (Tr "Rendite p.a. %"); Spread = (Tr "Spanne +/- %"); Years = (Tr "Laufzeit (Jahre)"); Increase = (Tr "Sparrate steigt p.a. %"); Inflation = (Tr "Inflation p.a. %") }
+    $y = S 36
+    [void](New-V8Label $dlg (Tr "Deine Annahmen") (S 12) (S 12) (S 190))
+    foreach ($k in $values.Keys) {
+        [void](New-V8Label $dlg $labels[$k] (S 12) $y (S 190) -Muted)
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.SetBounds((S 12), ($y + (S 19)), (S 180), (S 24)); $tb.BackColor = $p.Input; $tb.ForeColor = $p.Text
+        $tb.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle; $tb.Text = $values[$k]; $tb.AccessibleName = $labels[$k]
+        if ([bool]$script:Config.PrivacyMode -and $k -in @("Start", "Monthly", "Goal")) { $tb.UseSystemPasswordChar = $true }
+        $dlg.Controls.Add($tb)
+        $inputs[$k] = $tb
+        $y += S 52
+    }
+    $chart = New-Object System.Windows.Forms.Panel
+    $chart.SetBounds((S 208), (S 12), (S 740), (S 232)); $chart.Anchor = $aT -bor $aL -bor $aR
+    Enable-DoubleBuffering -Control $chart
+    $chart.Add_Paint({ param($sender, $e) try { Write-SavingsCalcChart -G $e.Graphics -W $sender.ClientSize.Width -H $sender.ClientSize.Height } catch { Write-WidgetLog "Savings chart: $($_.Exception.Message)" "WARN" } })
+    $chart.Add_Resize({ param($sender, $e) $sender.Invalidate() })
+    $dlg.Controls.Add($chart)
+    $result = New-V8Label $dlg "" (S 208) (S 252) (S 740) (S 70)
+    $result.Anchor = $aT -bor $aL -bor $aR
+    $grid = New-V8Grid $dlg (S 208) (S 326) (S 740) (S 196)
+    $grid.Anchor = $aT -bor $aB -bor $aL -bor $aR
+    foreach ($cd in @(@("Years", "Jahre", 40), @("Year", "Jahr", 46), @("Paid", "Eingezahlt", 90), @("Low", "unten", 90), @("Mid", "Mitte", 90), @("High", "oben", 90), @("Real", "Kaufkraft (Mitte)", 110))) {
+        Add-V8Column $grid $cd[0] $cd[1] $cd[2] -ReadOnly
+        $grid.Columns[$cd[0]].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
+    }
+    $note = New-V8Label $dlg (Tr "Rechenbeispiel mit deinen Annahmen und gleichbleibender Rendite. Keine Vorhersage und keine Anlageberatung. Ohne Steuern und Gebühren; echte Kurse schwanken.") (S 208) (S 528) (S 740) (S 32) -Muted
+    $note.Anchor = $aB -bor $aL -bor $aR
+    $bCsv = New-V8Button $dlg (Tr "Als CSV speichern ...") (S 208) (S 564) (S 180)
+    $bClose = New-V8Button $dlg (Tr "Schließen") (S 848) (S 564) (S 100)
+    $bCsv.Anchor = $aB -bor $aL; $bClose.Anchor = $aB -bor $aR
+    $bClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.CancelButton = $bClose
+    $bCsv.Add_Click({ Export-SavingsCalcCsv })
+
+    $hint = ""
+    if ($holdings.Missing -gt 0) { $hint = (Tr "Startwert unvollständig: für {0} Positionen fehlt noch ein Kurs.") -f $holdings.Missing }
+    $script:CalcCtl = @{ Dlg = $dlg; Inputs = $inputs; Chart = $chart; Result = $result; Grid = $grid; Series = $null; Base = $base; Ready = $true }
+    if ($hint) { $note.Text = $hint + " " + $note.Text }
+    foreach ($tb in $inputs.Values) { $tb.Add_TextChanged({ Update-SavingsCalc }) }
+    $dlg.Add_Shown({ Update-SavingsCalc })
+    try {
+        [void]$dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form }))
+    } finally {
+        # remember the assumptions (not the amounts)
+        $keep = [ordered]@{}
+        foreach ($k in @("Return", "Spread", "Years", "Increase", "Inflation")) {
+            $t = [string]$inputs[$k].Text
+            $keep[$k] = if ((Test-DecimalInput $t) -and $t.Trim()) { Parse-DecimalInput $t } else { (Get-CalcAssumptions)[$k] }
+        }
+        $script:Config.SavingsCalc = [PSCustomObject]$keep
+        Save-Config
+        $script:CalcCtl = $null
+        $dlg.Dispose()
+    }
+}
+$script:CalcCtl = $null
+[void](Add-BarItem $mbPort "Sparrechner ..." { Show-SavingsCalcDialog })

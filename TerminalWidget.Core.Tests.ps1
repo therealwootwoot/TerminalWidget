@@ -3441,3 +3441,54 @@ Describe "One position in detail (v11.4)" {
         @($p | Where-Object { $_.Id -eq "Share" })[0].Text | Should -Be "40.0 %"
     }
 }
+
+Describe "Savings calculator (v11.6)" {
+    It "adds the monthly amount without any return" {
+        $s = @(Get-Projection -Start 1000 -Monthly 100 -ReturnPct 0 -Months 24)
+        $s.Count | Should -Be 25
+        $s[-1].Value | Should -Be 3400
+        $s[-1].PaidIn | Should -Be 3400
+    }
+    It "compounds the yearly return over twelve months" {
+        $s = @(Get-Projection -Start 1000 -Monthly 0 -ReturnPct 10 -Months 12)
+        [math]::Round($s[-1].Value, 6) | Should -Be 1100
+        $s[-1].PaidIn | Should -Be 1000
+    }
+    It "raises the monthly amount after each full year" {
+        $s = @(Get-Projection -Start 0 -Monthly 100 -ReturnPct 0 -Months 25 -IncreasePct 10)
+        [math]::Round($s[12].Value, 2) | Should -Be 1200
+        [math]::Round($s[13].Value - $s[12].Value, 2) | Should -Be 110
+        [math]::Round($s[25].Value - $s[24].Value, 2) | Should -Be 121
+    }
+    It "shows purchasing power with inflation" {
+        $s = @(Get-Projection -Start 1000 -Monthly 0 -ReturnPct 2 -Months 12 -InflationPct 2)
+        [math]::Round($s[-1].Real, 6) | Should -Be 1000
+    }
+    It "finds when a goal is reached" {
+        $s = @(Get-Projection -Start 0 -Monthly 100 -ReturnPct 0 -Months 120)
+        Get-MonthsToGoal -Series $s -Goal 1200 | Should -Be 12
+        Get-MonthsToGoal -Series $s -Goal 999999 | Should -Be -1
+        Get-MonthsToGoal -Series $s -Goal 0 | Should -Be -1
+    }
+    It "works out the monthly amount needed for a goal" {
+        Get-RequiredMonthly -Start 0 -Goal 12000 -ReturnPct 0 -Months 120 | Should -Be 100
+        Get-RequiredMonthly -Start 5000 -Goal 4000 -ReturnPct 0 -Months 12 | Should -Be 0
+        $m = Get-RequiredMonthly -Start 10000 -Goal 100000 -ReturnPct 6 -Months 180 -IncreasePct 2
+        [math]::Round(@(Get-Projection -Start 10000 -Monthly $m -ReturnPct 6 -Months 180 -IncreasePct 2)[-1].Value, 2) | Should -Be 100000
+    }
+    It "gives one row per year" {
+        $s = @(Get-Projection -Start 100 -Monthly 10 -ReturnPct 3 -Months 36)
+        $r = @(Get-ProjectionRows -Low $s -Mid $s -High $s -StartYear 2026)
+        $r.Count | Should -Be 3
+        $r[2].Year | Should -Be 2029
+    }
+    It "sums only active savings plans per currency" {
+        $plans = @(
+            [PSCustomObject]@{ Amount = 100; Currency = "EUR"; Active = $true; Start = "2026-01-01"; Increase = 0 },
+            [PSCustomObject]@{ Amount = 50; Currency = "EUR"; Active = $true; Start = "2026-01-01"; Increase = 0 },
+            [PSCustomObject]@{ Amount = 70; Currency = "USD"; Active = $false; Start = "2026-01-01"; Increase = 0 })
+        $a = Get-ActivePlanAmounts -Plans $plans -Today "2026-11-27"
+        $a["EUR"] | Should -Be 150
+        $a.ContainsKey("USD") | Should -BeFalse
+    }
+}

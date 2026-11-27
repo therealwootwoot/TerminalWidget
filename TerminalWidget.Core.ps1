@@ -5232,6 +5232,72 @@ function Get-PositionTiles {
     )
 }
 
+# ---- savings calculator (v11.6) ----------------------------------------------
+# A calculation with the user's own assumptions (steady return), not a forecast.
+function Get-Projection {
+    # one entry per month 0..Months: Value, PaidIn, Real (value in today's purchasing power).
+    # The monthly amount is paid at the end of each month and rises by IncreasePct after every full year.
+    param([double]$Start, [double]$Monthly, [double]$ReturnPct, [int]$Months, [double]$IncreasePct = 0.0, [double]$InflationPct = 0.0)
+    $Months = [math]::Max(0, [math]::Min(720, $Months))
+    $rate = [math]::Pow(1.0 + [math]::Max(-99.0, $ReturnPct) / 100.0, 1.0 / 12.0) - 1.0
+    $infl = [math]::Pow(1.0 + [math]::Max(-99.0, $InflationPct) / 100.0, 1.0 / 12.0)
+    $out = New-Object System.Collections.Generic.List[PSObject]
+    $v = $Start; $paid = $Start; $m = $Monthly; $deflate = 1.0
+    $out.Add([PSCustomObject]@{ Month = 0; Value = $v; PaidIn = $paid; Real = $v })
+    for ($i = 1; $i -le $Months; $i++) {
+        if ($i -gt 1 -and (($i - 1) % 12) -eq 0) { $m *= (1.0 + $IncreasePct / 100.0) }
+        $v = $v * (1.0 + $rate) + $m
+        $paid += $m
+        $deflate *= $infl
+        $out.Add([PSCustomObject]@{ Month = $i; Value = $v; PaidIn = $paid; Real = $v / $deflate })
+    }
+    return $out.ToArray()
+}
+
+function Get-MonthsToGoal {
+    # first month in which the value reaches the goal; -1 = not within the series
+    param($Series, [double]$Goal)
+    if ($Goal -le 0) { return -1 }
+    foreach ($s in @($Series)) { if ([double]$s.Value -ge $Goal - 0.005) { return [int]$s.Month } }
+    return -1
+}
+
+function Get-RequiredMonthly {
+    # monthly amount needed to reach Goal after Months (0 = the start value is enough, NaN = no months)
+    param([double]$Start, [double]$Goal, [double]$ReturnPct, [int]$Months, [double]$IncreasePct = 0.0)
+    if ($Months -le 0 -or $Goal -le 0) { return [double]::NaN }
+    # the end value rises in a straight line with the monthly amount
+    $none = @(Get-Projection -Start $Start -Monthly 0 -ReturnPct $ReturnPct -Months $Months -IncreasePct $IncreasePct)[-1].Value
+    if ($none -ge $Goal) { return 0.0 }
+    $one = @(Get-Projection -Start $Start -Monthly 1 -ReturnPct $ReturnPct -Months $Months -IncreasePct $IncreasePct)[-1].Value
+    return ($Goal - $none) / ($one - $none)
+}
+
+function Get-ProjectionRows {
+    # yearly rows of the three scenarios (low / mid / high series of equal length)
+    param($Low, $Mid, $High, [int]$StartYear)
+    $rows = @()
+    $n = @($Mid).Count
+    for ($i = 12; $i -lt $n; $i += 12) {
+        $rows += [PSCustomObject]@{ Years = [int]($i / 12); Year = $StartYear + [int]($i / 12); PaidIn = $Mid[$i].PaidIn; Low = $Low[$i].Value; Mid = $Mid[$i].Value; High = $High[$i].Value; Real = $Mid[$i].Real }
+    }
+    return $rows
+}
+
+function Get-ActivePlanAmounts {
+    # what the active savings plans buy per month now -> @{ currency = amount }
+    param($Plans, [string]$Today = "")
+    if (-not $Today) { $Today = (Get-Date).ToString("yyyy-MM-dd") }
+    $sum = @{}
+    foreach ($p in @($Plans)) {
+        if ($null -eq $p -or -not [bool]$p.Active) { continue }
+        $cur = Get-NormalizedCurrencyCode ([string]$p.Currency)
+        if (-not $cur) { $cur = "EUR" }
+        $sum[$cur] = [double]$sum[$cur] + (Get-SavingsPlanAmount -Plan $p -Date $Today)
+    }
+    return $sum
+}
+
 function Get-TileGrid {
     # places Count tiles in as few rows as possible (at most PerRowMax each)
     # -> @{ Rows; Height; Rects = @{ X; Y; W; H } }
@@ -5536,7 +5602,7 @@ function Get-PortableSettingKeys {
         "PctAxis", "ShowSR", "SignalAlerts", "PeerGroups", "NewsFeeds",
         "NewsSources", "NewsSourcesMigrated", "NewsYahoo", "NewsYahooNotify", "NewsViewHidden", "NewsAliases",
         "NewsInclude", "NewsExclude", "NewsHighlight", "NewsMergeSimilar", "NewsPreview", "NewsImages", "NewsHistoryDays", "ShowNewsMarkers",
-        "ColorRules", "CustomThemes", "OwnTargets", "ColumnSets", "ColumnSetMap", "KeyMap", "Favorites", "KpiTiles", "UserProfiles",
+        "ColorRules", "CustomThemes", "OwnTargets", "ColumnSets", "ColumnSetMap", "KeyMap", "Favorites", "KpiTiles", "SavingsCalc", "UserProfiles",
         "AlertTemplates", "EarningsLeadDays", "ExDivLeadDays", "SummaryAuto", "GoalDepotValue", "GoalDividendYear", "DepotGoals", "GoalAllValue", "GoalAllDividend"
     )
 }
