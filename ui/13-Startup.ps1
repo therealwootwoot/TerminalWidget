@@ -1599,6 +1599,20 @@ function Invoke-SmokeTest {
                 return ""
             } 2500
             if ([double]$script:Config.SavingsCalc.Years -ne 30) { throw "assumptions not remembered" }
+            $keepP = $script:Config.PrivacyMode
+            try {
+                $script:Config.PrivacyMode = $true
+                & $probeRun { Show-SavingsCalcDialog } {
+                    $c = $script:CalcCtl
+                    if ($null -eq $c) { return "window not open" }
+                    $c.Dlg.Refresh()
+                    & $script:SmokeShot "47-savings-calculator-privacy" $c.Dlg
+                    if ($c.Result.Text -match '\d EUR') { return "amount visible: $($c.Result.Text)" }
+                    foreach ($cell in $c.Grid.Rows[0].Cells) { if ([string]$cell.Value -match 'EUR') { return "amount in table" } }
+                    if (-not $c.Inputs["Start"].UseSystemPasswordChar) { return "start value not masked" }
+                    return ""
+                } 2500
+            } finally { $script:Config.PrivacyMode = $keepP }
         } finally { $script:Config.SavingsCalc = $keepC; $script:Config.DepotGoals = $keepG; Save-Config }
     } 5000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500

@@ -817,6 +817,7 @@ function Show-SavingsCalcDialog {
     foreach ($cd in @(@("Years", "Jahre", 40), @("Year", "Jahr", 46), @("Paid", "Eingezahlt", 90), @("Low", "unten", 90), @("Mid", "Mitte", 90), @("High", "oben", 90), @("Real", "Kaufkraft (Mitte)", 110))) {
         Add-V8Column $grid $cd[0] $cd[1] $cd[2] -ReadOnly
         $grid.Columns[$cd[0]].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
+        $grid.Columns[$cd[0]].HeaderCell.Style.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight
     }
     $note = New-V8Label $dlg (Tr "Rechenbeispiel mit deinen Annahmen und gleichbleibender Rendite. Keine Vorhersage und keine Anlageberatung. Ohne Steuern und Gebühren; echte Kurse schwanken.") (S 208) (S 528) (S 740) (S 32) -Muted
     $note.Anchor = $aB -bor $aL -bor $aR
