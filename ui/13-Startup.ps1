@@ -1648,8 +1648,9 @@ function Invoke-SmokeTest {
                     if ($heads.Count -lt 8) { return "only $($heads.Count) sections: $($heads -join '; ')" }
                     if ($html -notmatch '<svg ') { return "no chart" }
                     if ([bool]$script:Config.PrivacyMode) {
-                        $left = [regex]::Match($html, '<td[^>]*>[^<]*\d[^<]*\s(EUR|USD)</td>')
-                        if ($left.Success) { return "amount in private report: $($left.Value)" }
+                        $figures = @([regex]::Split($html, '(?=<h2>)') | Where-Object { $_ -match '<h2>' })[0]
+                        $left = [regex]::Match($figures, '<td[^>]*>[^<]*\d[^<]*\s(EUR|USD)</td>')
+                        if ($left.Success) { return "amount in private key figures: $($left.Value)" }
                         if ($html -match 'text-anchor="end" dominant-baseline') { return "axis amounts in private report" }
                         # strict: apart from the key figures (masked by id) a number may only stand in these columns
                         $free = @("Ticker", "Seit", "XIRR p.a.", "Gruppe", "Anteil", "Jahr", "Jan", "Feb", "Mär", "Mrz", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez", "Gesamt %", "Kennzahl", "Depot", "Benchmark",
