@@ -2855,6 +2855,7 @@ Describe "V7.3 helpers" {
         Get-ShortMarketText "Zu - öffnet in 2h 49m" | Should -Be "Zu · 2h 49m"
         Get-ShortMarketText "Offen - zu in 3h" | Should -Be "Offen · 3h"
         Get-ShortMarketText "Handel 24/7" | Should -Be "Handel 24/7"
+        Get-ShortMarketText "Closed - opens in 2h 49m" | Should -Be "Closed · 2h 49m"
     }
     It "keeps price columns unmasked when the header names the currency" {
         Test-AmountColumn "EK (USD)" | Should -BeFalse

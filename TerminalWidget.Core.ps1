@@ -4879,7 +4879,7 @@ function Get-PollNote {
 function Get-ShortMarketText {
     # v7.3: shorter market status for narrow windows
     param([string]$Text)
-    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in) ', ' · ' -replace ' - öffnet ', ' · ')
+    return (([string]$Text) -replace ' - (öffnet in|zu in|Handel in|Ende in|opens in|closes in|trading in|ends in) ', ' · ' -replace ' - (öffnet|opens) ', ' · ')
 }
 
 function Get-WatchPanelWidths {
@@ -5093,6 +5093,7 @@ function ConvertTo-EnglishStatus {
     $t = $Text
     foreach ($r in @(
         @('Teilweise veraltete Daten \((\d+) Fehler\)', 'Some data is out of date ($1 errors)'),
+        @('Offline / API nicht erreichbar', 'Offline / API not reachable'), @('Rate-Limit: Pause bis', 'Rate limit: paused until'),
         @('Gebuchte Positionen, Basiswährung', 'Booked positions, base currency'),
         @('^Stand (?=\d)', 'As of '),
         @('\(vor (\S+) (s|min)\)', '($1 $2 ago)'),
