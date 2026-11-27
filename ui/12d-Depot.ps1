@@ -172,9 +172,9 @@ function Start-GoalDataLoad {
         Start-FetchJob -Urls @($urls.Values) -MaxConcurrency 4 -Context @{ Urls = $urls } -OnComplete {
             param($Box, $Ctx)
             foreach ($s in @($Ctx.Urls.Keys)) {
-                $j = $Box.Results[$Ctx.Urls[$s]]
-                if ($null -eq $j -or $null -eq $j.chart -or $null -eq $j.chart.result) { continue }
-                try { Update-QuoteFromResult -Sym $s -R @($j.chart.result)[0] -RsiPeriod ([int]$script:Config.RsiPeriod) }
+                $r = Get-ChartResult $Box.Results[$Ctx.Urls[$s]]
+                if ($null -eq $r) { continue }
+                try { Update-QuoteFromResult -Sym $s -R $r -RsiPeriod ([int]$script:Config.RsiPeriod) }
                 catch { Write-WidgetLog "Goal quote ${s}: $($_.Exception.Message)" "WARN" }
             }
             if ($null -ne $script:GoalCtl) { Update-GoalsView }
@@ -296,7 +296,7 @@ function Show-GoalsCostsDialog {
     $gg = New-V8Grid $dlg (S 12) (S 42) (S 736) (S 150) -Editable
     $gg.AllowUserToResizeRows = $false
     $gg.RowTemplate.Height = S 28
-    foreach ($c in @(@("Depot", "Depot", 120), @("Value", "Depotwert", 90), @("ValueGoal", "Ziel Wert", 85), @("ValuePct", "Stand", 90), @("Income", "Dividenden 12 M", 95), @("DivGoal", "Ziel Dividenden", 95), @("DivPct", "Stand ", 90))) {
+    foreach ($c in @(@("Depot", "Depot", 120), @("Value", "Depotwert", 90), @("ValueGoal", "Ziel Wert", 85), @("ValuePct", "Stand", 90), @("Income", "Div. 12 Monate", 100), @("DivGoal", "Ziel Dividenden", 95), @("DivPct", "Stand ", 90))) {
         if ($c[0] -in @("ValueGoal", "DivGoal")) { Add-V8Column $gg $c[0] $c[1] $c[2] } else { Add-V8Column $gg $c[0] $c[1] $c[2] -ReadOnly }
     }
     foreach ($n in @("Value", "ValueGoal", "Income", "DivGoal")) { $gg.Columns[$n].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleRight }

@@ -58,7 +58,7 @@ foreach ($pair in @(
     @('Ziele je Depot in {0} - in die Ziel-Spalten tippen (leer = kein Ziel)', 'Goals per portfolio in {0} - type into the goal columns (empty = no goal)'),
     @('Ziel Wert', 'Value goal'),
     @('Stand', 'Progress'),
-    @('Dividenden 12 M', 'Dividends 12 m'),
+    @('Div. 12 Monate', 'Div. 12 months'),
     @('Ziel Dividenden', 'Dividend goal'),
     @('Stand ', 'Progress '),
     @('In diesem Depot dieses Jahr gebucht: {0}', 'Booked in this portfolio this year: {0}'),

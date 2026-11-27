@@ -1392,15 +1392,27 @@ function Invoke-SmokeTest {
                 if ([double]$script:Config.GoalAllValue -ne 20000) { return "total goal not saved" }
                 if ([string]$gc.Goals.Rows[1].Cells["ValuePct"].Value -notmatch '%') { return "no progress for the second depot: '$($gc.Goals.Rows[1].Cells["Value"].Value)'" }
                 & $script:SmokeShot "28-goals-all-depots" $gc.Dlg
+                # background load of a symbol that only the second depot holds
+                [System.IO.File]::WriteAllText((Join-Path $script:DepotDir "smoke-zweit\portfolio.json"), '{"IBM":{"Shares":1,"AvgPrice":100,"Currency":"USD"}}')
+                $script:QuoteStore.Remove("IBM")
+                Start-GoalDataLoad
+                for ($i = 0; $i -lt 40 -and -not $script:QuoteStore.ContainsKey("IBM"); $i++) { Start-Sleep -Milliseconds 250; [System.Windows.Forms.Application]::DoEvents() }
+                if (-not $script:QuoteStore.ContainsKey("IBM")) { $script:SmokeNotes.Add("goals: quote of the second depot not loaded (offline?)") }
+                else {
+                    Update-GoalsView
+                    if ([string]$gc.Goals.Rows[1].Cells["Value"].Value -notmatch '\d') { return "loaded quote not shown" }
+                    $script:SmokeNotes.Add("goals: background quote of the second depot loaded")
+                }
                 return ""
             } 3000
         } finally {
+            $script:QuoteStore.Remove("IBM")
             Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
             $script:Config.Depots = $keepDepots; $script:Config.DepotGoals = $keepGoals
             $script:Config.GoalAllValue = $keepAll[0]; $script:Config.GoalAllDividend = $keepAll[1]
             Save-Config
         }
-    } 8000
+    } 20000
     Invoke-SmokeStep "Design settings" { & $probeRun { Show-SettingsDialog } { & $script:SmokeShot "08-fresh-settings" ([System.Windows.Forms.Form]::ActiveForm); "" } 1200 } 2500
     Invoke-SmokeStep "V7.7 news sources + reading" -CloseAfterMs 2500 -Action {
         Apply-Layout "Standard"; Set-ActiveTab -TabName "News"; & $pump
