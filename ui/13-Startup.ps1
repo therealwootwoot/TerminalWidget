@@ -1501,7 +1501,9 @@ function Invoke-SmokeTest {
                 if ($null -eq $ac) { return "window not open" }
                 if ($null -eq $ac.Model -or $null -eq $ac.Model.Series) { $script:SmokeNotes.Add("tiles: no price history, skipped"); return "" }
                 if (@($ac.Kpi).Count -ne 10) { return "standard tiles: $(@($ac.Kpi).Count)" }
-                $script:SmokeNotes.Add("MEASURE client=$($ac.Dlg.ClientSize) bounds=$($ac.Dlg.Bounds) min=$($ac.Dlg.MinimumSize) page=$($ac.Pages['Perf'].Bounds) chart=$($ac.Chart.Bounds) kpi=$($ac.KpiPanel.Bounds) reload=$($ac.Reload.Bounds) export=$($ac.ExportBtn.Bounds) saved=$($script:Config.DialogPlacement.Analyse)")
+                $pg = $ac.Pages["Perf"]; $free = $ac.Dlg.ClientSize.Width - $pg.Right
+                if ($free -ne (S 12) -or ($ac.Dlg.ClientSize.Height - $pg.Bottom) -ne (S 12)) { return "analysis page does not fill the window: right $free, bottom $($ac.Dlg.ClientSize.Height - $pg.Bottom)" }
+                if ($ac.Reload.Right -ne $ac.ExportBtn.Right -and [math]::Abs($ac.Dlg.ClientSize.Width - $ac.Reload.Right - (S 12)) -gt 2) { return "reload button not at the right edge: $($ac.Reload.Bounds)" }
                 $ac.Dlg.Refresh()
                 & $script:SmokeShot "33-analysis-tiles" $ac.Dlg
                 $twoRows = $ac.KpiPanel.Height; $chartH = $ac.Chart.Height
@@ -2121,6 +2123,23 @@ function Invoke-SmokeTest {
         $script:Config.Language = "EN"
         try { Show-GoalsCostsDialog } finally { $script:Config.Language = $lg }
     }
+    Invoke-SmokeStep "V11.2 English screens" {
+        $keepL = [string]$script:Config.Language
+        try {
+            $script:Config.Language = "EN"; Apply-Language $form; Apply-Language $trayMenu; Apply-Language $chartContextMenu
+            $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+            $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $form.SetBounds($wa.X, $wa.Y, $wa.Width, $wa.Height)
+            [void](Invoke-TerminalCommand "STYLE FRESH")
+            Apply-Layout "Terminal"; Set-ActiveTab -TabName "Watchlist"; Update-AllUiViews; & $pump
+            & $script:SmokeShot "38-en-watchlist"
+            Set-ActiveTab -TabName "Portfolio"; & $pump; & $script:SmokeShot "39-en-portfolio"
+            Set-ActiveTab -TabName "News"; & $pump; & $script:SmokeShot "40-en-news"
+            & $probeRun { Show-OverviewDialog } { if ($null -ne $script:Ov) { $script:Ov.Canvas.Refresh(); & $script:SmokeShot "41-en-overview" $script:Ov.Dlg }; "" } 2500
+            & $probeRun { Show-AnalysisDialog -Page "Perf" } { if ($null -ne $script:AnaCtl) { $script:AnaCtl.Dlg.Refresh(); & $script:SmokeShot "42-en-analysis" $script:AnaCtl.Dlg }; "" } 12000
+            & $probeRun { Show-AlertOverviewDialog } { & $script:SmokeShot "43-en-alerts" ([System.Windows.Forms.Form]::ActiveForm); "" } 2500
+        } finally { $script:Config.Language = $keepL; [void](Invoke-TerminalCommand "STYLE REFINED") }
+    } 25000
     Invoke-SmokeStep "Final refresh" { Update-AllUiViews; & $pump }
 
     $rep = [PSCustomObject]@{
