@@ -587,7 +587,8 @@ function Show-PositionDialog {
     $bBook.Add_Click({ Show-TransactionDialog -Ticker $script:PosCtl.Ticker; Update-PositionView })
 
     $script:PosCtl = @{ Dlg = $dlg; Ticker = $sym; TilePanel = $tp; Tiles = @(); Head = $head; Note = $note; Years = $years; Brokers = $brokers; Bookings = $book; Detail = $null; OpenChart = "" }
-    $dlg.Add_Shown({ Update-PositionView; Start-PositionRates })
+    $dlg.Tag = $bClose
+    $dlg.Add_Shown({ param($sender, $e) $sender.ActiveControl = $sender.Tag; Update-PositionView; Start-PositionRates })   # no focus frame around a table
     try {
         [void]$dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form }))
     } finally {
