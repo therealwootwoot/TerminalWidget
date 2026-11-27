@@ -3291,3 +3291,58 @@ Describe "Alert overview and editing (v10.8)" {
         Get-AlertStatusName -Alert $a | Should -Be "Expired"
     }
 }
+
+Describe "Analysis tiles (v11.0)" {
+    It "delivers every extra tile, with a dash where a figure is missing" {
+        $t = @(Get-AnalysisExtraTiles -Base "EUR")
+        $t.Count | Should -Be 10
+        @($t | Where-Object { $_.Text -eq "-" }).Count | Should -Be 10
+    }
+    It "picks the best and the weakest position" {
+        $pos = @([PSCustomObject]@{ Ticker = "A"; Pct = 5.0 }, [PSCustomObject]@{ Ticker = "B"; Pct = -12.5 }, [PSCustomObject]@{ Ticker = "C"; Pct = [double]::NaN }, [PSCustomObject]@{ Ticker = "D"; Pct = 40.0 })
+        $t = @(Get-AnalysisExtraTiles -Positions $pos)
+        $best = @($t | Where-Object { $_.Id -eq "Best" })[0]
+        $worst = @($t | Where-Object { $_.Id -eq "Worst" })[0]
+        $best.Text | Should -BeLike "D*"
+        $best.Kind | Should -Be "up"
+        $worst.Text | Should -BeLike "B*"
+        $worst.Kind | Should -Be "down"
+    }
+    It "marks a drawdown red and leaves volatility neutral" {
+        $t = @(Get-AnalysisExtraTiles -MaxDrawdown -18 -Vol 22)
+        @($t | Where-Object { $_.Id -eq "Drawdown" })[0].Kind | Should -Be "down"
+        @($t | Where-Object { $_.Id -eq "Vola" })[0].Kind | Should -Be "flat"
+    }
+    It "counts the dividends of this year only" {
+        Get-DividendsSince -Dates @("2025-06-01", "2025-12-31", "2026-03-01", "2026-09-01") -Cumulative @(10, 25, 40, 70) -From "2026-01-01" | Should -Be 45
+        Get-DividendsSince -Dates @("2026-03-01") -Cumulative @(7) -From "2026-01-01" | Should -Be 7
+    }
+    It "uses one row up to six tiles and then more rows" {
+        (Get-TileGrid -Count 6 -Width 976 -RowHeight 56 -Gap 8).Rows | Should -Be 1
+        $g = Get-TileGrid -Count 10 -Width 976 -RowHeight 56 -Gap 8
+        $g.Rows | Should -Be 2
+        $g.Height | Should -Be 120
+        @($g.Rects)[5].Y | Should -Be 64
+        @($g.Rects)[5].X | Should -Be 0
+        (@($g.Rects)[4].X + @($g.Rects)[4].W) | Should -BeLessOrEqual 976
+        (Get-TileGrid -Count 15 -Width 976 -RowHeight 56 -Gap 8).Rows | Should -Be 3
+    }
+}
+
+Describe "Privacy in the analysis (v11.0)" {
+    It "hides money tiles and keeps percentages" {
+        $dots = [string]([char]0x2022) * 4
+        $t = @(Get-AnalysisKpiTiles -Value 10000 -Invested 8000 -Dividends 200 -Xirr 0.1) + @(Get-AnalysisExtraTiles -Unreal 500 -Fees 12 -Vol 20)
+        $p = @(Protect-KpiTiles $t $true)
+        $p.Count | Should -Be $t.Count
+        foreach ($id in @("Value", "Result", "Div", "Unreal", "Fees")) { @($p | Where-Object { $_.Id -eq $id })[0].Text | Should -Be $dots }
+        @($p | Where-Object { $_.Id -eq "Value" })[0].Sub | Should -Not -Match "\d"
+        @($p | Where-Object { $_.Id -eq "Result" })[0].Sub | Should -Match "%"
+        @($p | Where-Object { $_.Id -eq "Vola" })[0].Text | Should -Match "20"
+        @(Protect-KpiTiles $t $false)[0].Text | Should -Match "EUR"
+    }
+    It "masks the result columns of the return table" {
+        foreach ($h in @("Unrealisiert", "Realisiert", "Gesamt", "Unrealized")) { Test-AmountColumn $h | Should -BeTrue }
+        foreach ($h in @("Gesamt %", "XIRR p.a.", "Seit")) { Test-AmountColumn $h | Should -BeFalse }
+    }
+}

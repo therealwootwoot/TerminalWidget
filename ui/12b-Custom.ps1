@@ -55,6 +55,14 @@ foreach ($pair in @(
     @('Gewinn- und Verlustfarben stellst du in den Einstellungen ein.', 'Gain and loss colours are set in the settings.'),
     @('Speichern und anwenden', 'Save and apply'),
     @('Exportieren ...', 'Export ...'),
+    @('Dividenden im Jahr', 'Dividends this year'),
+    @('Buchgewinn', 'Unrealised gain'),
+    @('Größter Rückgang', 'Max drawdown'),
+    @('Schwankung p.a.', 'Volatility p.a.'),
+    @('Beste Position', 'Best position'),
+    @('Schwächste Position', 'Weakest position'),
+    @('Gegen Benchmark', 'Versus benchmark'),
+    @('Gebühren', 'Fees'),
     @('Alarm-Übersicht ...', 'Alert overview ...'),
     @('Alarm-Übersicht', 'Alert overview'),
     @('erfüllt', 'met'),
@@ -937,27 +945,39 @@ function Show-KeysFavoritesDialog {
 # ==============================================================================
 # analysis tiles: choose and order
 # ==============================================================================
-function Get-KpiTileChoices { return [ordered]@{ "Value" = "Depotwert"; "Result" = "Ergebnis"; "Xirr" = "Rendite p.a."; "Div" = "Dividenden"; "Window" = "Im Zeitraum" } }
+function Get-KpiTileChoices {
+    return [ordered]@{ "Value" = "Depotwert"; "Result" = "Ergebnis"; "Xirr" = "Rendite p.a."; "Window" = "Im Zeitraum"; "Div" = "Dividenden"
+        "DivYear" = "Dividenden im Jahr"; "Unreal" = "Buchgewinn"; "Drawdown" = "Größter Rückgang"; "Vola" = "Schwankung p.a."; "Best" = "Beste Position"
+        "Worst" = "Schwächste Position"; "Real" = "Realisiert"; "Bench" = "Gegen Benchmark"; "Sharpe" = "Sharpe"; "Fees" = "Gebühren" }
+}
+
+function Get-KpiTileSelection {
+    # the user's tiles in their order; without a choice the first ten (two rows)
+    $all = @((Get-KpiTileChoices).Keys)
+    $mine = @(Select-OrderedIds -Available $all -Chosen @($script:Config.KpiTiles | ForEach-Object { [string]$_ }) -EmptyIsNone)
+    if ($mine.Count -eq 0) { return @($all | Select-Object -First 10) }
+    return $mine
+}
 
 function Select-KpiTiles {
     param($Tiles)
     $byId = @{}
     foreach ($t in @($Tiles)) { $byId[[string]$t.Id] = $t }
-    $ids = @(Select-OrderedIds -Available @((Get-KpiTileChoices).Keys) -Chosen @($script:Config.KpiTiles | ForEach-Object { [string]$_ }))
+    $ids = @(Get-KpiTileSelection)
     return @($ids | Where-Object { $byId.ContainsKey($_) } | ForEach-Object { $byId[$_] })
 }
 
 function Show-KpiTilesDialog {
     param($Owner = $null)
-    $sd = New-StandardDialog -Title "Kennzahlen-Kacheln" -Subtitle "Haken = anzeigen. Reihenfolge mit den Pfeilen." -W 420 -BodyH 150 -OkText "Speichern"
+    $sd = New-StandardDialog -Title "Kennzahlen-Kacheln" -Subtitle "Haken = anzeigen. Reihenfolge mit den Pfeilen." -W 420 -BodyH 292 -OkText "Speichern"
     $dlg = $sd.Dlg
     $dlg.TopMost = $true
     $lb = New-Object System.Windows.Forms.CheckedListBox
-    $lb.SetBounds(0, 0, ($sd.Body.Width - (S 80)), (S 146)); $lb.CheckOnClick = $true
+    $lb.SetBounds(0, 0, ($sd.Body.Width - (S 80)), (S 288)); $lb.CheckOnClick = $true
     $lb.BackColor = $script:Pal.Input; $lb.ForeColor = $script:Pal.Text; $lb.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $sd.Body.Controls.Add($lb)
     $all = Get-KpiTileChoices
-    $chosen = @(Select-OrderedIds -Available @($all.Keys) -Chosen @($script:Config.KpiTiles | ForEach-Object { [string]$_ }))
+    $chosen = @(Get-KpiTileSelection)
     $ids = New-Object System.Collections.Generic.List[string]
     foreach ($id in (@($chosen) + @($all.Keys | Where-Object { $chosen -notcontains $_ }))) { $ids.Add($id); [void]$lb.Items.Add((Tr $all[$id]), [bool]($chosen -contains $id)) }
     $script:KpiCtl = @{ List = $lb; Ids = $ids }
@@ -976,7 +996,7 @@ function Show-KpiTilesDialog {
     $dn.Add_Click({ & $script:KpiCtl.Move 1 })
     if ($dlg.ShowDialog($(if ($null -ne $Owner) { $Owner } else { $form })) -eq [System.Windows.Forms.DialogResult]::OK) {
         $sel = @(for ($i = 0; $i -lt $lb.Items.Count; $i++) { if ($lb.GetItemChecked($i)) { $ids[$i] } })
-        if ($sel.Count -eq 0) { $sel = @($all.Keys) }
+        if ($sel.Count -eq 0) { $sel = @() }   # nothing ticked = back to the standard tiles
         $script:Config.KpiTiles = @($sel)
         Save-Config
         if ($null -ne $script:AnaCtl -and $null -ne $script:AnaCtl.Model) { Update-AnalysisPerf }

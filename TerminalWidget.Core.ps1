@@ -5011,6 +5011,76 @@ function Get-AnalysisKpiTiles {
     return $tiles
 }
 
+# ---- more analysis tiles (v11.0) ---------------------------------------------
+function Get-AnalysisExtraTiles {
+    # further key figures; NaN / empty values show "-" so the tiles keep their place.
+    # BestWorst: @{ Ticker; Pct } of the held positions. BenchDiff in points p.a.
+    param([string]$Base = "EUR", [double]$Unreal = [double]::NaN, [double]$Realized = [double]::NaN,
+          [double]$DividendsYear = [double]::NaN, [int]$Year = 0, [double]$Fees = [double]::NaN,
+          [double]$Vol = [double]::NaN, [double]$MaxDrawdown = [double]::NaN, [double]$Sharpe = [double]::NaN,
+          [double]$BenchDiff = [double]::NaN, $Positions = @(), [string]$RangeLabel = "")
+    $kindOf = { param([double]$x) if ([double]::IsNaN($x) -or [math]::Abs($x) -lt 0.005) { return "flat" } elseif ($x -gt 0) { return "up" } else { return "down" } }
+    $num = { param([double]$x, [string]$f, [string]$tail = "") if ([double]::IsNaN($x)) { "-" } else { ($f -f $x) + $tail } }
+    $span = if ($RangeLabel) { "Zeitraum: $RangeLabel" } else { "" }
+    $tile = { param($id, $label, $text, $sub, $kind) [PSCustomObject]@{ Id = $id; Label = $label; Text = $text; Sub = $sub; Kind = $kind } }
+    $held = @(@($Positions) | Where-Object { $null -ne $_ -and -not [double]::IsNaN([double]$_.Pct) } | Sort-Object { [double]$_.Pct })
+    $out = @()
+    $out += & $tile "Unreal" "Buchgewinn" (& $num $Unreal "{0:+#,##0;-#,##0;0}" " $Base") "offene Positionen" (& $kindOf $Unreal)
+    $out += & $tile "Real" "Realisiert" (& $num $Realized "{0:+#,##0;-#,##0;0}" " $Base") "aus Verkäufen" (& $kindOf $Realized)
+    $out += & $tile "DivYear" $(if ($Year -gt 0) { "Dividenden $Year" } else { "Dividenden im Jahr" }) (& $num $DividendsYear "{0:N0}" " $Base") "seit 1. Januar" "flat"
+    $out += & $tile "Fees" "Gebühren" (& $num $Fees "{0:N0}" " $Base") "Orders und Konto, gesamt" "flat"
+    $out += & $tile "Vola" "Schwankung p.a." (& $num $Vol "{0:0.0}" " %") $span "flat"
+    $out += & $tile "Drawdown" "Größter Rückgang" (& $num $MaxDrawdown "{0:0.0}" " %") $span $(if (-not [double]::IsNaN($MaxDrawdown) -and $MaxDrawdown -lt -0.05) { "down" } else { "flat" })
+    $out += & $tile "Sharpe" "Sharpe" (& $num $Sharpe "{0:0.00}") $span "flat"
+    $out += & $tile "Bench" "Gegen Benchmark" (& $num $BenchDiff "{0:+0.0;-0.0;0.0}" " Pkt.") "Rendite p.a." (& $kindOf $BenchDiff)
+    foreach ($pair in @(@("Best", "Beste Position", -1), @("Worst", "Schwächste Position", 0))) {
+        if ($held.Count -eq 0) { $out += & $tile $pair[0] $pair[1] "-" "" "flat"; continue }
+        $p = $held[$pair[2]]
+        $out += & $tile $pair[0] $pair[1] ("{0}  {1:+0.0;-0.0;0.0} %" -f $p.Ticker, [double]$p.Pct) "Gesamtergebnis" (& $kindOf ([double]$p.Pct))
+    }
+    return $out
+}
+
+function Protect-KpiTiles {
+    # privacy mode: money tiles show dots, percentages and ratios stay
+    param($Tiles, [bool]$On = $false)
+    if (-not $On) { return $Tiles }
+    return @(foreach ($t in @($Tiles)) {
+        if ([string]$t.Id -notin @("Value", "Result", "Div", "Window", "Unreal", "Real", "DivYear", "Fees")) { $t; continue }
+        $sub = [string]$t.Sub
+        if ([string]$t.Id -eq "Value") { $sub = "Investiert " + (Protect-Amount "0" $true) }
+        [PSCustomObject]@{ Id = $t.Id; Label = $t.Label; Text = (Protect-Amount ([string]$t.Text) $true); Sub = $sub; Kind = $t.Kind }
+    })
+}
+
+function Get-TileGrid {
+    # places Count tiles in as few rows as possible (at most PerRowMax each)
+    # -> @{ Rows; Height; Rects = @{ X; Y; W; H } }
+    param([int]$Count, [int]$Width, [int]$RowHeight, [int]$Gap, [int]$PerRowMax = 6)
+    if ($Count -le 0 -or $Width -le 0) { return [PSCustomObject]@{ Rows = 1; Height = $RowHeight; Rects = @() } }
+    $rows = [int][math]::Ceiling($Count / [double]$PerRowMax)
+    $per = [int][math]::Ceiling($Count / [double]$rows)
+    $w = [int][math]::Floor(($Width - ($per - 1) * $Gap) / [double]$per)
+    $rects = @(for ($i = 0; $i -lt $Count; $i++) {
+        $r = [int][math]::Floor($i / [double]$per); $c = $i - $r * $per
+        [PSCustomObject]@{ X = $c * ($w + $Gap); Y = $r * ($RowHeight + $Gap); W = $w; H = $RowHeight }
+    })
+    return [PSCustomObject]@{ Rows = $rows; Height = $rows * $RowHeight + ($rows - 1) * $Gap; Rects = $rects }
+}
+
+function Get-DividendsSince {
+    # cumulative dividend series -> what was added from $From (yyyy-MM-dd) on
+    param([string[]]$Dates, [double[]]$Cumulative, [string]$From)
+    $n = [math]::Min(@($Dates).Count, @($Cumulative).Count)
+    if ($n -eq 0) { return [double]::NaN }
+    $before = 0.0
+    for ($i = 0; $i -lt $n; $i++) {
+        if ([string]::CompareOrdinal($Dates[$i], $From) -ge 0) { break }
+        $before = $Cumulative[$i]
+    }
+    return ($Cumulative[$n - 1] - $before)
+}
+
 function Get-DonutSlices {
     # V7.1: slices of the allocation donut. Small shares are merged into "Rest".
     # Start / Sweep in degrees, clockwise from 12 o'clock (GDI+ angle = Start - 90).
@@ -5428,10 +5498,11 @@ function Test-AmountColumn {
     $h = ConvertTo-SearchKey $Header
     if (-not $h -or $h.Contains("%") -or $h -match 'anteil|weight|rendite|return|kgv|ratio|kurs$|price') { return $false }
     foreach ($w in @("betrag", "wert", "gewinn", "verlust", "dividende", "einstand", "kosten", "summe", "saldo", "g/v", "brutto", "netto", "ertrag", "stuck", "beitrag", "kauf / verkauf", "einzahlung", "auszahlung",
+                     "realisiert", "realized", "realised",
                      "amount", "value", "profit", "loss", "dividend", "cost", "total", "gross", "net", "income", "shares", "contribution", "balance", "deposit", "withdrawal")) {
         if ($h.Contains($w)) { return $true }
     }
-    return $false
+    return ($h -eq "gesamt")   # the money column next to "Gesamt %"
 }
 
 function Hide-AmountsInText {
