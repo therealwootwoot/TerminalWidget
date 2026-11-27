@@ -1214,6 +1214,8 @@ function Show-TransactionHistory {
     }
     $grid.Columns["Id"].Visible = $false
     $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    # 10.4: date, type and currency are never cut off; the rest shares what is left
+    foreach ($n in @("Date", "Type", "Cur")) { $grid.Columns[$n].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells }
     $dlg.Controls.Add($grid)
 
     $btnDel = New-Object System.Windows.Forms.Button
